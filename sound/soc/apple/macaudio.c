@@ -147,6 +147,12 @@ static int please_blow_up_my_speakers;
 module_param(please_blow_up_my_speakers, int, 0644);
 MODULE_PARM_DESC(please_blow_up_my_speakers, "Allow unsafe or untested operating configurations");
 
+/* Development only: keep J456 opt-in until hardware validation is complete. */
+static bool j456_quiet_test;
+module_param(j456_quiet_test, bool, 0444);
+MODULE_PARM_DESC(j456_quiet_test,
+		"Experimental J456 playback with a fixed -42 dB hardware ceiling");
+
 SND_SOC_DAILINK_DEFS(primary,
 	DAILINK_COMP_ARRAY(COMP_CPU("mca-pcm-0")), // CPU
 	DAILINK_COMP_ARRAY(COMP_DUMMY()), // CODEC
@@ -602,7 +608,9 @@ static int macaudio_parse_of(struct macaudio_snd_data *ma)
 		speakers = !strcmp(link_name, "Speaker")
 			   || !strcmp(link_name, "Speakers");
 		if (speakers) {
-			if (!ma->cfg->enable_speakers  && !please_blow_up_my_speakers) {
+			if (!ma->cfg->enable_speakers && !please_blow_up_my_speakers &&
+			    !(j456_quiet_test && ma->cfg->amp == AMP_SSM3515 &&
+			      of_machine_is_compatible("apple,j456"))) {
 				dev_err(card->dev, "driver can't assure safety on this model, disabling speakers\n");
 				continue;
 			}
@@ -1099,6 +1107,7 @@ static int macaudio_probe(struct snd_soc_card *card)
 static int macaudio_add_backend_dai_route(struct snd_soc_card *card, struct snd_soc_dai *dai,
 					  bool is_speakers)
 {
+	struct macaudio_snd_data *ma = snd_soc_card_get_drvdata(card);
 	struct snd_soc_dapm_route routes[2];
 	struct snd_soc_dapm_route *r;
 	int nroutes = 0;
@@ -1123,7 +1132,7 @@ static int macaudio_add_backend_dai_route(struct snd_soc_card *card, struct snd_
 	}
 
 	/* If speakers, add sense capture path */
-	if (is_speakers) {
+	if (is_speakers && ma->has_sense) {
 		r = &routes[nroutes++];
 		r->source = dai->stream[SNDRV_PCM_STREAM_CAPTURE].widget->name;
 		r->sink = "Speaker Sense Capture";
@@ -1287,10 +1296,70 @@ static int macaudio_set_speaker(struct snd_soc_card *card, const char *prefix, b
 	return 0;
 }
 
+static int macaudio_ssm3515_lock_controls(struct snd_soc_card *card)
+{
+	static const struct {
+		const char *pattern;
+		unsigned int value;
+		bool enumerated;
+		unsigned int count;
+	} settings[] = {
+		{ "* DAC Analog Gain Select", 0, true, 4 }, /* 8.4 V peak */
+		{ "* Tweeter HPF Switch", 1, false, 2 },
+		{ "* Woofer HPF Switch", 1, false, 2 },
+		{ "* Limiter Threshold", 31, true, 4 }, /* 1 V peak */
+		{ "* Limiter Attack Rate", 3, true, 4 }, /* 20 us/dB */
+		{ "* Limiter Release Rate", 0, true, 4 }, /* 3200 ms/dB */
+		{ "* Limiter Tracking Switch", 0, false, 4 },
+		/* Enable only after all four amplifiers have been configured. */
+		{ "* Limiter Mode", 1, true, 4 },
+	};
+	struct snd_ctl_elem_value *value;
+	struct snd_kcontrol *kctl;
+	unsigned int setting, hits;
+	int i, ret = 0;
+
+	value = kzalloc_obj(*value);
+	if (!value)
+		return -ENOMEM;
+
+	for (setting = 0; setting < ARRAY_SIZE(settings); setting++) {
+		hits = 0;
+		list_for_each_entry(kctl, &card->snd_card->controls, list) {
+			if (!snd_soc_control_matches(kctl, settings[setting].pattern))
+				continue;
+
+			memset(value, 0, sizeof(*value));
+			if (settings[setting].enumerated)
+				value->value.enumerated.item[0] = settings[setting].value;
+			else
+				value->value.integer.value[0] = settings[setting].value;
+
+			ret = kctl->put(kctl, value);
+			if (ret < 0)
+				goto out;
+
+			/* INACTIVE alone is a UI hint, not a write prohibition. */
+			for (i = 0; i < kctl->count; i++)
+				kctl->vd[i].access &= ~SNDRV_CTL_ELEM_ACCESS_WRITE;
+			hits++;
+		}
+		if (hits != settings[setting].count) {
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+	ret = 0;
+out:
+	kfree(value);
+	return ret;
+}
+
 static int macaudio_fixup_controls(struct snd_soc_card *card)
 {
 	struct macaudio_snd_data *ma = snd_soc_card_get_drvdata(card);
 	const char *p;
+	int ret;
 
 	/* Set the card ID early to avoid races with udev */
 	p = strrchr(card->name, ' ');
@@ -1301,6 +1370,30 @@ static int macaudio_fixup_controls(struct snd_soc_card *card)
 
 	if (!ma->has_speakers)
 		return 0;
+
+	/*
+	 * SSM3515 has no V/I feedback. Do not expose a daemon-unlockable
+	 * volume range. This experimental path always retains a -42 dB
+	 * digital ceiling and the lowest analog gain (8.4 V span).
+	 * The codec starts at digital mute; fail probe if any of the four
+	 * amplifiers cannot be constrained. Never use the unsafe override
+	 * to ignore failures in this path.
+	 */
+	if (ma->cfg->amp == AMP_SSM3515 &&
+	    of_machine_is_compatible("apple,j456")) {
+		ret = snd_soc_limit_volume(card, "* DAC Playback Volume",
+					  SSM3515_DB(-42));
+		if (ret != 4)
+			return ret < 0 ? ret : -EINVAL;
+
+		ret = macaudio_ssm3515_lock_controls(card);
+		if (ret)
+			return ret;
+
+		dev_warn(card->dev,
+			 "Experimental SSM3515 playback: fixed -42 dB ceiling, no speaker calibration\n");
+		return 0;
+	}
 
 	/*
 	 * This needs some care to avoid matches against cs42l84's
@@ -1699,7 +1792,10 @@ static int macaudio_snd_platform_probe(struct platform_device *pdev)
 	/* Remove useless controls */
 	if (!data->has_speakers) /* No speakers, remove both */
 		card->num_controls -= MACAUDIO_NUM_SPEAKER_CONTROLS;
-	else if (!data->cfg->safe_vol) /* No safety, remove unlock */
+	else if (!data->cfg->safe_vol ||
+		 (data->cfg->amp == AMP_SSM3515 &&
+		  of_machine_is_compatible("apple,j456")))
+		/* Fixed SSM3515 ceiling cannot be unlocked by userspace. */
 		card->num_controls -= MACAUDIO_NUM_SPEAKER_LIMIT_CONTROLS;
 	else /* Speakers with safety, mark us as such */
 		data->has_safety = true;

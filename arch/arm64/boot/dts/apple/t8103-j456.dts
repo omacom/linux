@@ -104,6 +104,20 @@
 };
 
 &i2c1 {
+	speaker_left_tweeter: codec@14 {
+		compatible = "adi,ssm3515";
+		reg = <0x14>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Left Tweeter";
+	};
+
+	speaker_left_woofer: codec@15 {
+		compatible = "adi,ssm3515";
+		reg = <0x15>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Left Woofer";
+	};
+
 	jack_codec: codec@48 {
 		compatible = "cirrus,cs42l83";
 		reg = <0x48>;
@@ -113,6 +127,22 @@
 		#sound-dai-cells = <0>;
 		cirrus,ts-inv = <1>;
 		sound-name-prefix = "Jack";
+	};
+};
+
+&i2c3 {
+	speaker_right_tweeter: codec@14 {
+		compatible = "adi,ssm3515";
+		reg = <0x14>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Right Tweeter";
+	};
+
+	speaker_right_woofer: codec@15 {
+		compatible = "adi,ssm3515";
+		reg = <0x15>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Right Woofer";
 	};
 };
 
@@ -146,6 +176,20 @@
 	sound {
 		compatible = "apple,j456-macaudio", "apple,macaudio";
 		model = "iMac J456";
+
+		dai-link@0 {
+			link-name = "Speakers";
+
+			cpu {
+				sound-dai = <&mca 0>, <&mca 1>;
+			};
+			codec {
+				sound-dai = <&speaker_left_tweeter>,
+					    <&speaker_left_woofer>,
+					    <&speaker_right_tweeter>,
+					    <&speaker_right_woofer>;
+			};
+		};
 
 		dai-link@1 {
 			link-name = "Headphone Jack";

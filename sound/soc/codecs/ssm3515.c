@@ -7,6 +7,7 @@
 #include <linux/bits.h>
 #include <linux/bitfield.h>
 #include <linux/device.h>
+#include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -53,6 +54,9 @@
 
 #define SSM3515_VBAT_OUT	0x06
 
+#define SSM3515_LIM1		0x07
+#define SSM3515_LIM2		0x08
+
 #define SSM3515_STATUS		0x0a
 #define SSM3515_STATUS_UVLO_REG	BIT(6)
 #define SSM3515_STATUS_LIM_EG	BIT(5)
@@ -81,6 +85,8 @@ static const struct reg_default ssm3515_reg_defaults[] = {
 	{ SSM3515_DAC_VOL, 0x40 },
 	{ SSM3515_SAI1, 0x11 },
 	{ SSM3515_SAI2, 0x00 },
+	{ SSM3515_LIM1, 0xa4 },
+	{ SSM3515_LIM2, 0x51 },
 };
 
 static const struct regmap_config ssm3515_i2c_regmap = {
@@ -111,6 +117,50 @@ static SOC_ENUM_SINGLE_DECL(ssm3515_ana_gain_enum, SSM3515_GEC,
 			    __bf_shf(SSM3515_GEC_ANA_GAIN),
 			    ssm3515_ana_gain_text);
 
+static const char * const ssm3515_limiter_mode_text[] = {
+	"Off", "Always", "Low Battery Mute", "Low Battery Limit",
+};
+
+static const char * const ssm3515_limiter_threshold_text[] = {
+	"15 V", "14.5 V", "14 V", "13.5 V", "13 V", "12.5 V",
+	"12 V", "11.5 V", "11 V", "10.5 V", "10 V", "9.5 V",
+	"9 V", "8.5 V", "8.25 V", "8 V", "7.75 V", "7.5 V",
+	"7.25 V", "7 V", "6.5 V", "6 V", "5.5 V", "5 V",
+	"4.5 V", "4 V", "3.5 V", "3 V", "2.5 V", "2 V", "1.5 V", "1 V",
+};
+
+static const char * const ssm3515_limiter_attack_text[] = {
+	"120 us/dB", "60 us/dB", "30 us/dB", "20 us/dB",
+};
+
+static const char * const ssm3515_limiter_release_text[] = {
+	"3200 ms/dB", "1600 ms/dB", "1200 ms/dB", "800 ms/dB",
+};
+
+static SOC_ENUM_SINGLE_DECL(ssm3515_limiter_mode_enum, SSM3515_LIM1, 0,
+			   ssm3515_limiter_mode_text);
+static SOC_ENUM_SINGLE_DECL(ssm3515_limiter_threshold_enum, SSM3515_LIM2, 3,
+			   ssm3515_limiter_threshold_text);
+static SOC_ENUM_SINGLE_DECL(ssm3515_limiter_attack_enum, SSM3515_LIM1, 4,
+			   ssm3515_limiter_attack_text);
+static SOC_ENUM_SINGLE_DECL(ssm3515_limiter_release_enum, SSM3515_LIM1, 6,
+			   ssm3515_limiter_release_text);
+
+static int ssm3515_status_get(struct snd_kcontrol *kcontrol,
+			      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct ssm3515_data *data = snd_soc_component_get_drvdata(component);
+	unsigned int status;
+	int ret;
+
+	ret = regmap_read(data->regmap, SSM3515_STATUS, &status);
+	if (ret)
+		return ret;
+	ucontrol->value.integer.value[0] = status & 0x7f;
+	return 0;
+}
+
 static const struct snd_kcontrol_new ssm3515_snd_controls[] = {
 	SOC_SINGLE_TLV("DAC Playback Volume", SSM3515_DAC_VOL,
 		       0, 255, 1, ssm3515_dac_volume),
@@ -123,6 +173,20 @@ static const struct snd_kcontrol_new ssm3515_snd_controls[] = {
 	SOC_SINGLE("DAC Invert Switch", SSM3515_SAI1,
 		   __bf_shf(SSM3515_SAI1_DAC_POL), 1, 0),
 	SOC_ENUM("DAC Analog Gain Select", ssm3515_ana_gain_enum),
+	SOC_ENUM("Limiter Threshold", ssm3515_limiter_threshold_enum),
+	SOC_ENUM("Limiter Attack Rate", ssm3515_limiter_attack_enum),
+	SOC_ENUM("Limiter Release Rate", ssm3515_limiter_release_enum),
+	SOC_SINGLE("Limiter Tracking Switch", SSM3515_LIM1, 2, 1, 0),
+	SOC_ENUM("Limiter Mode", ssm3515_limiter_mode_enum),
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Amplifier Status",
+		.access = SNDRV_CTL_ELEM_ACCESS_READ |
+			  SNDRV_CTL_ELEM_ACCESS_VOLATILE,
+		.info = snd_soc_info_volsw,
+		.get = ssm3515_status_get,
+		.private_value = SOC_SINGLE_VALUE(SSM3515_STATUS, 0, 0, 127, 0, 0),
+	},
 };
 
 static void ssm3515_read_faults(struct snd_soc_component *component)
@@ -148,6 +212,12 @@ static void ssm3515_read_faults(struct snd_soc_component *component)
 		FIELD_GET(SSM3515_STATUS_BAT_WARN, ret) ? " bat voltage low warning" : "");
 }
 
+/* Temporary J456 diagnosis; no persistent enablement or volume change. */
+static bool j456_no_auto_powerdown;
+module_param(j456_no_auto_powerdown, bool, 0444);
+MODULE_PARM_DESC(j456_no_auto_powerdown,
+		"J456 diagnostic: disable zero-sample automatic power-down");
+
 static int ssm3515_probe(struct snd_soc_component *component)
 {
 	int ret;
@@ -157,6 +227,20 @@ static int ssm3515_probe(struct snd_soc_component *component)
 			SSM3515_DAC_MUTE, SSM3515_DAC_MUTE);
 	if (ret < 0)
 		return ret;
+
+	/* Keep the output at digital mute until the machine driver sets limits. */
+	ret = snd_soc_component_write(component, SSM3515_DAC_VOL, 0xff);
+	if (ret < 0)
+		return ret;
+
+	if (j456_no_auto_powerdown) {
+		if (!of_machine_is_compatible("apple,j456"))
+			return -EINVAL;
+		ret = snd_soc_component_update_bits(component, SSM3515_PWR,
+				SSM3515_PWR_APWDN_EN, 0);
+		if (ret < 0)
+			return ret;
+	}
 
 	/* Disable the 'master power-down' */
 	ret = snd_soc_component_update_bits(component, SSM3515_PWR,
@@ -177,6 +261,42 @@ static int ssm3515_mute(struct snd_soc_dai *dai, int mute, int direction)
 					    FIELD_PREP(SSM3515_DAC_MUTE, mute));
 	if (ret < 0)
 		return ret;
+	return 0;
+}
+
+static int ssm3515_prepare(struct snd_pcm_substream *substream,
+			   struct snd_soc_dai *dai)
+{
+	static const unsigned int registers[] = {
+		SSM3515_GEC, SSM3515_DAC, SSM3515_DAC_VOL,
+		SSM3515_SAI1, SSM3515_SAI2, SSM3515_LIM1, SSM3515_LIM2,
+	};
+	struct snd_soc_component *component = dai->component;
+	struct ssm3515_data *data = snd_soc_component_get_drvdata(component);
+	unsigned int expected, actual, i;
+	int ret;
+
+	/* Cached controls alone cannot detect a lost amplifier configuration. */
+	for (i = 0; i < ARRAY_SIZE(registers); i++) {
+		ret = regmap_read(data->regmap, registers[i], &expected);
+		if (ret)
+			return ret;
+		ret = regmap_read_bypassed(data->regmap, registers[i], &actual);
+		if (ret)
+			return ret;
+		if (actual != expected) {
+			dev_err(component->dev,
+				"configuration lost at register %#x: expected %#x, read %#x\n",
+				registers[i], expected, actual);
+			/* Force a write: the cached DAC mute bit may already be set. */
+			ret = regmap_read(data->regmap, SSM3515_DAC, &expected);
+			if (ret)
+				return ret;
+			ret = regmap_write(data->regmap, SSM3515_DAC,
+					   expected | SSM3515_DAC_MUTE);
+			return ret ? ret : -EIO;
+		}
+	}
 	return 0;
 }
 
@@ -358,6 +478,7 @@ static int ssm3515_hw_free(struct snd_pcm_substream *substream,
 
 static const struct snd_soc_dai_ops ssm3515_dai_ops = {
 	.mute_stream	= ssm3515_mute,
+	.prepare	= ssm3515_prepare,
 	.hw_params	= ssm3515_hw_params,
 	.set_fmt	= ssm3515_set_fmt,
 	.set_tdm_slot	= ssm3515_set_tdm_slot,
@@ -421,7 +542,12 @@ static int ssm3515_i2c_probe(struct i2c_client *client)
 	if (ret < 0)
 		return dev_err_probe(data->dev, ret,
 				     "performing software reset\n");
-	regmap_reinit_cache(data->regmap, &ssm3515_i2c_regmap);
+	/* Allow the software reset to settle before accessing the device again. */
+	usleep_range(1000, 2000);
+	ret = regmap_reinit_cache(data->regmap, &ssm3515_i2c_regmap);
+	if (ret)
+		return dev_err_probe(data->dev, ret,
+				     "reinitializing register cache\n");
 
 	return devm_snd_soc_register_component(data->dev,
 			&ssm3515_asoc_component,
