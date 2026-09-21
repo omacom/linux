@@ -148,11 +148,7 @@ struct apple_cio {
 
 	struct typec_thunderbolt_switch_dev *tbt_switch;
 
-	/*
-	 * A cable change that arrives while the system is suspending or resuming
-	 * cannot be acted on: see apple_cio_tbt_switch_set(). Both fields are
-	 * covered by @lock.
-	 */
+	/* Defer cable changes during system sleep transitions. */
 	struct notifier_block pm_nb;
 	struct work_struct cable_work;
 	bool pm_transition;
@@ -660,7 +656,6 @@ static int apple_nhi_dp_tunnel_set(struct tb_nhi *nhi, unsigned int port,
 	if (port != 5 && port != 6)
 		return -EINVAL;
 
-	/* Optional graphics provider, no mandatory DRM module dependency. */
 	set = symbol_get(apple_dcp_usb4_set);
 	if (!set)
 		return enable ? -ENODEV : 0;
@@ -953,22 +948,9 @@ static struct platform_device *apple_cio_find_pcie_tunnel(struct apple_cio *acio
 }
 
 /*
- * Release any display source this block still owns, so that its power domains
- * can actually be gated when the links are dropped.
- *
- * The DP IN bridges share ps_atcN_cio with the block itself. A bridge left
- * runtime-active keeps that domain powered even after the block has dropped
- * every link of its own, and cutting power is the only thing that returns the
- * block to reset: the next PMGR reconfigure request then latches its busy bit
- * and never completes, so the port stays dead until the machine reboots.
- *
- * This cannot be left to the Type-C layer. The Thunderbolt layer re-offers the
- * source on its own while a system resume is still in progress, without the
- * cable layer ever learning that it owns one, so by the time a cable teardown
- * runs there is an owner nobody will release.
- *
- * Releasing a DP IN that is not currently owned is a no-op, so both are offered
- * unconditionally.
+ * Release both DP IN sources so their shared ps_atcN_cio domain can power
+ * off and reset ACIO. The CM may reacquire a source during resume without
+ * notifying Type-C.
  */
 static void apple_cio_release_dp_sources(struct apple_cio *acio)
 {
@@ -1179,13 +1161,6 @@ static int apple_cio_apply_cable_state(struct apple_cio *acio)
 {
 	lockdep_assert_held(&acio->lock);
 
-	/*
-	 * Transitions between different cables without a shutdown inbetween are invalid and can
-	 * only happen when there's a bug inside the Type-C PD driver. If we tried such a
-	 * transition, ACIO would crash and then trigger some watchdog that would reset the entire
-	 * SoC a few seconds later. Shutting down instead only makes the connected device not work
-	 * but we should be able to recover once the next cable is plugged in.
-	 */
 	if (acio->current_cable_info && acio->target_cable_info) {
 		dev_err(acio->dev,
 			"Invalid cable transition from 0x%x to 0x%x, shutting down instead\n",
@@ -1193,7 +1168,6 @@ static int apple_cio_apply_cable_state(struct apple_cio *acio)
 		acio->target_cable_info = 0;
 	}
 
-	/* current_cable_info will be updated in the start/stop functions */
 	if (acio->target_cable_info)
 		return apple_cio_start(acio);
 
@@ -1215,11 +1189,6 @@ static void apple_cio_cable_work(struct work_struct *work)
 		return;
 	acio->cable_change_deferred = false;
 
-	/*
-	 * Do not compare target against current here. A cable that was pulled and
-	 * replaced while the system slept ends up with the two equal, but the link
-	 * behind the block is gone all the same, so always cycle the block.
-	 */
 	if (acio->current_cable_info)
 		apple_cio_stop(acio);
 	if (acio->target_cable_info)
@@ -1236,10 +1205,7 @@ static int apple_cio_pm_notify(struct notifier_block *nb, unsigned long action,
 	case PM_SUSPEND_PREPARE:
 	case PM_HIBERNATION_PREPARE:
 	case PM_RESTORE_PREPARE:
-		/*
-		 * Taking the lock here also waits for a cable transition that is
-		 * already in flight, so one can never overlap the sleep.
-		 */
+
 		scoped_guard(mutex, &acio->lock)
 			acio->pm_transition = true;
 		break;
@@ -1250,11 +1216,7 @@ static int apple_cio_pm_notify(struct notifier_block *nb, unsigned long action,
 			acio->pm_transition = false;
 			replay = acio->cable_change_deferred;
 		}
-		/*
-		 * Bringing the block up waits for the NHI to probe, which takes
-		 * seconds, so hand it to a workqueue rather than stalling the
-		 * notifier chain.
-		 */
+
 		if (replay)
 			queue_work(system_long_wq, &acio->cable_work);
 		break;
@@ -1314,23 +1276,12 @@ static int apple_cio_tbt_switch_set(struct typec_thunderbolt_switch_dev *sw,
 		return 0;
 
 	/*
-	 * The only way to put the ACIO block back into reset is to power-gate its
-	 * domains, and genpd refuses to gate any domain while a system sleep
-	 * transition is in progress. ps_atcN_cio is shared with the two DP IN
-	 * bridges, whose prepare callbacks have run and whose complete callbacks
-	 * have not, so its prepared_count stays non-zero for the whole of
-	 * dpm_resume(). A teardown here would leave the block powered and still
-	 * initialised, and the next start's PMGR reconfigure request would then
-	 * never complete, wedging the controller until the machine reboots.
-	 * Clearing the syscore flag mid-transition is worse still: dpm_prepare()
-	 * skipped genpd_prepare() for these domains, so the matching
-	 * genpd_complete() underflows prepared_count and disables power-off for
-	 * them permanently.
-	 *
-	 * The Type-C interrupt is a wakeup source, so a cable change during system
-	 * sleep is replayed from resume_device_irqs() and, after the PD driver's
-	 * debounce, lands here reliably inside that window. Record what was asked
-	 * for and replay it from apple_cio_cable_work() once the transition ends.
+	 * ACIO resets only when its domains power off. During system sleep
+	 * transitions, genpd's prepared_count prevents the shared DP IN domain
+	 * from powering off, so a stop/start would wedge the next PMGR reset.
+	 * Wake IRQs can deliver cable changes in this window; defer them until
+	 * the PM notifier schedules cable_work. Do not change syscore flags
+	 * mid-transition: genpd prepare/complete accounting must stay balanced.
 	 */
 	if (acio->pm_transition) {
 		acio->cable_change_deferred = true;

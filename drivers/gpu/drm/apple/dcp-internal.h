@@ -292,7 +292,6 @@ struct apple_dcp {
 	bool phy_managed_by_typec;
 	u8 dptx_core;
 	bool usb4_claimed;
-	/* Real bridge HPD and CRTC power state, independent of IOMFB HPD. */
 	bool usb4_hpd;
 	bool usb4_poweroff;
 	atomic_t usb4_hpd_irq;

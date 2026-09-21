@@ -8,8 +8,7 @@ Apple silicon Macs can drive a DisplayPort display behind a USB4 dock. The
 stream comes from an external display coprocessor (``dcpext``), leaves the
 SoC through the ATC DP IN bridge of the Type-C port and enters the DP IN
 adapter of the USB4 host router, which tunnels it to the DP OUT adapter of
-the dock. This document describes the Linux implementation, tested on a
-MacBook Pro 16" (j316c) with a CalDigit TS4.
+the dock.
 
 Enabling
 --------

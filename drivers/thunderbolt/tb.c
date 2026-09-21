@@ -1972,10 +1972,7 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel, void *data)
 
 /*
  * Called instead of tb_dp_tunnel_active() when the tunnel is torn down
- * while its DPRX capabilities read poll is still pending, for example when
- * the DP OUT adapter bounces during activation. Drop the domain reference
- * that tb_dp_tunnel_active() would have released; otherwise the domain can
- * never be released and hosts that remove the domain on unplug wedge.
+ * while its DPRX capabilities read poll is still pending
  */
 static void tb_dp_tunnel_cancel(struct tb_tunnel *tunnel, void *data)
 {

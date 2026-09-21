@@ -59,9 +59,6 @@ struct dptxport_apcall_max_drive_settings {
 	u8 _unk1[8];
 };
 
-/* Set: status at 0, count at 16. Get: count at 0, status at 16.
- * Each lane carries one opaque 64-bit IODPDriveSettings value.
- */
 struct dptxport_apcall_drive_settings {
 	__le32 status_or_count;
 	u8 _pad0[12];
@@ -78,12 +75,6 @@ static u32 dptxport_connection_attributes(u8 core, bool supports_hpd)
 {
 	u32 attributes = supports_hpd ? DCPDPTX_REMOTE_PORT_SUPPORTS_HPD : 0;
 
-	/*
-	 * The destination number is zero for a physical DP PHY and nonzero
-	 * for a DP IN adapter. Native DP IN ports advertise role 1 as well as
-	 * HPD support. Firmware uses the role to configure the CIO wrapper;
-	 * selecting a DP IN address alone does not select its tunneled mode.
-	 */
 	if (core)
 		attributes |= FIELD_PREP(DCPDPTX_REMOTE_PORT_ROLE,
 					 DCPDPTX_REMOTE_PORT_ROLE_DPIN);
@@ -352,7 +343,7 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	}
 
 	if (dptx->phy_ops.dp.set_lanes) {
-		if (dptx->atcphy && !service->ep->dcp->dptx_core) {
+		if (dptx->atcphy && !dcp->dptx_core) {
 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
 			if (ret)
 				return ret;
@@ -389,17 +380,10 @@ static int
 dptxport_call_will_change_link_config(struct apple_epic_service *service)
 {
 	struct dptx_port *dptx = service->cookie;
-
 	struct apple_dcp *dcp = service->ep->dcp;
 	struct apple_dcp_typec_route *route = dcp->active_typec_route;
 	int ret;
 
-	/*
-	 * AppleATCDPPort only takes an existing, nonzero-rate connection down.
-	 * On the first configuration AUX/HPD is already active, but the stream
-	 * clock has not been configured. Cycling DPIN here interrupts that
-	 * initial handshake unnecessarily.
-	 */
 	if (dcp->dptx_core && dptx->link_rate) {
 		ret = apple_dpin_set_active(route->dpin_bridge[route->dpin], false);
 		if (ret)
@@ -407,7 +391,6 @@ dptxport_call_will_change_link_config(struct apple_epic_service *service)
 		ret = apple_dpxbar_set_active(route->dpin_xbar[route->dpin], false);
 		if (ret)
 			return ret;
-		/* AUX stays available while the stream clock is reconfigured. */
 		ret = apple_dpin_set_active(route->dpin_bridge[route->dpin], true);
 		if (ret)
 			return ret;
@@ -429,7 +412,6 @@ dptxport_call_did_change_link_config(struct apple_epic_service *service)
 	int ret;
 
 	if (dcp->dptx_core) {
-		/* A zero rate unconfigures the tunnel clock; keep the stream down. */
 		if (!dptx->link_rate)
 			return 0;
 		ret = apple_dpxbar_set_active(route->dpin_xbar[route->dpin], true);

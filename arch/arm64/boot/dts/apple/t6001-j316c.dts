@@ -42,7 +42,6 @@
 	model = "MacBook Pro J316";
 };
 
-/* Experimental USB4 DP source routing; appledrm.usb4_dp gates activation. */
 &dcpext1 {
 	mux-controls = <&atcphy0_xbar 0>, <&atcphy1_xbar 0>, <&atcphy2_xbar 0>,
 		       <&atcphy0_xbar 1>, <&atcphy0_xbar 2>,
@@ -52,22 +51,19 @@
 			    "typec0-dpin0", "typec0-dpin1",
 			    "typec1-dpin0", "typec1-dpin1",
 			    "typec2-dpin0", "typec2-dpin1";
+	apple,typec-dpin = <&atc0_dpin0>, <&atc0_dpin1>,
+			  <&atc1_dpin0>, <&atc1_dpin1>,
+			  <&atc2_dpin0>, <&atc2_dpin1>;
+
+	typec-routes {
+		/delete-node/ route@0;
+	};
 };
 
 &usb4_0_acio { apple,usb4-dp-connector = <&typec0>; };
 &usb4_1_acio { apple,usb4-dp-connector = <&typec1>; };
 &usb4_2_acio { apple,usb4-dp-connector = <&typec2>; };
 
-&dcpext1 {
-	apple,typec-dpin = <&atc0_dpin0>, <&atc0_dpin1>,
-			  <&atc1_dpin0>, <&atc1_dpin1>,
-			  <&atc2_dpin0>, <&atc2_dpin1>;
-};
-
-/*
- * Experimental: also offer the dcpext0 pipeline (the one macOS uses for a
- * tunneled TS4 display) to Type-C port 0 (ATC0). HDMI stays on dcpext0.
- */
 &dcpext0 {
 	phys = <&atcphy3 PHY_TYPE_DP>, <&atcphy0 PHY_TYPE_DP>;
 	phy-names = "dp-phy", "typec0";
@@ -92,16 +88,6 @@
 				};
 			};
 		};
-	};
-};
-
-/*
- * Make dcpext0 the only pipeline offered to Type-C port 0 so the experiment
- * is deterministic: drop the dcpext1 route and its connector endpoint.
- */
-&dcpext1 {
-	typec-routes {
-		/delete-node/ route@0;
 	};
 };
 

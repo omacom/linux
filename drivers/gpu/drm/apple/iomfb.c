@@ -259,12 +259,11 @@ static int dcp_retrain_active_crtc(struct apple_connector *connector)
 }
 
 /*
- * Type-C connectors are ports, not pipelines: the display that left one port
- * can come back on another port driven by the same pipeline.  The compositor
- * is expected to disable the CRTC of a connector that disconnected, but
- * aquamarine refuses to commit on a connector it has already marked
+ * Display that left one port can come back on another port driven by the same
+ * pipeline. The compositor is expected to disable the CRTC of a connector
+ * that disconnected, but refuses to commit on a connector it has already marked
  * disconnected, so the pipeline stays bound to the dead port and every
- * modeset of the new port on that pipeline is rejected.  Release it here.
+ * modeset of the new port on that pipeline is rejected. Release it here.
  */
 static int dcp_disable_connector_crtc(struct apple_connector *connector,
 				      struct drm_modeset_acquire_ctx *ctx)

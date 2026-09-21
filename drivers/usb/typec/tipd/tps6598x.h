@@ -378,8 +378,8 @@ struct cd321x {
 
 	struct cd321x_status update_status;
 	struct delayed_work update_work;
-	/* Both covered by tps.lock. */
 	struct notifier_block pm_nb;
+	/* Protected by tps.lock. */
 	bool pm_transition;
 	struct usb_pd_identity cur_partner_identity;
 

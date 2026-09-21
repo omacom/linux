@@ -724,15 +724,9 @@ static void cd321x_update_work(struct work_struct *work)
 	bool old_connected = !!tps->partner;
 	bool new_connected = st.status & TPS_STATUS_PLUG_PRESENT;
 	/*
-	 * status_changed is computed by XOR against the last status the worker
-	 * queued, so it only sees edges that happened while the driver was
-	 * sampling. A cable pulled and replaced while the system slept ends the
-	 * sleep at the value it started with and reports no change at all, and
-	 * the whole reconnect below is then skipped: the ACIO block is never
-	 * power-cycled, its co-processor keeps owning a link that was torn down
-	 * underneath it, and both the tunnelled display and the port's own USB 2
-	 * tree stay dead until the cable is cycled again while awake. The
-	 * controller latches a plug event across the sleep, so use that as well.
+	 * A cable removed and replaced during sleep can leave status unchanged.
+	 * The latched plug event still requires a reconnect to reset ACIO and
+	 * rebuild the USB session.
 	 */
 	bool plug_edge_latched = st.events & APPLE_CD_REG_INT_PLUG_EVENT;
 	bool was_disconnected = (st.status_changed & TPS_STATUS_PLUG_PRESENT) ||

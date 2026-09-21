@@ -14,7 +14,7 @@ struct apple_connector;
 
 #include "dcp-internal.h"
 
-/* How long userspace gets to disable a disconnected Type-C port's CRTC itself. */
+/* How long userspace gets to disable a disconnected Type-C port's CRTC. */
 #define DCP_STALE_CRTC_GRACE_MS 1000
 
 void dcp_hotplug(struct work_struct *work);

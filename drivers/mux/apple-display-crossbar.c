@@ -251,12 +251,6 @@ static void apple_dpxbar_link_down(struct apple_dpxbar *dpxbar,
 	dpxbar->active[index] = false;
 }
 
-/*
- * Native AppleT8103ATCDPXBAR::takeConnectionDown for a DP IN destination:
- * disable the data and clock enables first, wait, verify the status copies,
- * clear the PCLK-select fields, and only then gate the clocks. The
- * destination enable (0x70) is left set; native never clears it here.
- */
 static void apple_dpxbar_dpin_take_down(struct apple_dpxbar *dpxbar,
 					unsigned int index, unsigned int atc_bit)
 {
@@ -303,14 +297,8 @@ static void apple_dpxbar_link_up(struct apple_dpxbar *dpxbar,
 	dpxbar_set32(dpxbar, CROSSBAR_DISPEXT_EN, dispext_bit);
 
 	/*
-	 * Work around some HW quirk:
 	 * Without toggling the RD_PCLK enable here the connection
-	 * doesn't come up. Testing has shown that a delay of about
-	 * 5 usec is required which is doubled here to be on the
-	 * safe side.
-	 *
-	 * The native T600X driver does not apply this for DP IN (USB4
-	 * tunnel) destinations; keep the native DP PHY path unchanged.
+	 * doesn't come up.
 	 */
 	if (index == MUX_DPPHY || dpxbar->hw->dpin_cycle_slip_workaround) {
 		dpxbar_clear32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
@@ -397,11 +385,7 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 
 	if (enable) {
 		dpxbar->selected_dispext[index] = state;
-		/*
-		 * Native connect() only writes the selector for DP IN
-		 * destinations; DidChangeLinkConfiguration brings the
-		 * connection up once the tunnel clock is programmed.
-		 */
+		/* Brings the connection up once the tunnel clock is programmed. */
 		if (index == MUX_DPPHY)
 			apple_dpxbar_link_up(dpxbar, index, atc_bit);
 	}
@@ -426,7 +410,6 @@ static const struct mux_control_ops apple_dpxbar_ops = {
 /*
  * Gate a leased DPIN route around a tunneled link configuration change.
  * The consumer must keep its mux selected until all calls have completed.
- * In particular, pausing must not make this source available to another mux.
  */
 int apple_dpxbar_set_active(struct mux_control *mux, bool active)
 {

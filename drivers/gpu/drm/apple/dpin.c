@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
-/* Apple USB4 DP-input bridge. Register semantics recovered from macOS 13.5. */
+/* Apple USB4 DP-input bridge. */
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -48,7 +48,6 @@ static irqreturn_t apple_dpin_irq(int irq, void *data)
 	guard(mutex)(&dpin->lock);
 	if (!dpin->leased)
 		return IRQ_NONE;
-	/* Match Apple's stable snapshot, but never spin indefinitely. */
 	for (tries = 0; tries < 16; tries++) {
 		pending = readl(dpin->regs + DPIN_IRQ_STATUS);
 		hpd = readl(dpin->regs + DPIN_HPD);
@@ -69,7 +68,6 @@ static irqreturn_t apple_dpin_irq(int irq, void *data)
 	if (pending & DPIN_IRQ_HPD_CHANGE)
 		writel(hpd, dpin->regs + DPIN_HPD);
 	WRITE_ONCE(dpin->hpd, !!(hpd & DPIN_HPD_LEVEL));
-	/* Callback only queues work: it must not enter the DCP fabric lock. */
 	dpin->notify(dpin->cookie, pending & DPIN_IRQ_HPD_PULSE);
 	return IRQ_HANDLED;
 }
@@ -98,7 +96,6 @@ int apple_dpin_begin(struct apple_dpin *dpin, void (*notify)(void *, bool), void
 	return 0;
 }
 
-/* Called without the DCP fabric lock by the firmware callback worker. */
 static int __apple_dpin_set_active(struct apple_dpin *dpin, bool active)
 {
 	unsigned long deadline = jiffies + msecs_to_jiffies(1000);
@@ -145,11 +142,11 @@ int apple_dpin_end(struct apple_dpin *dpin)
 	ret = __apple_dpin_set_active(dpin, false);
 	if (ret) {
 		mutex_unlock(&dpin->lock);
-		return ret; /* Keep power and ownership on uncertain deactivation. */
+		return ret;
 	}
 	dpin_mask(dpin, DPIN_IRQ_ENABLE, DPIN_IRQ_MASK, 0);
 	mutex_unlock(&dpin->lock);
-	disable_irq(dpin->irq); /* Join the callback before dropping its cookie. */
+	disable_irq(dpin->irq);
 	mutex_lock(&dpin->lock);
 	dpin->leased = false;
 	dpin->notify = NULL;

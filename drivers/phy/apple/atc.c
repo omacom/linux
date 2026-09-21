@@ -1752,11 +1752,7 @@ static int atcphy_dp_program_pll(struct apple_atcphy *atcphy,
 		return ret;
 	}
 
-	ret = atcphy_auspll_apb_command(atcphy, final_cmd);
-	if (ret)
-		return ret;
-
-	return 0;
+	return atcphy_auspll_apb_command(atcphy, final_cmd);
 }
 
 static int atcphy_dp_configure(struct apple_atcphy *atcphy, enum atcphy_dp_link_rate lr)
@@ -1795,12 +1791,6 @@ static int atcphy_dp_configure(struct apple_atcphy *atcphy, enum atcphy_dp_link_
 	return 0;
 }
 
-/*
- * Native configureDPTunnelMode runs when the USB4 tunnel becomes active,
- * before HPD, DPTX activation and the DP IN handshake: common power,
- * TX/RX sleep overrides, lane reset release and all three PCLK outputs.
- * The dividers start at the HBR3 encoding (0) until a link rate is known.
- */
 static void atcphy_dp_tunnel_open(struct apple_atcphy *atcphy)
 {
 	lockdep_assert_held(&atcphy->lock);
@@ -1840,11 +1830,6 @@ static void atcphy_dp_tunnel_open(struct apple_atcphy *atcphy)
 	atcphy->dp_tunnel_open = true;
 }
 
-/*
- * USB4 uses one fixed AUSPLL frequency and a per-PCLK divider. No DP lane or
- * physical AUX configuration is performed here. Only PCLK1 is leased.
- * Sequence and descriptor recovered from the T6000 macOS 13.5 driver.
- */
 static int atcphy_dp_tunnel_configure(struct apple_atcphy *atcphy,
 				    enum atcphy_dp_link_rate lr)
 {
@@ -1890,11 +1875,7 @@ static int atcphy_dp_tunnel_unconfigure(struct apple_atcphy *atcphy)
 	int ret;
 
 	lockdep_assert_held(&atcphy->lock);
-	/*
-	 * The current DP IN implementation leases PCLK1 exclusively. Native
-	 * unconfigureDPTunnelMode gates these outputs when the last DP clock
-	 * user releases its rate; the USB4/CIO lane clocks remain running.
-	 */
+
 	if (atcphy->dp_tunnel_pll && atcphy->mode == APPLE_ATCPHY_MODE_USB4) {
 		core_clear32(atcphy, AUSPLL_CLKOUT_MASTER,
 			     AUSPLL_CLKOUT_MASTER_PCLK_DRVR_EN);
@@ -2217,7 +2198,6 @@ static int atcphy_dpphy_set_mode(struct phy *phy, enum phy_mode mode, int submod
 			return -EBUSY;
 		atcphy->dp_tunnel = true;
 		atcphy->dp_tunnel_pll = false;
-		atcphy->dp_tunnel_open = false;
 		atcphy_dp_tunnel_open(atcphy);
 		return 0;
 	}
