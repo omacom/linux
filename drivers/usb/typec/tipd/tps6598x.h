@@ -351,6 +351,8 @@ struct cd321x_status {
 	u32 data_status;
 	u32 status_changed;
 	u32 data_status_changed;
+	/* Interrupt events accumulated since the worker last ran. */
+	u64 events;
 	struct usb_pd_identity partner_identity;
 	struct tps6598x_dp_sid_status_reg dp_sid_status;
 	struct tps6598x_intel_vid_status_reg intel_vid_status;
@@ -376,6 +378,9 @@ struct cd321x {
 
 	struct cd321x_status update_status;
 	struct delayed_work update_work;
+	/* Both covered by tps.lock. */
+	struct notifier_block pm_nb;
+	bool pm_transition;
 	struct usb_pd_identity cur_partner_identity;
 
 	struct fwnode_handle *connector_fwnode;

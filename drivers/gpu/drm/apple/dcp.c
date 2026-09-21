@@ -5,6 +5,7 @@
 #include <linux/bitmap.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
+#include <linux/mux/apple-display-crossbar.h>
 #include <linux/component.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -19,7 +20,9 @@
 #include <linux/of_device.h>
 #include <linux/of_graph.h>
 #include <linux/of_platform.h>
+#include <linux/phy/phy-apple-atc.h>
 #include <linux/slab.h>
+#include <linux/soc/apple/dcp-usb4.h>
 #include <linux/soc/apple/rtkit.h>
 #include <linux/string.h>
 #include <linux/usb/typec_altmode.h>
@@ -37,6 +40,7 @@
 #include "afk.h"
 #include "av.h"
 #include "dcp.h"
+#include "dpin.h"
 #include "dcp-internal.h"
 #include "iomfb.h"
 #include "parser.h"
@@ -46,6 +50,10 @@
 #define APPLE_DCP_COPROC_CPU_CONTROL_RUN BIT(4)
 
 #define DCP_BOOT_TIMEOUT msecs_to_jiffies(1000)
+
+static bool usb4_dp;
+module_param(usb4_dp, bool, 0444);
+MODULE_PARM_DESC(usb4_dp, "Enable experimental j316c USB4 DP source routing");
 
 static bool show_notch;
 module_param(show_notch, bool, 0644);
@@ -87,6 +95,13 @@ bool dcp_is_typec_output(struct apple_dcp *dcp)
 	       dcp->fixed_connector_type == DRM_MODE_CONNECTOR_USB;
 }
 
+bool dcp_usb4_ignore_poweroff_hotplug(struct apple_dcp *dcp, bool connected)
+{
+	/* Physical removal is reported by the DPIN HPD worker, even during DPMS. */
+	return !connected && READ_ONCE(dcp->dptx_core) &&
+		READ_ONCE(dcp->usb4_poweroff) && READ_ONCE(dcp->usb4_hpd);
+}
+
 static bool dcp_typec_route_is_dp(const struct typec_mux_state *state)
 {
 	return state->alt && state->alt->svid == USB_TYPEC_DP_SID &&
@@ -111,7 +126,7 @@ static bool dcp_typec_route_fixed_output_busy(struct apple_dcp_typec_route *rout
 
 static bool dcp_typec_route_available(struct apple_dcp_typec_route *route)
 {
-	return !route->dcp->active_typec_route &&
+	return !route->dcp->usb4_stopping && !route->dcp->active_typec_route &&
 	       !dcp_typec_route_fixed_output_busy(route);
 }
 
@@ -134,6 +149,12 @@ static unsigned int dcp_typec_route_score(struct apple_dcp_typec_route *route)
 	return drm_crtc_index(&dcp->crtc->base);
 }
 
+/* The crossbar control a route drives: its DP IN destination when tunneled. */
+static struct mux_control *dcp_typec_route_xbar(struct apple_dcp_typec_route *route)
+{
+	return route->usb4 ? route->dpin_xbar[route->dpin] : route->xbar;
+}
+
 static int dcp_typec_route_activate(struct apple_dcp_typec_route *route)
 {
 	struct apple_dcp *dcp = route->dcp;
@@ -146,7 +167,7 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route)
 		dcp->fixed_route_selected = false;
 	}
 
-	ret = mux_control_select(route->xbar, route->mux_index);
+	ret = mux_control_try_select(dcp_typec_route_xbar(route), route->mux_index);
 	if (ret) {
 		if (dcp->xbar) {
 			int restore_ret;
@@ -165,6 +186,7 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route)
 
 	dcp->phy = route->phy;
 	dcp->dptx_phy = route->dptx_phy;
+	dcp->dptx_core = route->usb4 ? route->dpin + 1 : 0;
 	dcp->connector_type = DRM_MODE_CONNECTOR_USB;
 	if (route->port->connector) {
 		route->port->connector->dcp = to_platform_device(dcp->dev);
@@ -197,11 +219,13 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 	struct apple_dcp *dcp = route->dcp;
 	int ret;
 
-	ret = mux_control_deselect(route->xbar);
+	ret = mux_control_deselect(dcp_typec_route_xbar(route));
 	if (ret)
 		return ret;
 
 	route->selected = false;
+	dcp->dptx_core = 0;
+	route->usb4 = false;
 	if (dcp->active_typec_route == route)
 		dcp->active_typec_route = NULL;
 
@@ -264,6 +288,188 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 	return 0;
 }
 
+/* IRQ context only queues work; never enter the fabric lock from the bridge. */
+static void dcp_usb4_hpd_notify(void *cookie, bool irq_hpd)
+{
+	struct apple_dcp *dcp = cookie;
+
+	if (irq_hpd)
+		atomic_set(&dcp->usb4_hpd_irq, 1);
+	queue_work(system_unbound_wq, &dcp->usb4_connect_work);
+}
+
+/* The fabric lock serializes source acquisition, HPD work and release. */
+static void dcp_usb4_connect_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(work, struct apple_dcp, usb4_connect_work);
+	struct apple_dcp_typec_route *route;
+	bool hpd, irq_hpd;
+	int ret;
+
+	guard(mutex)(&dcp_typec_fabric_lock);
+	route = dcp->active_typec_route;
+	if (!route || !route->usb4 || dcp->usb4_stopping)
+		return;
+	hpd = apple_dpin_hpd(route->dpin_bridge[route->dpin]);
+	WRITE_ONCE(dcp->usb4_hpd, hpd);
+	irq_hpd = atomic_xchg(&dcp->usb4_hpd_irq, 0);
+	if (dcp->usb4_claimed) {
+		if (hpd != route->port->hpd) {
+			ret = dptxport_set_hpd(dcp->dptxport[0].service, hpd);
+			if (ret)
+				dev_err(dcp->dev, "USB4 HPD update failed: %d\n", ret);
+		}
+		if (!hpd)
+			disconnected_hpd_event(dcp->connector);
+		else if (irq_hpd && dcp->typec_connector)
+			dcp_retrain_oob(dcp->typec_connector);
+	} else if (hpd) {
+		dev_info(dcp->dev, "USB4 source target core=%u ATC=%u die=%u\n",
+			 dcp->dptx_core, dcp->dptx_phy, dcp->dptx_die);
+		ret = dcp_dptx_connect(dcp, 0);
+		if (ret)
+			dev_err(dcp->dev, "USB4 source connect failed: %d\n", ret);
+	}
+	route->port->hpd = hpd;
+}
+
+static int dcp_usb4_release(struct apple_dcp_typec_route *route)
+{
+	struct apple_dcp *dcp = route->dcp;
+	struct dptx_port *dptx = &dcp->dptxport[0];
+	int ret, hpd_ret;
+
+	lockdep_assert_held(&dcp_typec_fabric_lock);
+	cancel_work(&dcp->usb4_connect_work);
+	WRITE_ONCE(dcp->usb4_hpd, false);
+	if (dcp->usb4_claimed) {
+		disconnected_hpd_event(dcp->connector);
+		if (dcp->avep)
+			av_service_disconnect(dcp);
+		/* An idle display may already have acknowledged DEACTIVATE. */
+		hpd_ret = dptxport_set_hpd(dptx->service, false);
+		ret = dptxport_release_display(dptx->service);
+		if (ret)
+			goto quarantine;
+		if (!wait_for_completion_timeout(&dptx->deactivate_completion,
+						msecs_to_jiffies(1000))) {
+			ret = -ETIMEDOUT;
+			goto quarantine;
+		}
+		flush_workqueue(dcp->dptxep->wq);
+		ret = READ_ONCE(dptx->deactivate_status);
+		if (ret)
+			goto quarantine;
+		if (hpd_ret) {
+			ret = hpd_ret;
+			goto quarantine;
+		}
+		dptx->connected = false;
+		dcp->usb4_claimed = false;
+	}
+	ret = apple_dpxbar_set_active(route->dpin_xbar[route->dpin], false);
+	if (ret)
+		goto quarantine;
+	ret = apple_dpin_end(route->dpin_bridge[route->dpin]);
+	if (ret)
+		goto quarantine;
+	cancel_work(&dcp->usb4_connect_work);
+	ret = phy_set_mode_ext(route->phy, PHY_MODE_DP, 0);
+	if (ret)
+		goto quarantine;
+	ret = dcp_typec_route_deactivate(route);
+	if (ret)
+		goto quarantine;
+	/* The next physical connection starts without a configured DP clock. */
+	dptx->link_rate = dptx->pending_link_rate = 0;
+	route->port->owner = NULL;
+	WRITE_ONCE(dcp->usb4_poweroff, false);
+	route->port->hpd = false;
+	/* A later native event must not be collapsed against the old state. */
+	route->port->applied_valid = false;
+	return 0;
+
+quarantine:
+	dev_err(dcp->dev, "USB4 source release failed: %d; route retained\n", ret);
+	return ret;
+}
+
+int apple_dcp_usb4_set(struct device_node *connector, unsigned int dpin,
+		      bool enable)
+{
+	struct apple_dcp_typec_port *port;
+	struct apple_dcp_typec_route *route, *best = NULL;
+	unsigned int score = UINT_MAX;
+	int ret;
+
+	if (dpin > 1)
+		return -EINVAL;
+	if (enable && !usb4_dp)
+		return -EOPNOTSUPP;
+
+	guard(mutex)(&dcp_typec_fabric_lock);
+	list_for_each_entry(port, &dcp_typec_ports, link) {
+		if (port->connector_np == connector)
+			goto found;
+	}
+	return enable ? -ENODEV : 0;
+found:
+	if (!enable) {
+		if (!port->owner || !port->owner->usb4 || port->owner->dpin != dpin)
+			return 0;
+		return dcp_usb4_release(port->owner);
+	}
+	if (port->owner)
+		return -EBUSY;
+	if (!port->connector || port->applied_mode != TYPEC_MODE_USB4)
+		return -ENOLINK;
+	list_for_each_entry(route, &port->routes, port_link) {
+		unsigned int candidate;
+
+		if (!route->dpin_xbar[dpin] || !route->dpin_bridge[dpin] ||
+		    !dcp_typec_route_available(route) ||
+		    !route->dcp->active || !route->dcp->dptxport[0].enabled)
+			continue;
+		candidate = dcp_typec_route_score(route);
+		if (candidate < score) {
+			score = candidate;
+			best = route;
+		}
+	}
+	if (!best)
+		return -EBUSY;
+
+	best->usb4 = true;
+	best->dpin = dpin;
+	ret = dcp_typec_route_activate(best);
+	if (ret) {
+		best->usb4 = false;
+		return ret;
+	}
+	port->owner = best;
+	atomic_set(&best->dcp->usb4_hpd_irq, 0);
+	WRITE_ONCE(best->dcp->usb4_hpd, false);
+	WRITE_ONCE(best->dcp->usb4_poweroff, false);
+	ret = phy_set_mode_ext(best->phy, PHY_MODE_DP, APPLE_ATCPHY_DP_TUNNEL);
+	if (ret)
+		goto undo_route;
+	ret = apple_dpin_begin(best->dpin_bridge[dpin], dcp_usb4_hpd_notify, best->dcp);
+	if (ret) {
+		phy_set_mode_ext(best->phy, PHY_MODE_DP, 0);
+		goto undo_route;
+	}
+	/* Start only from the bridge's real HPD level, including an initial high. */
+	port->hpd = false;
+	queue_work(system_unbound_wq, &best->dcp->usb4_connect_work);
+	return 0;
+
+undo_route:
+	if (!dcp_typec_route_deactivate(best))
+		port->owner = NULL;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_dcp_usb4_set);
+
 static void dcp_typec_retrain_work(struct work_struct *work)
 {
 	struct apple_dcp *dcp =
@@ -302,6 +508,10 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 	int ret = 0;
 
 	guard(mutex)(&dcp_typec_fabric_lock);
+
+	/* Tunnel teardown owns USB4 source release, before the router stops. */
+	if (port->owner && port->owner->usb4)
+		return is_dp ? -EBUSY : 0;
 
 	/*
 	 * Every candidate route for this port is notified with the same state,
@@ -519,6 +729,12 @@ static void dcp_typec_route_unregister(void *data)
 	typec_mux_unregister(route->typec_mux);
 
 	guard(mutex)(&dcp_typec_fabric_lock);
+	if (port->owner == route && route->usb4) {
+		if (route->dcp->usb4_stopping || dcp_usb4_release(route)) {
+			/* Provider is going away; firmware shutdown fences callbacks. */
+			port->owner = NULL;
+		}
+	}
 	if (port->owner == route) {
 		struct apple_dcp *dcp = route->dcp;
 
@@ -590,6 +806,23 @@ static int dcp_register_typec_routes(struct apple_dcp *dcp)
 		if (IS_ERR(route->xbar))
 			return dev_err_probe(dev, PTR_ERR(route->xbar),
 					     "%pOF: failed to get display crossbar\n", route_np);
+
+		for (unsigned int dpin = 0; dpin < 2; dpin++) {
+			char dpin_name[24];
+
+			snprintf(dpin_name, sizeof(dpin_name), "typec%u-dpin%u",
+				 route_index, dpin);
+			if (of_property_match_string(dev->of_node, "mux-control-names",
+						     dpin_name) < 0)
+				continue;
+			route->dpin_xbar[dpin] = devm_mux_control_get(dev, dpin_name);
+			if (IS_ERR(route->dpin_xbar[dpin]))
+				return PTR_ERR(route->dpin_xbar[dpin]);
+			route->dpin_bridge[dpin] = devm_apple_dpin_get(dev, dev->of_node,
+								    route_index * 2 + dpin);
+			if (IS_ERR(route->dpin_bridge[dpin]))
+				return PTR_ERR(route->dpin_bridge[dpin]);
+		}
 
 		ret = of_property_read_u32_index(dev->of_node, "apple,typec-mux-indices",
 						 route_index, &route->mux_index);
@@ -998,8 +1231,12 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_unlock;
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
+	if (dcp->dptx_core) {
+		reinit_completion(&dcp->dptxport[port].deactivate_completion);
+		WRITE_ONCE(dcp->dptxport[port].deactivate_status, -EINPROGRESS);
+	}
 	dcp->dptxport[port].atcphy = dcp->phy;
-	ret = dptxport_validate_connection(dcp->dptxport[port].service, 0,
+	ret = dptxport_validate_connection(dcp->dptxport[port].service, dcp->dptx_core,
 					   dcp->dptx_phy, dcp->dptx_die);
 	if (ret) {
 		dev_err(dcp->dev,
@@ -1008,7 +1245,7 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_unlock;
 	}
 
-	ret = dptxport_connect(dcp->dptxport[port].service, 0,
+	ret = dptxport_connect(dcp->dptxport[port].service, dcp->dptx_core,
 			       dcp->dptx_phy, dcp->dptx_die,
 		       dcp_is_typec_output(dcp));
 	if (ret) {
@@ -1018,6 +1255,8 @@ static int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 		goto out_unlock;
 	}
 
+	if (dcp->dptx_core)
+		dcp->usb4_claimed = true;
 	ret = dptxport_request_display(dcp->dptxport[port].service);
 	if (ret) {
 		dev_err(dcp->dev,
@@ -1065,6 +1304,8 @@ out_disconnect:
 	mutex_lock(&dcp->hpd_mutex);
 	dcp->dptxport[port].connected = false;
 out_release:
+	if (dcp->dptx_core)
+		goto out_unlock;
 	dptxport_release_display(dcp->dptxport[port].service);
 
 out_unlock:
@@ -1079,7 +1320,7 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 			     typec_reconnect_wq);
 	int ret;
 
-	if (!READ_ONCE(dcp->typec_cable_connected))
+	if (READ_ONCE(dcp->dptx_core) || !READ_ONCE(dcp->typec_cable_connected))
 		return;
 
 	ret = dcp_dptx_connect(dcp, 0);
@@ -1105,6 +1346,12 @@ static void disconnected_hpd_event(struct apple_connector *con)
 		drm_edid_free(con->drm_edid);
 		con->drm_edid = NULL;
 		drm_kms_helper_connector_hotplug_event(&con->base);
+		/*
+		 * USB4 removals arrive here rather than through the hotplug
+		 * worker; give userspace the same grace period to release the
+		 * pipeline before the driver does it.
+		 */
+		dcp_schedule_stale_crtc_release(con);
 	}
 }
 
@@ -1383,7 +1630,8 @@ void dcp_poweron(struct platform_device *pdev)
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
 	int ret;
 
-	if (dcp_is_typec_output(dcp)) {
+	/* USB4 keeps its CM-owned DPTX session across CRTC power changes. */
+	if (!READ_ONCE(dcp->dptx_core) && dcp_is_typec_output(dcp)) {
 		/*
 		 * A Type-C CRTC disable releases its DPTX session. Re-establish it
 		 * synchronously before IOMFB is powered back on.
@@ -1397,7 +1645,7 @@ void dcp_poweron(struct platform_device *pdev)
 						 &dcp->typec_reconnect_wq,
 						 DPTX_RECONNECT_DELAY);
 		}
-	} else if (dcp->hdmi_hpd) {
+	} else if (!READ_ONCE(dcp->dptx_core) && dcp->hdmi_hpd) {
 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 		dev_info(dcp->dev, "%s: DP2HDMI HPD connected:%d\n", __func__, connected);
 
@@ -1419,17 +1667,26 @@ void dcp_poweron(struct platform_device *pdev)
 
 	if (dcp->avep)
 		av_service_connect(dcp);
+	WRITE_ONCE(dcp->usb4_poweroff, false);
 }
 
 void dcp_poweroff(struct platform_device *pdev)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
 	int ret;
+	bool usb4 = READ_ONCE(dcp->dptx_core);
+
+	/* Set before firmware can report its power-state-induced HPD low. */
+	if (usb4)
+		WRITE_ONCE(dcp->usb4_poweroff, true);
 
 	if (dcp->avep)
 		av_service_disconnect(dcp);
 
 	_dcp_poweroff(dcp);
+	/* Real HPD and session release belong to the USB4 connection manager. */
+	if (usb4)
+		return;
 
 	if (dcp_is_typec_output(dcp)) {
 		/*
@@ -1863,6 +2120,13 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
 	if (!dcp)
 		return;
 
+	mutex_lock(&dcp_typec_fabric_lock);
+	dcp->usb4_stopping = true;
+	if (dcp->active_typec_route && dcp->active_typec_route->usb4)
+		dcp_usb4_release(dcp->active_typec_route);
+	mutex_unlock(&dcp_typec_fabric_lock);
+	cancel_work_sync(&dcp->usb4_connect_work);
+
 	if (dcp->hdmi_hpd_irq)
 		disable_irq(dcp->hdmi_hpd_irq);
 
@@ -1954,6 +2218,7 @@ static int dcp_platform_probe(struct platform_device *pdev)
 	of_property_read_u32(dev->of_node, "apple,dptx-phy", &dcp->dptx_phy);
 	of_property_read_u32(dev->of_node, "apple,dptx-die", &dcp->dptx_die);
 	dcp->fixed_dptx_phy = dcp->dptx_phy;
+	INIT_WORK(&dcp->usb4_connect_work, dcp_usb4_connect_work);
 	INIT_DELAYED_WORK(&dcp->typec_reconnect_wq,
 			  dcp_typec_reconnect_work);
 	INIT_DELAYED_WORK(&dcp->typec_fabric_retrain_wq,

@@ -14,6 +14,7 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mux/driver.h>
+#include <linux/mux/apple-display-crossbar.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
@@ -90,12 +91,16 @@ struct apple_dpxbar_hw {
 	unsigned int n_ufp;
 	u32 tunable;
 	const struct mux_control_ops *ops;
+	/* Native AppleT600XATCDPXBAR::requiresCycleSlipWorkaround() is false. */
+	bool dpin_cycle_slip_workaround;
 };
 
 struct apple_dpxbar {
 	struct device *dev;
+	const struct apple_dpxbar_hw *hw;
 	void __iomem *regs;
 	int selected_dispext[MUX_MAX];
+	bool active[MUX_MAX];
 	spinlock_t lock;
 };
 
@@ -221,14 +226,107 @@ static int apple_dpxbar_set_t602x(struct mux_control *mux, int state)
 	return ret;
 }
 
+/* Caller holds the crossbar lock and retains the mux selection. */
+static void apple_dpxbar_link_down(struct apple_dpxbar *dpxbar,
+				   unsigned int index, unsigned int atc_bit)
+{
+	dpxbar_set32(dpxbar, OUT_N_CLK_EN, atc_bit);
+	dpxbar_clear32(dpxbar, OUT_UNK_EN, atc_bit);
+	dpxbar_clear32(dpxbar, OUT_PCLK1_EN, atc_bit);
+	dpxbar_clear32(dpxbar, CROSSBAR_ATC_EN, atc_bit);
+
+	if (dpxbar->selected_dispext[index] >= 0) {
+		u32 prev_dispext_bit = 1 << dpxbar->selected_dispext[index];
+		u32 prev_dispext_bit_en = 1 << (2 * dpxbar->selected_dispext[index]);
+
+		dpxbar_set32(dpxbar, FIFO_WR_N_CLK_EN, prev_dispext_bit);
+		dpxbar_set32(dpxbar, FIFO_RD_N_CLK_EN, prev_dispext_bit);
+		dpxbar_clear32(dpxbar, FIFO_WR_UNK_EN, prev_dispext_bit);
+		dpxbar_clear32(dpxbar, FIFO_RD_UNK_EN, prev_dispext_bit_en);
+		dpxbar_clear32(dpxbar, FIFO_WR_DPTX_CLK_EN, prev_dispext_bit);
+		dpxbar_clear32(dpxbar, FIFO_RD_PCLK1_EN, prev_dispext_bit);
+		dpxbar_clear32(dpxbar, CROSSBAR_DISPEXT_EN, prev_dispext_bit);
+	}
+
+	dpxbar->active[index] = false;
+}
+
+/*
+ * Native AppleT8103ATCDPXBAR::takeConnectionDown for a DP IN destination:
+ * disable the data and clock enables first, wait, verify the status copies,
+ * clear the PCLK-select fields, and only then gate the clocks. The
+ * destination enable (0x70) is left set; native never clears it here.
+ */
+static void apple_dpxbar_dpin_take_down(struct apple_dpxbar *dpxbar,
+					unsigned int index, unsigned int atc_bit)
+{
+	u32 dispext_bit = BIT(dpxbar->selected_dispext[index]);
+	u32 dispext_field = 0x3 << (2 * dpxbar->selected_dispext[index]);
+	u32 atc_field = atc_bit | (atc_bit << 1);
+
+	dpxbar_clear32(dpxbar, CROSSBAR_DISPEXT_EN, dispext_bit);
+	dpxbar_clear32(dpxbar, FIFO_WR_DPTX_CLK_EN, dispext_bit);
+	dpxbar_clear32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
+	dpxbar_clear32(dpxbar, OUT_PCLK1_EN, atc_bit);
+	udelay(1);
+	if ((readl(dpxbar->regs + FIFO_WR_DPTX_CLK_EN_STAT) & dispext_bit) ||
+	    (readl(dpxbar->regs + FIFO_RD_PCLK1_EN_STAT) & dispext_bit) ||
+	    (readl(dpxbar->regs + OUT_PCLK1_EN_STAT) & atc_bit))
+		dev_warn(dpxbar->dev, "%s: enables still reported active after take-down\n",
+			 apple_dpxbar_names[index]);
+	dpxbar_clear32(dpxbar, FIFO_WR_UNK_EN, dispext_bit);
+	dpxbar_clear32(dpxbar, FIFO_RD_UNK_EN, dispext_field);
+	dpxbar_clear32(dpxbar, OUT_UNK_EN, atc_field);
+	dpxbar_set32(dpxbar, FIFO_WR_N_CLK_EN, dispext_bit);
+	dpxbar_set32(dpxbar, FIFO_RD_N_CLK_EN, dispext_bit);
+	dpxbar_set32(dpxbar, OUT_N_CLK_EN, atc_bit);
+
+	dpxbar->active[index] = false;
+}
+
+static void apple_dpxbar_link_up(struct apple_dpxbar *dpxbar,
+				 unsigned int index, unsigned int atc_bit)
+{
+	u32 dispext_bit = BIT(dpxbar->selected_dispext[index]);
+	u32 dispext_bit_en = BIT(2 * dpxbar->selected_dispext[index]);
+
+	dpxbar_clear32(dpxbar, FIFO_WR_N_CLK_EN, dispext_bit);
+	dpxbar_clear32(dpxbar, FIFO_RD_N_CLK_EN, dispext_bit);
+	dpxbar_clear32(dpxbar, OUT_N_CLK_EN, atc_bit);
+	dpxbar_set32(dpxbar, FIFO_WR_UNK_EN, dispext_bit);
+	dpxbar_set32(dpxbar, FIFO_RD_UNK_EN, dispext_bit_en);
+	dpxbar_set32(dpxbar, OUT_UNK_EN, atc_bit);
+	dpxbar_set32(dpxbar, FIFO_WR_DPTX_CLK_EN, dispext_bit);
+	dpxbar_set32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
+	dpxbar_set32(dpxbar, OUT_PCLK1_EN, atc_bit);
+	dpxbar_set32(dpxbar, CROSSBAR_ATC_EN, atc_bit);
+	dpxbar_set32(dpxbar, CROSSBAR_DISPEXT_EN, dispext_bit);
+
+	/*
+	 * Work around some HW quirk:
+	 * Without toggling the RD_PCLK enable here the connection
+	 * doesn't come up. Testing has shown that a delay of about
+	 * 5 usec is required which is doubled here to be on the
+	 * safe side.
+	 *
+	 * The native T600X driver does not apply this for DP IN (USB4
+	 * tunnel) destinations; keep the native DP PHY path unchanged.
+	 */
+	if (index == MUX_DPPHY || dpxbar->hw->dpin_cycle_slip_workaround) {
+		dpxbar_clear32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
+		udelay(10);
+		dpxbar_set32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
+	}
+
+	dpxbar->active[index] = true;
+}
+
 static int apple_dpxbar_set(struct mux_control *mux, int state)
 {
 	struct apple_dpxbar *dpxbar = mux_chip_priv(mux->chip);
 	unsigned int index = mux_control_get_index(mux);
 	unsigned long flags;
 	unsigned int mux_state;
-	unsigned int dispext_bit;
-	unsigned int dispext_bit_en;
 	unsigned int atc_bit;
 	bool enable;
 	int ret = 0;
@@ -243,8 +341,6 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 		mux_state = 0;
 		enable = false;
 	} else if (state >= 0 && state < 9) {
-		dispext_bit = 1 << state;
-		dispext_bit_en = 1 << (2 * state);
 		mux_state = state;
 		enable = true;
 	} else {
@@ -294,53 +390,20 @@ static int apple_dpxbar_set(struct mux_control *mux, int state)
 		}
 	}
 
-	dpxbar_set32(dpxbar, OUT_N_CLK_EN, atc_bit);
-	dpxbar_clear32(dpxbar, OUT_UNK_EN, atc_bit);
-	dpxbar_clear32(dpxbar, OUT_PCLK1_EN, atc_bit);
-	dpxbar_clear32(dpxbar, CROSSBAR_ATC_EN, atc_bit);
-
-	if (dpxbar->selected_dispext[index] >= 0) {
-		u32 prev_dispext_bit = 1 << dpxbar->selected_dispext[index];
-		u32 prev_dispext_bit_en = 1 << (2 * dpxbar->selected_dispext[index]);
-
-		dpxbar_set32(dpxbar, FIFO_WR_N_CLK_EN, prev_dispext_bit);
-		dpxbar_set32(dpxbar, FIFO_RD_N_CLK_EN, prev_dispext_bit);
-		dpxbar_clear32(dpxbar, FIFO_WR_UNK_EN, prev_dispext_bit);
-		dpxbar_clear32(dpxbar, FIFO_RD_UNK_EN, prev_dispext_bit_en);
-		dpxbar_clear32(dpxbar, FIFO_WR_DPTX_CLK_EN, prev_dispext_bit);
-		dpxbar_clear32(dpxbar, FIFO_RD_PCLK1_EN, prev_dispext_bit);
-		dpxbar_clear32(dpxbar, CROSSBAR_DISPEXT_EN, prev_dispext_bit);
-
-		dpxbar->selected_dispext[index] = -1;
-	}
+	apple_dpxbar_link_down(dpxbar, index, atc_bit);
+	dpxbar->selected_dispext[index] = -1;
 
 	dpxbar_mask32(dpxbar, CROSSBAR_MUX_CTRL, mux_mask, mux_set);
 
 	if (enable) {
-		dpxbar_clear32(dpxbar, FIFO_WR_N_CLK_EN, dispext_bit);
-		dpxbar_clear32(dpxbar, FIFO_RD_N_CLK_EN, dispext_bit);
-		dpxbar_clear32(dpxbar, OUT_N_CLK_EN, atc_bit);
-		dpxbar_set32(dpxbar, FIFO_WR_UNK_EN, dispext_bit);
-		dpxbar_set32(dpxbar, FIFO_RD_UNK_EN, dispext_bit_en);
-		dpxbar_set32(dpxbar, OUT_UNK_EN, atc_bit);
-		dpxbar_set32(dpxbar, FIFO_WR_DPTX_CLK_EN, dispext_bit);
-		dpxbar_set32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
-		dpxbar_set32(dpxbar, OUT_PCLK1_EN, atc_bit);
-		dpxbar_set32(dpxbar, CROSSBAR_ATC_EN, atc_bit);
-		dpxbar_set32(dpxbar, CROSSBAR_DISPEXT_EN, dispext_bit);
-
-		/*
-		 * Work around some HW quirk:
-		 * Without toggling the RD_PCLK enable here the connection
-		 * doesn't come up. Testing has shown that a delay of about
-		 * 5 usec is required which is doubled here to be on the
-		 * safe side.
-		 */
-		dpxbar_clear32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
-		udelay(10);
-		dpxbar_set32(dpxbar, FIFO_RD_PCLK1_EN, dispext_bit);
-
 		dpxbar->selected_dispext[index] = state;
+		/*
+		 * Native connect() only writes the selector for DP IN
+		 * destinations; DidChangeLinkConfiguration brings the
+		 * connection up once the tunnel clock is programmed.
+		 */
+		if (index == MUX_DPPHY)
+			apple_dpxbar_link_up(dpxbar, index, atc_bit);
 	}
 
 	spin_unlock_irqrestore(&dpxbar->lock, flags);
@@ -360,6 +423,41 @@ static const struct mux_control_ops apple_dpxbar_ops = {
 	.set = apple_dpxbar_set,
 };
 
+/*
+ * Gate a leased DPIN route around a tunneled link configuration change.
+ * The consumer must keep its mux selected until all calls have completed.
+ * In particular, pausing must not make this source available to another mux.
+ */
+int apple_dpxbar_set_active(struct mux_control *mux, bool active)
+{
+	struct apple_dpxbar *dpxbar;
+	unsigned int index = mux_control_get_index(mux);
+	unsigned long flags;
+	unsigned int atc_bit;
+	int ret = 0;
+
+	if (mux->chip->ops != &apple_dpxbar_ops ||
+	    (index != MUX_DPIN0 && index != MUX_DPIN1))
+		return -EOPNOTSUPP;
+	dpxbar = mux_chip_priv(mux->chip);
+	atc_bit = index == MUX_DPIN0 ? ATC_DPIN0 : ATC_DPIN1;
+	spin_lock_irqsave(&dpxbar->lock, flags);
+	if (dpxbar->selected_dispext[index] < 0) {
+		ret = -ENOLINK;
+		goto out;
+	}
+	if (dpxbar->active[index] != active) {
+		if (active)
+			apple_dpxbar_link_up(dpxbar, index, atc_bit);
+		else
+			apple_dpxbar_dpin_take_down(dpxbar, index, atc_bit);
+	}
+out:
+	spin_unlock_irqrestore(&dpxbar->lock, flags);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_dpxbar_set_active);
+
 static const struct mux_control_ops apple_dpxbar_t602x_ops = {
 	.set = apple_dpxbar_set_t602x,
 };
@@ -378,6 +476,7 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
 		return PTR_ERR(mux_chip);
 
 	dpxbar = mux_chip_priv(mux_chip);
+	dpxbar->hw = hw;
 	mux_chip->ops = hw->ops;
 	spin_lock_init(&dpxbar->lock);
 
@@ -406,18 +505,21 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
 }
 
 static const struct apple_dpxbar_hw apple_dpxbar_hw_t8103 = {
+	.dpin_cycle_slip_workaround = true,
 	.n_ufp = 2,
 	.tunable = 0,
 	.ops = &apple_dpxbar_ops,
 };
 
 static const struct apple_dpxbar_hw apple_dpxbar_hw_t8112 = {
+	.dpin_cycle_slip_workaround = true,
 	.n_ufp = 4,
 	.tunable = 4278196325,
 	.ops = &apple_dpxbar_ops,
 };
 
 static const struct apple_dpxbar_hw apple_dpxbar_hw_t6000 = {
+	.dpin_cycle_slip_workaround = false,
 	.n_ufp = 9,
 	.tunable = 5,
 	.ops = &apple_dpxbar_ops,

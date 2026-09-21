@@ -16,12 +16,16 @@
 #include <linux/slab.h>
 #include <linux/soc/apple/rtkit.h>
 
+#include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_atomic_uapi.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
+#include <drm/drm_plane.h>
+#include <drm/drm_print.h>
 #include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_modeset_lock.h>
 #include <drm/drm_probe_helper.h>
@@ -254,6 +258,108 @@ static int dcp_retrain_active_crtc(struct apple_connector *connector)
 	return ret;
 }
 
+/*
+ * Type-C connectors are ports, not pipelines: the display that left one port
+ * can come back on another port driven by the same pipeline.  The compositor
+ * is expected to disable the CRTC of a connector that disconnected, but
+ * aquamarine refuses to commit on a connector it has already marked
+ * disconnected, so the pipeline stays bound to the dead port and every
+ * modeset of the new port on that pipeline is rejected.  Release it here.
+ */
+static int dcp_disable_connector_crtc(struct apple_connector *connector,
+				      struct drm_modeset_acquire_ctx *ctx)
+{
+	struct drm_device *dev = connector->base.dev;
+	struct drm_connector_state *conn_state;
+	struct drm_plane_state *plane_state;
+	struct drm_crtc_state *crtc_state;
+	struct drm_atomic_state *state;
+	struct drm_plane *plane;
+	struct drm_crtc *crtc;
+	int ret;
+
+	crtc = connector->base.state ? connector->base.state->crtc : NULL;
+	if (!crtc || READ_ONCE(connector->connected))
+		return 0;
+
+	state = drm_atomic_state_alloc(dev);
+	if (!state)
+		return -ENOMEM;
+	state->acquire_ctx = ctx;
+
+	conn_state = drm_atomic_get_connector_state(state, &connector->base);
+	if (IS_ERR(conn_state)) {
+		ret = PTR_ERR(conn_state);
+		goto put;
+	}
+	ret = drm_atomic_set_crtc_for_connector(conn_state, NULL);
+	if (ret)
+		goto put;
+
+	crtc_state = drm_atomic_get_crtc_state(state, crtc);
+	if (IS_ERR(crtc_state)) {
+		ret = PTR_ERR(crtc_state);
+		goto put;
+	}
+	ret = drm_atomic_set_mode_for_crtc(crtc_state, NULL);
+	if (ret)
+		goto put;
+	crtc_state->active = false;
+
+	drm_for_each_plane_mask(plane, dev, crtc_state->plane_mask) {
+		plane_state = drm_atomic_get_plane_state(state, plane);
+		if (IS_ERR(plane_state)) {
+			ret = PTR_ERR(plane_state);
+			goto put;
+		}
+		ret = drm_atomic_set_crtc_for_plane(plane_state, NULL);
+		if (ret)
+			goto put;
+		drm_atomic_set_fb_for_plane(plane_state, NULL);
+	}
+
+	ret = drm_atomic_commit(state);
+	if (!ret)
+		drm_info(dev, "[CONNECTOR:%d:%s] released stale [CRTC:%d:%s]\n",
+			 connector->base.base.id, connector->base.name,
+			 crtc->base.id, crtc->name);
+put:
+	drm_atomic_state_put(state);
+	return ret;
+}
+
+void dcp_release_stale_crtc_work(struct work_struct *work)
+{
+	struct apple_connector *connector =
+		container_of(work, struct apple_connector, release_crtc_wq.work);
+	struct drm_device *dev = connector->base.dev;
+	struct drm_modeset_acquire_ctx ctx;
+	int ret, idx;
+
+	if (READ_ONCE(connector->connected))
+		return;
+	if (!drm_dev_enter(dev, &idx))
+		return;
+
+	DRM_MODESET_LOCK_ALL_BEGIN(dev, ctx, 0, ret);
+	ret = dcp_disable_connector_crtc(connector, &ctx);
+	DRM_MODESET_LOCK_ALL_END(dev, ctx, ret);
+
+	if (ret)
+		drm_warn(dev, "[CONNECTOR:%d:%s] failed to release stale CRTC: %d\n",
+			 connector->base.base.id, connector->base.name, ret);
+	drm_dev_exit(idx);
+}
+
+/* Type-C ports only; a port that comes back cancels it from dcp_hotplug(). */
+void dcp_schedule_stale_crtc_release(struct apple_connector *connector)
+{
+	if (!connector->port_encoder)
+		return;
+	mod_delayed_work(system_wq, &connector->release_crtc_wq,
+			 msecs_to_jiffies(DCP_STALE_CRTC_GRACE_MS));
+}
+
 void dcp_retrain_oob(struct apple_connector *connector)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(connector->dcp);
@@ -286,6 +392,17 @@ void dcp_hotplug(struct work_struct *work)
 	if (!connector->connected) {
 		drm_edid_free(connector->drm_edid);
 		connector->drm_edid = NULL;
+	}
+
+	/*
+	 * Give userspace the grace period to disable a disconnected Type-C
+	 * port's CRTC itself; a port that came back cancels the release.
+	 */
+	if (connector->port_encoder) {
+		if (connector->connected)
+			cancel_delayed_work(&connector->release_crtc_wq);
+		else
+			dcp_schedule_stale_crtc_release(connector);
 	}
 
 	/*

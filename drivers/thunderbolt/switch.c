@@ -3662,6 +3662,17 @@ void tb_switch_suspend(struct tb_switch *sw, bool runtime)
 		flags |= TB_WAKE_ON_USB4 | TB_WAKE_ON_USB3 | TB_WAKE_ON_PCIE;
 	}
 
+	/*
+	 * A firmware-driven host router may leave the link up after the
+	 * sleep bit is set. The routers then stay reachable across the
+	 * system sleep but keep Sleep and Sleep Ready set after resume,
+	 * and the link fails a few seconds later. Leave them awake.
+	 */
+	if (sw->tb->root_switch->no_link_sleep) {
+		tb_sw_dbg(sw, "leaving router awake across sleep\n");
+		return;
+	}
+
 	tb_switch_set_wake(sw, flags, runtime);
 
 	if (tb_switch_is_usb4(sw))

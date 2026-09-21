@@ -39,8 +39,16 @@
  * of a driver-private structure rather than forming an offset, and have not
  * been decoded.
  *
- * Every implementation polls the busy bits, stores the request, then polls
- * again, with a 192 ms budget. The first poll's result is discarded.
+ * Every implementation polls the busy bit, stores the request, then polls
+ * again, with a 100 ms budget for each poll. The first poll's result is only
+ * warned about.
+ *
+ * Setting the request bit immediately sets the matching busy bit; both clear
+ * once the reset is fully released, and macOS waits for the busy bit before
+ * continuing. Clearing bits by hand is ignored: the only way to put a block
+ * back into reset is to shut down its power domains. A request issued to a
+ * block that was never power-gated therefore never completes, so the caller
+ * must be sure the domains really dropped before asking for a reconfigure.
  */
 
 #include <linux/bits.h>

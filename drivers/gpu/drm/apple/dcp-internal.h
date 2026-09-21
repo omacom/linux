@@ -27,6 +27,7 @@
 struct apple_dcp;
 struct apple_dcp_afkep;
 struct apple_dcp_typec_port;
+struct apple_dpin;
 
 struct apple_dcp_typec_route {
 	struct apple_dcp *dcp;
@@ -34,6 +35,10 @@ struct apple_dcp_typec_route {
 	struct list_head port_link;
 	struct phy *phy;
 	struct mux_control *xbar;
+	struct mux_control *dpin_xbar[2];
+	struct apple_dpin *dpin_bridge[2];
+	bool usb4;
+	u8 dpin;
 	struct typec_mux_dev *typec_mux;
 	u32 dptx_phy;
 	u32 mux_index;
@@ -41,6 +46,7 @@ struct apple_dcp_typec_route {
 };
 
 bool dcp_is_typec_output(struct apple_dcp *dcp);
+bool dcp_usb4_ignore_poweroff_hotplug(struct apple_dcp *dcp, bool connected);
 
 struct dcpav_service_epic;
 
@@ -284,6 +290,14 @@ struct apple_dcp {
 	struct apple_dcp_typec_route *active_typec_route;
 	u32 nr_typec_routes;
 	bool phy_managed_by_typec;
+	u8 dptx_core;
+	bool usb4_claimed;
+	/* Real bridge HPD and CRTC power state, independent of IOMFB HPD. */
+	bool usb4_hpd;
+	bool usb4_poweroff;
+	atomic_t usb4_hpd_irq;
+	bool usb4_stopping;
+	struct work_struct usb4_connect_work;
 	bool typec_cable_connected;
 	struct delayed_work typec_reconnect_wq;
 	struct delayed_work typec_fabric_retrain_wq;

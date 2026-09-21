@@ -14,6 +14,7 @@
 
 #include "tunnel.h"
 #include "tb.h"
+#include "nhi.h"
 
 /* PCIe adapters use always HopID of 8 for both directions */
 #define TB_PCI_HOPID			8
@@ -1141,14 +1142,35 @@ static void tb_dp_dprx_stop(struct tb_tunnel *tunnel)
 	if (tunnel->dprx_started) {
 		tunnel->dprx_started = false;
 		tunnel->dprx_canceled = true;
-		if (cancel_delayed_work(&tunnel->dprx_work))
+		if (cancel_delayed_work(&tunnel->dprx_work)) {
+			/*
+			 * The pending poll never ran, so @callback will not be
+			 * called for this tunnel. Let the owner release what
+			 * it handed to the callback; the connection manager
+			 * keeps a domain reference there.
+			 */
+			if (tunnel->callback_cancel)
+				tunnel->callback_cancel(tunnel,
+							tunnel->callback_data);
 			tb_tunnel_put(tunnel);
+		}
 	}
 }
 
 static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 {
+	const struct tb_nhi_ops *ops = tunnel->tb->nhi->ops;
+	bool host_source = !tb_route(tunnel->src_port->sw);
 	int ret;
+
+	/* Release the source while AUX and the router are still available. */
+	if (!active && tunnel->dp_source_connected && ops && ops->dp_tunnel_set) {
+		ret = ops->dp_tunnel_set(tunnel->tb->nhi,
+					 tunnel->src_port->port, false);
+		if (ret)
+			tb_tunnel_warn(tunnel, "DP source release failed: %d\n", ret);
+		tunnel->dp_source_connected = false;
+	}
 
 	if (active) {
 		struct tb_path **paths;
@@ -1182,6 +1204,14 @@ static int tb_dp_activate(struct tb_tunnel *tunnel, bool active)
 		ret = tb_dp_port_enable(tunnel->dst_port, active);
 		if (ret)
 			return ret;
+	}
+
+	if (active && host_source && ops && ops->dp_tunnel_set) {
+		ret = ops->dp_tunnel_set(tunnel->tb->nhi,
+					 tunnel->src_port->port, true);
+		if (ret)
+			return ret;
+		tunnel->dp_source_connected = true;
 	}
 
 	return active ? tb_dp_dprx_start(tunnel) : 0;
@@ -2070,11 +2100,22 @@ static int tb_usb3_activate(struct tb_tunnel *tunnel, bool activate)
 	return 0;
 }
 
+static bool tb_usb3_pcie_weight_applies(const struct tb_tunnel *tunnel)
+{
+	/*
+	 * A host that can never tunnel PCIe must not reserve bandwidth for
+	 * it: doing so leaves a DP tunnel with too little for its link.
+	 */
+	if (tunnel->tb->nhi->quirks & QUIRK_NO_PCIE_TUNNEL)
+		return false;
+	return tb_acpi_may_tunnel_pcie();
+}
+
 static int tb_usb3_consumed_bandwidth(struct tb_tunnel *tunnel,
 		int *consumed_up, int *consumed_down)
 {
 	struct tb_port *port = tb_upstream_port(tunnel->dst_port->sw);
-	int pcie_weight = tb_acpi_may_tunnel_pcie() ? TB_PCI_WEIGHT : 0;
+	int pcie_weight = tb_usb3_pcie_weight_applies(tunnel) ? TB_PCI_WEIGHT : 0;
 
 	/*
 	 * PCIe tunneling, if enabled, affects the USB3 bandwidth so

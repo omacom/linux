@@ -3,17 +3,19 @@
 
 #include <linux/bitfield.h>
 #include <linux/completion.h>
+#include <linux/mux/apple-display-crossbar.h>
 #include <linux/phy/phy.h>
 #include <linux/delay.h>
 
 #include "afk.h"
 #include "dcp.h"
+#include "dpin.h"
 #include "dptxep.h"
 #include "parser.h"
 #include "trace.h"
 
 struct dcpdptx_connection_cmd {
-	__le32 unk;
+	__le32 attributes;
 	__le32 target;
 } __attribute__((packed));
 
@@ -57,27 +59,44 @@ struct dptxport_apcall_max_drive_settings {
 	u8 _unk1[8];
 };
 
+/* Set: status at 0, count at 16. Get: count at 0, status at 16.
+ * Each lane carries one opaque 64-bit IODPDriveSettings value.
+ */
 struct dptxport_apcall_drive_settings {
-	__le32 retcode;
-	u8 _unk0[12];
-	__le32 unk1;
-	__le32 unk2;
-	__le32 unk3;
-	__le32 unk4;
-	__le32 unk5;
-	__le32 unk6;
-	__le32 unk7;
+	__le32 status_or_count;
+	u8 _pad0[12];
+	__le32 count_or_status;
+	u8 _pad1[12];
+	__le64 settings[];
 };
 
 struct dptxport_apcall_set_tiled {
 	__le32 retcode;
 };
 
+static u32 dptxport_connection_attributes(u8 core, bool supports_hpd)
+{
+	u32 attributes = supports_hpd ? DCPDPTX_REMOTE_PORT_SUPPORTS_HPD : 0;
+
+	/*
+	 * The destination number is zero for a physical DP PHY and nonzero
+	 * for a DP IN adapter. Native DP IN ports advertise role 1 as well as
+	 * HPD support. Firmware uses the role to configure the CIO wrapper;
+	 * selecting a DP IN address alone does not select its tunneled mode.
+	 */
+	if (core)
+		attributes |= FIELD_PREP(DCPDPTX_REMOTE_PORT_ROLE,
+					 DCPDPTX_REMOTE_PORT_ROLE_DPIN);
+
+	return attributes;
+}
+
 int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 				 u8 atc, u8 die)
 {
 	struct dptx_port *dptx = service->cookie;
 	struct dcpdptx_connection_cmd cmd, resp;
+	u32 attributes = dptxport_connection_attributes(core, true);
 	int ret;
 	u32 target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
 		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
@@ -87,7 +106,7 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 	trace_dptxport_validate_connection(dptx, core, atc, die);
 
 	cmd.target = cpu_to_le32(target);
-	cmd.unk = cpu_to_le32(0x100);
+	cmd.attributes = cpu_to_le32(attributes);
 	ret = afk_service_call(service, 0, 12, &cmd, sizeof(cmd), 40, &resp,
 			       sizeof(resp), 40);
 	if (ret)
@@ -95,7 +114,7 @@ int dptxport_validate_connection(struct apple_epic_service *service, u8 core,
 
 	if (le32_to_cpu(resp.target) != target)
 		return -EINVAL;
-	if (le32_to_cpu(resp.unk) != 0x100)
+	if (le32_to_cpu(resp.attributes) != attributes)
 		return -EINVAL;
 
 	return 0;
@@ -106,7 +125,7 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 {
 	struct dptx_port *dptx = service->cookie;
 	struct dcpdptx_connection_cmd cmd, resp;
-	u32 unk_field = supports_hpd ? DCPDPTX_REMOTE_PORT_SUPPORTS_HPD : 0;
+	u32 attributes = dptxport_connection_attributes(core, supports_hpd);
 	int ret;
 	u32 target = FIELD_PREP(DCPDPTX_REMOTE_PORT_CORE, core) |
 		     FIELD_PREP(DCPDPTX_REMOTE_PORT_ATC, atc) |
@@ -116,7 +135,7 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 	trace_dptxport_connect(dptx, core, atc, die);
 
 	cmd.target = cpu_to_le32(target);
-	cmd.unk = cpu_to_le32(unk_field);
+	cmd.attributes = cpu_to_le32(attributes);
 	ret = afk_service_call(service, 0, 11, &cmd, sizeof(cmd), 24, &resp,
 			       sizeof(resp), 24);
 	if (ret)
@@ -124,9 +143,14 @@ int dptxport_connect(struct apple_epic_service *service, u8 core, u8 atc,
 
 	if (le32_to_cpu(resp.target) != target)
 		return -EINVAL;
-	if (le32_to_cpu(resp.unk) != unk_field)
-		dev_notice(service->ep->dcp->dev, "unexpected unk field in reply: 0x%x (0x%x)\n",
-			  le32_to_cpu(resp.unk), unk_field);
+	if (le32_to_cpu(resp.attributes) != attributes)
+		dev_notice(service->ep->dcp->dev,
+			   "unexpected connection attributes in reply: 0x%x (0x%x)\n",
+			   le32_to_cpu(resp.attributes), attributes);
+	if (core)
+		dev_info(service->ep->dcp->dev,
+			 "DPTX DP IN connection target=%#x attributes=%#x reply=%#x\n",
+			 target, attributes, le32_to_cpu(resp.attributes));
 
 	return 0;
 }
@@ -184,29 +208,23 @@ dptxport_call_get_drive_settings(struct apple_epic_service *service,
 	struct dptx_port *dptx = service->cookie;
 	const struct dptxport_apcall_drive_settings *request = request_;
 	struct dptxport_apcall_drive_settings *reply = reply_;
+	size_t size;
+	u32 count;
 
-	if (reply_size < sizeof(*reply) || request_size < sizeof(*request))
+	if (request_size < sizeof(*request) || reply_size < sizeof(*reply))
+		return -EINVAL;
+	count = le32_to_cpu(request->status_or_count);
+	if (count > ARRAY_SIZE(dptx->drive_settings))
+		return -EINVAL;
+	size = struct_size(request, settings, count);
+	if (request_size < size || reply_size < size)
 		return -EINVAL;
 
-	*reply = *request;
-
-	/* Clear the rest of the buffer */
-	memset(reply_ + sizeof(*reply), 0, reply_size - sizeof(*reply));
-
-	/*
-	 * retcode appears to be lane count, seeing 2 for USB-C dp alt mode
-	 * with lanes splitted for DP/USB3.
-	 */
-	if (le32_to_cpu(reply->retcode) != dptx->lane_count)
-		dev_err(service->ep->dcp->dev,
-			"get_drive_settings: unexpected retcode %d\n",
-			reply->retcode);
-
-	reply->retcode = cpu_to_le32(dptx->lane_count);
-	reply->unk5 = cpu_to_le32(dptx->drive_settings[0]);
-	reply->unk6 = cpu_to_le32(0);
-	reply->unk7 = cpu_to_le32(dptx->drive_settings[1]);
-
+	memcpy(reply, request, size);
+	memset(reply_ + size, 0, reply_size - size);
+	reply->count_or_status = cpu_to_le32(0);
+	memcpy(reply->settings, dptx->drive_settings,
+	       count * sizeof(*reply->settings));
 	return 0;
 }
 
@@ -218,20 +236,24 @@ dptxport_call_set_drive_settings(struct apple_epic_service *service,
 	struct dptx_port *dptx = service->cookie;
 	const struct dptxport_apcall_drive_settings *request = request_;
 	struct dptxport_apcall_drive_settings *reply = reply_;
+	size_t size;
+	u32 count;
 
-	if (reply_size < sizeof(*reply) || request_size < sizeof(*request))
+	if (request_size < sizeof(*request) || reply_size < sizeof(*reply))
+		return -EINVAL;
+	count = le32_to_cpu(request->count_or_status);
+	if (count > ARRAY_SIZE(dptx->drive_settings))
+		return -EINVAL;
+	size = struct_size(request, settings, count);
+	if (request_size < size || reply_size < size)
 		return -EINVAL;
 
-	*reply = *request;
-	reply->retcode = cpu_to_le32(0);
-
-	dev_info(service->ep->dcp->dev, "set_drive_settings: %d:%d:%d:%d:%d:%d:%d\n",
-		 request->unk1, request->unk2, request->unk3, request->unk4,
-		 request->unk5, request->unk6, request->unk7);
-
-	dptx->drive_settings[0] = le32_to_cpu(reply->unk5);
-	dptx->drive_settings[1] = le32_to_cpu(reply->unk7);
-
+	memcpy(reply, request, size);
+	memset(reply_ + size, 0, reply_size - size);
+	reply->status_or_count = cpu_to_le32(0);
+	memset(dptx->drive_settings, 0, sizeof(dptx->drive_settings));
+	memcpy(dptx->drive_settings, request->settings,
+	       count * sizeof(*request->settings));
 	return 0;
 }
 
@@ -260,6 +282,14 @@ static int dptxport_call_get_max_lane_count(struct apple_epic_service *service,
 
 	if (reply_size < sizeof(*reply))
 		return -EINVAL;
+
+	if (dcp->dptx_core) {
+		/* The DP IN link is logical; Type-C lanes remain in USB4 mode. */
+		dptx->lane_count = 4;
+		reply->retcode = cpu_to_le32(0);
+		reply->lane_count = cpu_to_le64(4);
+		return 0;
+	}
 
 	ret = phy_validate(dptx->atcphy, PHY_MODE_DP, 0, &phy_ops);
 	if (ret < 0) {
@@ -312,7 +342,7 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 		dptx->phy_ops.dp.lanes = lane_count;
 		// Use dptx phy index > 3 as indication for dptx-phy or
 		// lpdptx-phy and configure the number of lanes for those
-		dptx->phy_ops.dp.set_lanes = (dcp->dptx_phy > 3);
+		dptx->phy_ops.dp.set_lanes = !dcp->dptx_core && (dcp->dptx_phy > 3);
 		break;
 	default:
 		dev_err(dcp->dev, "set_active_lane_count: invalid lane count:%llu\n", lane_count);
@@ -322,7 +352,7 @@ static int dptxport_call_set_active_lane_count(struct apple_epic_service *servic
 	}
 
 	if (dptx->phy_ops.dp.set_lanes) {
-		if (dptx->atcphy) {
+		if (dptx->atcphy && !service->ep->dcp->dptx_core) {
 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
 			if (ret)
 				return ret;
@@ -360,6 +390,29 @@ dptxport_call_will_change_link_config(struct apple_epic_service *service)
 {
 	struct dptx_port *dptx = service->cookie;
 
+	struct apple_dcp *dcp = service->ep->dcp;
+	struct apple_dcp_typec_route *route = dcp->active_typec_route;
+	int ret;
+
+	/*
+	 * AppleATCDPPort only takes an existing, nonzero-rate connection down.
+	 * On the first configuration AUX/HPD is already active, but the stream
+	 * clock has not been configured. Cycling DPIN here interrupts that
+	 * initial handshake unnecessarily.
+	 */
+	if (dcp->dptx_core && dptx->link_rate) {
+		ret = apple_dpin_set_active(route->dpin_bridge[route->dpin], false);
+		if (ret)
+			return ret;
+		ret = apple_dpxbar_set_active(route->dpin_xbar[route->dpin], false);
+		if (ret)
+			return ret;
+		/* AUX stays available while the stream clock is reconfigured. */
+		ret = apple_dpin_set_active(route->dpin_bridge[route->dpin], true);
+		if (ret)
+			return ret;
+	}
+
 	dptx->phy_ops.dp.set_lanes = 0;
 	dptx->phy_ops.dp.set_rate = 0;
 	dptx->phy_ops.dp.set_voltages = 0;
@@ -370,6 +423,24 @@ dptxport_call_will_change_link_config(struct apple_epic_service *service)
 static int
 dptxport_call_did_change_link_config(struct apple_epic_service *service)
 {
+	struct dptx_port *dptx = service->cookie;
+	struct apple_dcp *dcp = service->ep->dcp;
+	struct apple_dcp_typec_route *route = dcp->active_typec_route;
+	int ret;
+
+	if (dcp->dptx_core) {
+		/* A zero rate unconfigures the tunnel clock; keep the stream down. */
+		if (!dptx->link_rate)
+			return 0;
+		ret = apple_dpxbar_set_active(route->dpin_xbar[route->dpin], true);
+		if (ret)
+			return ret;
+		ret = apple_dpin_set_active(route->dpin_bridge[route->dpin], true);
+		if (ret)
+			apple_dpxbar_set_active(route->dpin_xbar[route->dpin], false);
+		return ret;
+	}
+
 	/* assume the link config did change and wait a little bit */
 	mdelay(10);
 
@@ -494,15 +565,22 @@ dptxport_call_activate(struct apple_epic_service *service,
 {
 	struct dptx_port *dptx = service->cookie;
 	const struct apple_dcp *dcp = service->ep->dcp;
+	struct apple_dcp_typec_route *route = dcp->active_typec_route;
+	int ret = 0;
+	__le32 status;
 
-	/* Standalone PHYs need DCP input selection here. Type-C owns ATC PHY mode. */
-	if (!dcp->phy_managed_by_typec)
-		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
+	if (dcp->dptx_core) {
+		/* A new activation invalidates an earlier idle-time deactivation ACK. */
+		reinit_completion(&dptx->deactivate_completion);
+		WRITE_ONCE(dptx->deactivate_status, -EINPROGRESS);
+		ret = apple_dpin_set_active(route->dpin_bridge[route->dpin], true);
+	} else if (!dcp->phy_managed_by_typec)
+		ret = phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
 
 	memcpy(reply, data, min(reply_size, data_size));
-	if (reply_size >= 4)
-		memset(reply, 0, 4);
-
+	status = cpu_to_le32(ret);
+	if (reply_size >= sizeof(status))
+		memcpy(reply, &status, sizeof(status));
 	return 0;
 }
 
@@ -513,14 +591,21 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 {
 	struct dptx_port *dptx = service->cookie;
 	const struct apple_dcp *dcp = service->ep->dcp;
+	struct apple_dcp_typec_route *route = dcp->active_typec_route;
+	int ret = 0;
+	__le32 status;
 
-	if (!dcp->phy_managed_by_typec)
-		phy_set_mode_ext(dptx->atcphy, PHY_MODE_INVALID, 0);
+	if (dcp->dptx_core)
+		ret = apple_dpin_set_active(route->dpin_bridge[route->dpin], false);
+	else if (!dcp->phy_managed_by_typec)
+		ret = phy_set_mode_ext(dptx->atcphy, PHY_MODE_INVALID, 0);
+	WRITE_ONCE(dptx->deactivate_status, ret);
+	complete_all(&dptx->deactivate_completion);
 
 	memcpy(reply, data, min(reply_size, data_size));
-	if (reply_size >= 4)
-		memset(reply, 0, 4);
-
+	status = cpu_to_le32(ret);
+	if (reply_size >= sizeof(status))
+		memcpy(reply, &status, sizeof(status));
 	return 0;
 }
 
@@ -642,6 +727,8 @@ int dptxep_init(struct apple_dcp *dcp)
 	u32 port;
 	unsigned long timeout = msecs_to_jiffies(1000);
 
+	init_completion(&dcp->dptxport[0].deactivate_completion);
+	init_completion(&dcp->dptxport[1].deactivate_completion);
 	init_completion(&dcp->dptxport[0].enable_completion);
 	init_completion(&dcp->dptxport[1].enable_completion);
 	init_completion(&dcp->dptxport[0].linkcfg_completion);

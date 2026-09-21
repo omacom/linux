@@ -80,6 +80,9 @@ struct tb_nhi_ring_layout {
  *			   been allocated but before its paths and adapters are enabled
  * @pci_tunnel_post_activate: NHI specific hook run after a PCIe tunnel's
  *			    paths and adapters have been enabled
+ * @dp_tunnel_set: Connect the host graphics source after DP paths/adapters are
+ *		 enabled, or release it before disabling them. Called with the
+ *		 domain mutex held; must not call back into the connection manager.
  * @is_present: Whether the device is currently present on the parent bus
  * @init_interrupts: NHI specific interrupt initialization hook
  */
@@ -100,6 +103,7 @@ struct tb_nhi_ops {
 	int (*pci_tunnel_pre_activate)(struct tb_nhi *nhi);
 	int (*pci_tunnel_post_activate)(struct tb_nhi *nhi);
 	int (*pci_tunnel_deactivate)(struct tb_nhi *nhi);
+	int (*dp_tunnel_set)(struct tb_nhi *nhi, unsigned int port, bool enable);
 	bool (*is_present)(struct tb_nhi *nhi);
 	int (*init_interrupts)(struct tb_nhi *nhi);
 };
@@ -159,6 +163,16 @@ struct tb_nhi_ops {
 #define QUIRK_E2E		BIT(1)
 #define QUIRK_NO_DMA_PORT	BIT(2)
 #define QUIRK_NO_USB3_BW_ALLOC	BIT(3)
+/* Host cannot tunnel PCIe at all; do not charge its weight against USB3 */
+#define QUIRK_NO_PCIE_TUNNEL	BIT(4)
+/*
+ * The host firmware keeps the USB4 link up across system sleep: routers put
+ * to sleep never see the link go down and fail a few seconds after resume,
+ * and a link that stays up raises no plug events on resume. Leave routers
+ * awake, then rescan the host router and re-offer the DP resources that
+ * tb_suspend_noirq() released.
+ */
+#define QUIRK_NO_LINK_SLEEP	BIT(5)
 
 /*
  * Minimal number of vectors when we use MSI-X. Two for control channel

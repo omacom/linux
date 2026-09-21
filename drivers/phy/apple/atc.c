@@ -33,6 +33,7 @@
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/phy/phy.h>
+#include <linux/phy/phy-apple-atc.h>
 #include <linux/platform_device.h>
 #include <linux/reset-controller.h>
 #include <linux/soc/apple/tunable.h>
@@ -649,6 +650,9 @@ struct apple_atcphy {
 	const struct atcphy_hw *hw;
 	enum atcphy_mode mode;
 	int dp_link_rate;
+	bool dp_tunnel;
+	bool dp_tunnel_open;
+	bool dp_tunnel_pll;
 	bool swap_lanes;
 	bool pipehandler_up;
 
@@ -1677,22 +1681,15 @@ static int atcphy_auspll_apb_command(struct apple_atcphy *atcphy, u32 command)
 
 	core_clear32(atcphy, AUSPLL_APB_CMD_OVERRIDE, AUSPLL_APB_CMD_OVERRIDE_REQ);
 
-	return 0;
+	return ret;
 }
 
-static int atcphy_dp_configure(struct apple_atcphy *atcphy, enum atcphy_dp_link_rate lr)
+static int atcphy_dp_program_pll(struct apple_atcphy *atcphy,
+		const struct atcphy_dp_link_rate_configuration *cfg,
+		unsigned int refbuf_div, unsigned int final_cmd)
 {
-	const struct atcphy_dp_link_rate_configuration *cfg;
-	const struct atcphy_mode_configuration *mode_cfg;
 	int ret;
 	u32 reg;
-
-	guard(mutex)(&atcphy->lock);
-	mode_cfg = atcphy_get_mode_config(atcphy, atcphy->mode);
-	cfg = &dp_lr_config[lr];
-
-	if (atcphy->dp_link_rate == lr)
-		return 0;
 
 	ret = readl_poll_timeout(atcphy->regs.core + ACIOPHY_CMN_SHM_STS_REG0, reg,
 				 (reg & ACIOPHY_CMN_SHM_STS_REG0_CMD_READY), 10, 10000);
@@ -1731,7 +1728,7 @@ static int atcphy_dp_configure(struct apple_atcphy *atcphy, enum atcphy_dp_link_
 	core_set32(atcphy, AUSPLL_FREQ_DESC_C, AUSPLL_FD_VCLK_PRE_DIVN);
 
 	core_mask32(atcphy, AUSPLL_CLKOUT_DIV, AUSPLL_CLKOUT_PLLA_REFBUFCLK_DI,
-		    FIELD_PREP(AUSPLL_CLKOUT_PLLA_REFBUFCLK_DI, 7));
+		    FIELD_PREP(AUSPLL_CLKOUT_PLLA_REFBUFCLK_DI, refbuf_div));
 
 	if (cfg->plla_clkout_vreg_bypass)
 		core_set32(atcphy, AUSPLL_CLKOUT_DTC_VREG, AUSPLL_DTC_VREG_BYPASS);
@@ -1755,7 +1752,27 @@ static int atcphy_dp_configure(struct apple_atcphy *atcphy, enum atcphy_dp_link_
 		return ret;
 	}
 
-	ret = atcphy_auspll_apb_command(atcphy, 0x2800);
+	ret = atcphy_auspll_apb_command(atcphy, final_cmd);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+static int atcphy_dp_configure(struct apple_atcphy *atcphy, enum atcphy_dp_link_rate lr)
+{
+	const struct atcphy_dp_link_rate_configuration *cfg;
+	const struct atcphy_mode_configuration *mode_cfg;
+	int ret;
+
+	guard(mutex)(&atcphy->lock);
+	mode_cfg = atcphy_get_mode_config(atcphy, atcphy->mode);
+	cfg = &dp_lr_config[lr];
+
+	if (atcphy->dp_link_rate == lr)
+		return 0;
+
+	ret = atcphy_dp_program_pll(atcphy, cfg, 7, 0x2800);
 	if (ret)
 		return ret;
 
@@ -1775,6 +1792,122 @@ static int atcphy_dp_configure(struct apple_atcphy *atcphy, enum atcphy_dp_link_
 	core_clear32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0, DP_MAC_DIV20_CLK_SEL);
 
 	atcphy->dp_link_rate = lr;
+	return 0;
+}
+
+/*
+ * Native configureDPTunnelMode runs when the USB4 tunnel becomes active,
+ * before HPD, DPTX activation and the DP IN handshake: common power,
+ * TX/RX sleep overrides, lane reset release and all three PCLK outputs.
+ * The dividers start at the HBR3 encoding (0) until a link rate is known.
+ */
+static void atcphy_dp_tunnel_open(struct apple_atcphy *atcphy)
+{
+	lockdep_assert_held(&atcphy->lock);
+	core_set32(atcphy, ACIOPHY_CFG0,
+		   ACIOPHY_CFG0_COMMON_SMALL | ACIOPHY_CFG0_COMMON_SMALL_OV);
+	udelay(2);
+	core_set32(atcphy, ACIOPHY_CFG0,
+		   ACIOPHY_CFG0_COMMON_BIG | ACIOPHY_CFG0_COMMON_BIG_OV);
+	udelay(2);
+	core_clear32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_CLAMP);
+	core_set32(atcphy, ACIOPHY_CFG0, ACIOPHY_CFG0_COMMON_CLAMP_OV);
+	udelay(2);
+	/* Both TX analog sleep inputs and their overrides. */
+	core_set32(atcphy, ACIOPHY_SLEEP_CTRL, GENMASK(7, 4));
+	udelay(2);
+	core_set32(atcphy, ACIOPHY_SLEEP_CTRL, GENMASK(3, 0));
+	udelay(2);
+	core_clear32(atcphy, ACIOPHY_SLEEP_CTRL, GENMASK(9, 8));
+	core_set32(atcphy, ACIOPHY_SLEEP_CTRL, GENMASK(11, 10));
+	udelay(2);
+	/* Both RX analog sleep inputs and their overrides. */
+	core_set32(atcphy, ACIOPHY_CFG0, GENMASK(13, 10));
+	udelay(2);
+	core_set32(atcphy, ACIOPHY_CFG0, GENMASK(9, 6));
+	udelay(2);
+	core_clear32(atcphy, ACIOPHY_CFG0, GENMASK(15, 14));
+	core_set32(atcphy, ACIOPHY_CFG0, GENMASK(17, 16));
+	udelay(2);
+	core_set32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0,
+		   DPTXPHY_PMA_LANE_RESET_N | DPTXPHY_PMA_LANE_RESET_N_OV);
+	core_set32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0, DPRX_PCLK_ENABLE);
+	core_set32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0, DPTX_PCLK2_ENABLE);
+	core_mask32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0, DPRX_PCLK_SELECT, 0);
+	core_mask32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0, DPTX_PCLK2_SELECT, 0);
+	core_set32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0, DPTX_PCLK1_ENABLE);
+	core_mask32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0, DPTX_PCLK1_SELECT, 0);
+	atcphy->dp_tunnel_open = true;
+}
+
+/*
+ * USB4 uses one fixed AUSPLL frequency and a per-PCLK divider. No DP lane or
+ * physical AUX configuration is performed here. Only PCLK1 is leased.
+ * Sequence and descriptor recovered from the T6000 macOS 13.5 driver.
+ */
+static int atcphy_dp_tunnel_configure(struct apple_atcphy *atcphy,
+				    enum atcphy_dp_link_rate lr)
+{
+	static const unsigned int dividers[] = { 4, 3, 1, 0 };
+	static const struct atcphy_dp_link_rate_configuration cfg = {
+		.freqinit_count_target = 0x21c,
+		.pclk_div_sel = 5,
+		.lfclk_ctrl = 5,
+		.vclk_op_divn = 2,
+		.plla_clkout_vreg_bypass = true,
+	};
+	int ret;
+
+	lockdep_assert_held(&atcphy->lock);
+	if (atcphy->mode != APPLE_ATCPHY_MODE_USB4 || !atcphy->dp_tunnel)
+		return -ENOLINK;
+
+	if (!atcphy->dp_tunnel_open)
+		atcphy_dp_tunnel_open(atcphy);
+	/* Native adjusts only the dividers once the PLL runs. */
+	core_mask32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0,
+		    DPRX_PCLK_SELECT, FIELD_PREP(DPRX_PCLK_SELECT, dividers[lr]));
+	core_mask32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0,
+		    DPTX_PCLK2_SELECT, FIELD_PREP(DPTX_PCLK2_SELECT, dividers[lr]));
+	core_mask32(atcphy, ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0,
+		    DPTX_PCLK1_SELECT, FIELD_PREP(DPTX_PCLK1_SELECT, dividers[lr]));
+	if (!atcphy->dp_tunnel_pll) {
+		ret = atcphy_dp_program_pll(atcphy, &cfg, 1, 0x2000);
+		if (ret) {
+			core_clear32(atcphy, AUSPLL_CLKOUT_MASTER,
+				     AUSPLL_CLKOUT_MASTER_PCLK_DRVR_EN |
+				     AUSPLL_CLKOUT_MASTER_PCLK2_DRVR_EN |
+				     AUSPLL_CLKOUT_MASTER_REFBUFCLK_DRVR_EN);
+			return ret;
+		}
+		atcphy->dp_tunnel_pll = true;
+	}
+	return 0;
+}
+
+static int atcphy_dp_tunnel_unconfigure(struct apple_atcphy *atcphy)
+{
+	int ret;
+
+	lockdep_assert_held(&atcphy->lock);
+	/*
+	 * The current DP IN implementation leases PCLK1 exclusively. Native
+	 * unconfigureDPTunnelMode gates these outputs when the last DP clock
+	 * user releases its rate; the USB4/CIO lane clocks remain running.
+	 */
+	if (atcphy->dp_tunnel_pll && atcphy->mode == APPLE_ATCPHY_MODE_USB4) {
+		core_clear32(atcphy, AUSPLL_CLKOUT_MASTER,
+			     AUSPLL_CLKOUT_MASTER_PCLK_DRVR_EN);
+		core_clear32(atcphy, AUSPLL_CLKOUT_MASTER,
+			     AUSPLL_CLKOUT_MASTER_PCLK2_DRVR_EN);
+		core_clear32(atcphy, AUSPLL_CLKOUT_MASTER,
+			     AUSPLL_CLKOUT_MASTER_REFBUFCLK_DRVR_EN);
+		ret = atcphy_auspll_apb_command(atcphy, 3);
+		if (ret)
+			return ret;
+	}
+	atcphy->dp_tunnel_pll = false;
+	atcphy->dp_tunnel_open = false;
 	return 0;
 }
 
@@ -1900,6 +2033,7 @@ static int atcphy_configure(struct apple_atcphy *atcphy, enum atcphy_mode mode)
 	u32 reg;
 
 	lockdep_assert_held(&atcphy->lock);
+	atcphy->dp_tunnel_pll = false;
 
 	if (mode == APPLE_ATCPHY_MODE_OFF) {
 		ret = atcphy_power_off(atcphy);
@@ -2068,10 +2202,35 @@ static const struct phy_ops apple_atc_usb3_phy_ops = {
 
 static int atcphy_dpphy_set_mode(struct phy *phy, enum phy_mode mode, int submode)
 {
-	/* Nothing to do here since the setup already happened in mux_set */
-	if (mode == PHY_MODE_DP && submode == 0)
+	struct apple_atcphy *atcphy = phy_get_drvdata(phy);
+	int ret;
+
+	if (mode != PHY_MODE_DP)
+		return -EINVAL;
+	guard(mutex)(&atcphy->lock);
+	if (submode == APPLE_ATCPHY_DP_TUNNEL) {
+		if (atcphy->hw->gen != ATCPHY_GENERATION_T8103)
+			return -EOPNOTSUPP;
+		if (atcphy->mode != APPLE_ATCPHY_MODE_USB4)
+			return -ENOLINK;
+		if (atcphy->dp_tunnel)
+			return -EBUSY;
+		atcphy->dp_tunnel = true;
+		atcphy->dp_tunnel_pll = false;
+		atcphy->dp_tunnel_open = false;
+		atcphy_dp_tunnel_open(atcphy);
 		return 0;
-	return -EINVAL;
+	}
+	if (submode != 0)
+		return -EINVAL;
+	if (atcphy->dp_tunnel) {
+		ret = atcphy_dp_tunnel_unconfigure(atcphy);
+		if (ret)
+			return ret;
+	}
+	atcphy->dp_tunnel = false;
+	/* Native setup is owned by the Type-C mux. */
+	return 0;
 }
 
 static int atcphy_dpphy_validate(struct phy *phy, enum phy_mode mode, int submode,
@@ -2104,6 +2263,7 @@ static int atcphy_dpphy_configure(struct phy *phy, union phy_configure_opts *opt
 	struct phy_configure_opts_dp *opts = &opts_->dp;
 	struct apple_atcphy *atcphy = phy_get_drvdata(phy);
 	enum atcphy_dp_link_rate link_rate;
+	int ret;
 
 	if (opts->set_voltages)
 		return -EINVAL;
@@ -2125,12 +2285,23 @@ static int atcphy_dpphy_configure(struct phy *phy, union phy_configure_opts *opt
 			link_rate = ATCPHY_DP_LINK_RATE_HBR3;
 			break;
 		case 0:
-			return 0;
+			mutex_lock(&atcphy->lock);
+			ret = atcphy->dp_tunnel ?
+				atcphy_dp_tunnel_unconfigure(atcphy) : 0;
+			mutex_unlock(&atcphy->lock);
+			return ret;
 		default:
 			dev_err(atcphy->dev, "Unsupported link rate: %d\n", opts->link_rate);
 			return -EINVAL;
 		}
 
+		mutex_lock(&atcphy->lock);
+		if (atcphy->dp_tunnel) {
+			ret = atcphy_dp_tunnel_configure(atcphy, link_rate);
+			mutex_unlock(&atcphy->lock);
+			return ret;
+		}
+		mutex_unlock(&atcphy->lock);
 		return atcphy_dp_configure(atcphy, link_rate);
 	}
 

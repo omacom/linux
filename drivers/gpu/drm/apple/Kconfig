@@ -12,7 +12,7 @@ config DRM_APPLE
 	select DRM_GEM_DMA_HELPER
 	select VIDEOMODE_HELPERS
 	depends on BACKLIGHT_CLASS_DEVICE
-	select MULTIPLEXER
+	depends on MUX_APPLE_DPXBAR
 	help
 	  Say Y if you have an Apple Silicon chipset.
 
