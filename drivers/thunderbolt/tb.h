@@ -142,6 +142,7 @@ struct tb_switch_tmu {
  * @no_dma_port: Prevent adding the DMA port of this switch
  * @no_usb3_bw_alloc: Host router does not implement the USB3 bandwidth
  *		      allocation registers (ADP_USB3_CS_1..4)
+ * @no_link_sleep: Host firmware keeps the link up across system sleep
  * @safe_mode: The switch is in safe-mode
  * @boot: Whether the switch was already authorized on boot or not
  * @rpm: The switch supports runtime PM
@@ -199,6 +200,7 @@ struct tb_switch {
 	bool no_nvm_upgrade;
 	bool no_dma_port;
 	bool no_usb3_bw_alloc;
+	bool no_link_sleep;
 	bool safe_mode;
 	bool boot;
 	bool rpm;

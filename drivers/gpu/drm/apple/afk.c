@@ -515,15 +515,16 @@ static void afk_recv_handle(struct apple_dcp_afkep *ep, u32 channel, u32 type,
 	struct epic_hdr *ehdr = (struct epic_hdr *)data;
 	struct epic_sub_hdr *eshdr =
 		(struct epic_sub_hdr *)(data + sizeof(*ehdr));
-	u16 subtype = le16_to_cpu(eshdr->type);
 	u8 *payload = data + sizeof(*ehdr) + sizeof(*eshdr);
 	size_t payload_size;
+	u16 subtype;
 
 	if (data_size < sizeof(*ehdr) + sizeof(*eshdr)) {
 		dev_err(ep->dcp->dev, "AFK[ep:%02x]: payload too small: %lx\n",
 			ep->endpoint, data_size);
 		return;
 	}
+	subtype = le16_to_cpu(eshdr->type);
 	payload_size = data_size - sizeof(*ehdr) - sizeof(*eshdr);
 
 	trace_afk_recv_handle(ep, channel, type, data_size, ehdr, eshdr);

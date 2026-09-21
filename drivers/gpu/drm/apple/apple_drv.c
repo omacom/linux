@@ -39,6 +39,7 @@
 #include <drm/drm_vblank.h>
 #include <drm/drm_fixed.h>
 
+#include "dpin.h"
 #include "dcp.h"
 #include "plane.h"
 
@@ -238,6 +239,7 @@ static void appledrm_connector_cleanup(struct drm_connector *connector)
 {
 	struct apple_connector *apple_connector = to_apple_connector(connector);
 
+	cancel_delayed_work_sync(&apple_connector->release_crtc_wq);
 	drm_connector_cleanup(connector);
 	kfree(apple_connector->color_elements.data);
 	kfree(apple_connector->timing_elements.data);
@@ -328,6 +330,7 @@ static int apple_connector_create(struct drm_device *drm,
 	connector->connected = false;
 	connector->dcp = dcp;
 	INIT_WORK(&connector->hotplug_wq, dcp_hotplug);
+	INIT_DELAYED_WORK(&connector->release_crtc_wq, dcp_release_stale_crtc_work);
 
 	ret = drm_connector_attach_encoder(&connector->base, &encoder->base);
 	if (ret)
@@ -464,6 +467,7 @@ static int apple_probe_typec_ports(struct drm_device *drm,
 		connector->connected = false;
 		connector->dcp = NULL;
 		INIT_WORK(&connector->hotplug_wq, dcp_hotplug);
+		INIT_DELAYED_WORK(&connector->release_crtc_wq, dcp_release_stale_crtc_work);
 
 		for (i = 0; i < num_dcp; i++) {
 			if (dcp_typec_port_has_candidate(idx, dcp[i]))
@@ -835,9 +839,14 @@ static struct platform_driver apple_platform_driver = {
 
 static int __init appledrm_register(void)
 {
+	int ret;
+
 	if (drm_firmware_drivers_only())
 		return -ENODEV;
 
+	ret = apple_dpin_register();
+	if (ret)
+		return ret;
 #if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
 	dcp_audio_register();
 #endif
@@ -854,6 +863,7 @@ static void __exit appledrm_unregister(void)
 #endif
 	dcp_unregister();
 	platform_driver_unregister(&apple_platform_driver);
+	apple_dpin_unregister();
 }
 
 module_init(appledrm_register);

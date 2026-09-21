@@ -36,6 +36,8 @@ enum dptx_apcall {
 #define DCPDPTX_REMOTE_PORT_ATC GENMASK(7, 4)
 #define DCPDPTX_REMOTE_PORT_DIE GENMASK(11, 8)
 #define DCPDPTX_REMOTE_PORT_CONNECTED BIT(15)
+#define DCPDPTX_REMOTE_PORT_ROLE GENMASK(7, 0)
+#define DCPDPTX_REMOTE_PORT_ROLE_DPIN 1
 #define DCPDPTX_REMOTE_PORT_SUPPORTS_HPD BIT(8)
 
 enum dptx_link_rate {
@@ -51,6 +53,8 @@ struct dptx_port {
 	bool enabled, connected;
 	struct completion enable_completion;
 	struct completion linkcfg_completion;
+	struct completion deactivate_completion;
+	int deactivate_status;
 	u32 unit;
 	struct apple_epic_service *service;
 	union phy_configure_opts phy_ops;
@@ -58,7 +62,7 @@ struct dptx_port {
 	struct mux_control *mux;
 	u32 lane_count;
 	u32 link_rate, pending_link_rate;
-	u32 drive_settings[2];
+	__le64 drive_settings[4];
 };
 
 int dptxport_validate_connection(struct apple_epic_service *service, u8 core,

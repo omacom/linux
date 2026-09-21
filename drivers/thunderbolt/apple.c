@@ -67,9 +67,11 @@
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
+#include <linux/soc/apple/dcp-usb4.h>
 #include <linux/soc/apple/rtkit.h>
 #include <linux/soc/apple/tunable.h>
 #include <linux/spinlock.h>
+#include <linux/suspend.h>
 #include <linux/types.h>
 #include <linux/usb/pd.h>
 #include <linux/usb/typec_mux.h>
@@ -145,6 +147,13 @@ struct apple_cio {
 	struct platform_device *nhi_pdev;
 
 	struct typec_thunderbolt_switch_dev *tbt_switch;
+
+	/* Defer cable changes during system sleep transitions. */
+	struct notifier_block pm_nb;
+	struct work_struct cable_work;
+	bool pm_transition;
+	bool cable_change_deferred;
+
 	/* Serializes PCIe-C population with cable teardown. */
 	struct mutex pcie_tunnel_lock;
 	struct delayed_work pcie_tunnel_work;
@@ -633,6 +642,30 @@ static int apple_nhi_pci_tunnel_post_activate(struct tb_nhi *nhi)
 	return 0;
 }
 
+static int apple_nhi_dp_tunnel_set(struct tb_nhi *nhi, unsigned int port,
+				   bool enable)
+{
+	struct apple_cio *acio = nhi_to_anhi(nhi)->acio;
+	struct device_node *connector __free(device_node) =
+		of_parse_phandle(acio->np, "apple,usb4-dp-connector", 0);
+	typeof(&apple_dcp_usb4_set) set;
+	int ret;
+
+	if (!connector)
+		return 0;
+	if (port != 5 && port != 6)
+		return -EINVAL;
+
+	set = symbol_get(apple_dcp_usb4_set);
+	if (!set)
+		return enable ? -ENODEV : 0;
+	ret = set(connector, port - 5, enable);
+	symbol_put(apple_dcp_usb4_set);
+	dev_info(acio->dev, "DP IN%u source %s: %d\n", port - 5,
+		 enable ? "connect" : "release", ret);
+	return ret;
+}
+
 static const struct tb_nhi_ops apple_nhi_ops = {
 	.request_ring_irq = apple_nhi_request_irq,
 	.release_ring_irq = apple_nhi_release_irq,
@@ -642,6 +675,7 @@ static const struct tb_nhi_ops apple_nhi_ops = {
 	.pci_tunnel_pre_activate = apple_nhi_pci_tunnel_pre_activate,
 	.pci_tunnel_post_activate = apple_nhi_pci_tunnel_post_activate,
 	.pci_tunnel_deactivate = apple_nhi_pci_tunnel_deactivate,
+	.dp_tunnel_set = apple_nhi_dp_tunnel_set,
 };
 
 static const struct tb_nhi_ring_layout apple_nhi_ring_layout = {
@@ -708,7 +742,14 @@ static int apple_nhi_probe(struct platform_device *pdev)
 	anhi->nhi.ops = &apple_nhi_ops;
 	anhi->nhi.ring_layout = &apple_nhi_ring_layout;
 	anhi->nhi.iobase = anhi->nhi_base;
-	anhi->nhi.quirks = QUIRK_NO_DMA_PORT | QUIRK_NO_USB3_BW_ALLOC;
+	anhi->nhi.quirks = QUIRK_NO_DMA_PORT | QUIRK_NO_USB3_BW_ALLOC |
+			   QUIRK_NO_LINK_SLEEP;
+	/*
+	 * PCIe-C only exists after an m1n1 preinit handoff. Without one the CM
+	 * must not reserve USB4 bandwidth for PCIe on top of the USB3 tunnel.
+	 */
+	if (!acio->pcie_tunnel_np || !acio->pcie_tunnel_preinitialized)
+		anhi->nhi.quirks |= QUIRK_NO_PCIE_TUNNEL;
 
 	anhi->nhi.hop_count = readl(anhi->nhi_base + APPLE_CIO_NHI_HOP_COUNT) &
 			      APPLE_CIO_NHI_HOP_COUNT_MASK;
@@ -906,6 +947,35 @@ static struct platform_device *apple_cio_find_pcie_tunnel(struct apple_cio *acio
 	return pdev;
 }
 
+/*
+ * Release both DP IN sources so their shared ps_atcN_cio domain can power
+ * off and reset ACIO. The CM may reacquire a source during resume without
+ * notifying Type-C.
+ */
+static void apple_cio_release_dp_sources(struct apple_cio *acio)
+{
+	struct device_node *connector __free(device_node) =
+		of_parse_phandle(acio->np, "apple,usb4-dp-connector", 0);
+	typeof(&apple_dcp_usb4_set) set;
+	unsigned int dpin;
+
+	if (!connector)
+		return;
+
+	set = symbol_get(apple_dcp_usb4_set);
+	if (!set)
+		return;
+
+	for (dpin = 0; dpin < 2; dpin++) {
+		int ret = set(connector, dpin, false);
+
+		if (ret)
+			dev_warn(acio->dev, "DP IN%u source release failed: %d\n",
+				 dpin, ret);
+	}
+	symbol_put(apple_dcp_usb4_set);
+}
+
 static void apple_cio_stop(struct apple_cio *acio)
 {
 	struct platform_device *nhi_pdev, *pcie_pdev;
@@ -918,6 +988,8 @@ static void apple_cio_stop(struct apple_cio *acio)
 	 * After we shut down the ACIO co-processor we will no longer be able to access
 	 * the MMIO space of these so make sure nothing tries to do just that.
 	 */
+	apple_cio_release_dp_sources(acio);
+
 	WRITE_ONCE(acio->pcie_tunnel_requested, false);
 	cancel_delayed_work_sync(&acio->pcie_tunnel_work);
 	mutex_lock(&acio->pcie_tunnel_lock);
@@ -1084,6 +1156,75 @@ remove_links:
 	return ret;
 }
 
+/* Bring the ACIO complex up or down to match the cable that is plugged in. */
+static int apple_cio_apply_cable_state(struct apple_cio *acio)
+{
+	lockdep_assert_held(&acio->lock);
+
+	if (acio->current_cable_info && acio->target_cable_info) {
+		dev_err(acio->dev,
+			"Invalid cable transition from 0x%x to 0x%x, shutting down instead\n",
+			acio->current_cable_info, acio->target_cable_info);
+		acio->target_cable_info = 0;
+	}
+
+	if (acio->target_cable_info)
+		return apple_cio_start(acio);
+
+	apple_cio_stop(acio);
+	return 0;
+}
+
+/*
+ * Replay a cable change that arrived during a system sleep transition, once the
+ * transition is over and the power domains can be gated again.
+ */
+static void apple_cio_cable_work(struct work_struct *work)
+{
+	struct apple_cio *acio = container_of(work, struct apple_cio, cable_work);
+
+	guard(mutex)(&acio->lock);
+
+	if (acio->pm_transition || !acio->cable_change_deferred)
+		return;
+	acio->cable_change_deferred = false;
+
+	if (acio->current_cable_info)
+		apple_cio_stop(acio);
+	if (acio->target_cable_info)
+		apple_cio_start(acio);
+}
+
+static int apple_cio_pm_notify(struct notifier_block *nb, unsigned long action,
+			       void *data)
+{
+	struct apple_cio *acio = container_of(nb, struct apple_cio, pm_nb);
+	bool replay = false;
+
+	switch (action) {
+	case PM_SUSPEND_PREPARE:
+	case PM_HIBERNATION_PREPARE:
+	case PM_RESTORE_PREPARE:
+
+		scoped_guard(mutex, &acio->lock)
+			acio->pm_transition = true;
+		break;
+	case PM_POST_SUSPEND:
+	case PM_POST_HIBERNATION:
+	case PM_POST_RESTORE:
+		scoped_guard(mutex, &acio->lock) {
+			acio->pm_transition = false;
+			replay = acio->cable_change_deferred;
+		}
+
+		if (replay)
+			queue_work(system_long_wq, &acio->cable_work);
+		break;
+	}
+
+	return NOTIFY_DONE;
+}
+
 static int apple_cio_tbt_switch_set(struct typec_thunderbolt_switch_dev *sw,
 				    const struct typec_thunderbolt_switch_data *data)
 {
@@ -1135,28 +1276,19 @@ static int apple_cio_tbt_switch_set(struct typec_thunderbolt_switch_dev *sw,
 		return 0;
 
 	/*
-	 * Transitions between different cables without a shutdown inbetween are invalid and can
-	 * only happen when there's a bug inside the Type-C PD driver. If we tried such a
-	 * transition, ACIO would crash and then trigger some watchdog that would reset the entire
-	 * SoC a few seconds later. Shutting down instead only makes the connected device not work
-	 * but we should be able to recover once the next cable is plugged in.
+	 * ACIO resets only when its domains power off. During system sleep
+	 * transitions, genpd's prepared_count prevents the shared DP IN domain
+	 * from powering off, so a stop/start would wedge the next PMGR reset.
+	 * Wake IRQs can deliver cable changes in this window; defer them until
+	 * the PM notifier schedules cable_work. Do not change syscore flags
+	 * mid-transition: genpd prepare/complete accounting must stay balanced.
 	 */
-	if (acio->current_cable_info && acio->target_cable_info) {
-		dev_err(acio->dev,
-			"Invalid cable transition from 0x%x to 0x%x, shutting down instead\n",
-			acio->current_cable_info, acio->target_cable_info);
-		acio->target_cable_info = 0;
+	if (acio->pm_transition) {
+		acio->cable_change_deferred = true;
+		return 0;
 	}
 
-	/*
-	 * Bring up or power down the ACIO complex
-	 * current_cable_info will be updated in the start/stop functions
-	 */
-	if (acio->target_cable_info)
-		return apple_cio_start(acio);
-
-	apple_cio_stop(acio);
-	return 0;
+	return apple_cio_apply_cable_state(acio);
 }
 
 static int apple_cio_probe(struct platform_device *pdev)
@@ -1253,10 +1385,18 @@ static int apple_cio_probe(struct platform_device *pdev)
 		.set = apple_cio_tbt_switch_set,
 		.drvdata = acio,
 	};
+	INIT_WORK(&acio->cable_work, apple_cio_cable_work);
+	acio->pm_nb.notifier_call = apple_cio_pm_notify;
+	ret = register_pm_notifier(&acio->pm_nb);
+	if (ret)
+		return dev_err_probe(dev, ret, "Unable to register PM notifier\n");
+
 	acio->tbt_switch = typec_thunderbolt_switch_register(dev, &desc);
-	if (IS_ERR(acio->tbt_switch))
+	if (IS_ERR(acio->tbt_switch)) {
+		unregister_pm_notifier(&acio->pm_nb);
 		return dev_err_probe(dev, PTR_ERR(acio->tbt_switch),
 				     "Unable to register thunderbolt switch\n");
+	}
 
 	return 0;
 }
@@ -1265,7 +1405,9 @@ static void apple_cio_remove(struct platform_device *pdev)
 {
 	struct apple_cio *acio = platform_get_drvdata(pdev);
 
+	unregister_pm_notifier(&acio->pm_nb);
 	typec_thunderbolt_switch_unregister(acio->tbt_switch);
+	cancel_work_sync(&acio->cable_work);
 	cancel_delayed_work_sync(&acio->pcie_tunnel_work);
 
 	guard(mutex)(&acio->lock);

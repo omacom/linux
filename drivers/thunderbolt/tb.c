@@ -1970,6 +1970,18 @@ static void tb_dp_tunnel_active(struct tb_tunnel *tunnel, void *data)
 	tb_domain_put(tb);
 }
 
+/*
+ * Called instead of tb_dp_tunnel_active() when the tunnel is torn down
+ * while its DPRX capabilities read poll is still pending
+ */
+static void tb_dp_tunnel_cancel(struct tb_tunnel *tunnel, void *data)
+{
+	struct tb *tb = data;
+
+	tb_tunnel_dbg(tunnel, "DPRX capabilities read canceled\n");
+	tb_domain_put(tb);
+}
+
 static void tb_tunnel_one_dp(struct tb *tb, struct tb_port *in,
 			     struct tb_port *out)
 {
@@ -2034,6 +2046,7 @@ static void tb_tunnel_one_dp(struct tb *tb, struct tb_port *in,
 		tb_port_dbg(out, "could not allocate DP tunnel\n");
 		goto err_reclaim_usb;
 	}
+	tunnel->callback_cancel = tb_dp_tunnel_cancel;
 
 	list_add_tail(&tunnel->list, &tcm->tunnel_list);
 
@@ -3021,6 +3034,7 @@ static int tb_start(struct tb *tb, bool reset)
 	 * on these machines.
 	 */
 	tb->root_switch->no_usb3_bw_alloc = tb->nhi->quirks & QUIRK_NO_USB3_BW_ALLOC;
+	tb->root_switch->no_link_sleep = tb->nhi->quirks & QUIRK_NO_LINK_SLEEP;
 
 	ret = tb_switch_configure(tb->root_switch);
 	if (ret) {
@@ -3226,16 +3240,69 @@ static int tb_thaw_noirq(struct tb *tb)
 	return 0;
 }
 
+/*
+ * tb_suspend_noirq() released every DP tunnel and its DP resources. A GPU
+ * re-asserts HPD after resume and the resulting hotplug re-adds the DP IN;
+ * a display coprocessor behind a DP IN adapter cannot do that until a tunnel
+ * exists again. A DP OUT of a router that stayed connected through the sleep
+ * does not raise a plug event either: only tb_scan_port() of a newly added
+ * router looks at its HPD. So offer both back now that the domain, the
+ * display driver and interrupts are all back, and let tb_tunnel_dp() pair
+ * them.
+ */
+static void tb_reoffer_dp_out_resources(struct tb *tb, struct tb_switch *sw)
+{
+	struct tb_port *port;
+
+	tb_switch_for_each_port(sw, port) {
+		if (tb_port_is_dpout(port)) {
+			if (tb_dp_port_hpd_is_active(port) == 1 &&
+			    !tb_dp_port_is_enabled(port))
+				tb_dp_resource_available(tb, port);
+		} else if (tb_port_has_remote(port)) {
+			tb_reoffer_dp_out_resources(tb, port->remote->sw);
+		}
+	}
+}
+
+static void tb_reoffer_dp_resources(struct tb *tb)
+{
+	struct tb_switch *sw = tb->root_switch;
+	struct tb_port *port;
+
+	tb_reoffer_dp_out_resources(tb, sw);
+
+	tb_switch_for_each_port(sw, port) {
+		if (!tb_port_is_dpin(port) || tb_port_is_enabled(port))
+			continue;
+		if (!tb_switch_query_dp_resource(sw, port))
+			continue;
+		tb_dp_resource_available(tb, port);
+	}
+}
+
 static void tb_complete(struct tb *tb)
 {
+	bool rescan;
+
 	/*
 	 * Release any unplugged XDomains and if there is a case where
 	 * another domain is swapped in place of unplugged XDomain we
 	 * need to run another rescan.
 	 */
 	mutex_lock(&tb->lock);
-	if (tb_free_unplugged_xdomains(tb->root_switch))
+	rescan = tb_free_unplugged_xdomains(tb->root_switch);
+	/*
+	 * A child router that failed to resume was freed by
+	 * tb_resume_noirq(), and a host port whose link is back up does not
+	 * raise a plug event for it. Scan again so it is added like a fresh
+	 * plug, then offer the released DP resources back so DP tunneling
+	 * can pair them.
+	 */
+	if (rescan || tb->root_switch->no_link_sleep)
 		tb_scan_switch(tb->root_switch);
+	if (tb->root_switch->no_link_sleep)
+		tb_reoffer_dp_resources(tb);
 	mutex_unlock(&tb->lock);
 }
 

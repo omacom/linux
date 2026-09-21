@@ -1026,6 +1026,12 @@ static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
 	if (dcp->main_display)
 		return;
 
+	if (dcp_usb4_ignore_poweroff_hotplug(dcp, !!(*connected))) {
+		/* Keep the physical connector and EDID available for DPMS wake. */
+		dcp->valid_mode = false;
+		return;
+	}
+
 	if (dcp->during_modeset) {
 		/*
 		 * Remember it rather than dropping it.  Resume re-runs the

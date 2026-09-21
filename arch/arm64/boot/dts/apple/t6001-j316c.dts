@@ -41,3 +41,110 @@
 	compatible = "apple,j316-macaudio", "apple,macaudio";
 	model = "MacBook Pro J316";
 };
+
+&dcpext1 {
+	mux-controls = <&atcphy0_xbar 0>, <&atcphy1_xbar 0>, <&atcphy2_xbar 0>,
+		       <&atcphy0_xbar 1>, <&atcphy0_xbar 2>,
+		       <&atcphy1_xbar 1>, <&atcphy1_xbar 2>,
+		       <&atcphy2_xbar 1>, <&atcphy2_xbar 2>;
+	mux-control-names = "typec0", "typec1", "typec2",
+			    "typec0-dpin0", "typec0-dpin1",
+			    "typec1-dpin0", "typec1-dpin1",
+			    "typec2-dpin0", "typec2-dpin1";
+	apple,typec-dpin = <&atc0_dpin0>, <&atc0_dpin1>,
+			  <&atc1_dpin0>, <&atc1_dpin1>,
+			  <&atc2_dpin0>, <&atc2_dpin1>;
+
+	typec-routes {
+		/delete-node/ route@0;
+	};
+};
+
+&usb4_0_acio { apple,usb4-dp-connector = <&typec0>; };
+&usb4_1_acio { apple,usb4-dp-connector = <&typec1>; };
+&usb4_2_acio { apple,usb4-dp-connector = <&typec2>; };
+
+&dcpext0 {
+	phys = <&atcphy3 PHY_TYPE_DP>, <&atcphy0 PHY_TYPE_DP>;
+	phy-names = "dp-phy", "typec0";
+	mux-controls = <&atcphy3_xbar 0>, <&atcphy0_xbar 0>,
+		       <&atcphy0_xbar 1>, <&atcphy0_xbar 2>;
+	mux-control-names = "dp-xbar", "typec0", "typec0-dpin0", "typec0-dpin1";
+	apple,typec-mux-indices = <0>;
+	apple,typec-dptx-phys = <0>;
+	apple,typec-dpin = <&atc0_dpin0>, <&atc0_dpin1>;
+
+	typec-routes {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		route@0 {
+			reg = <0>;
+			mode-switch;
+
+			port {
+				dcpext0_typec0: endpoint {
+					remote-endpoint = <&typec0_dcp0>;
+				};
+			};
+		};
+	};
+};
+
+&typec0 {
+	ports {
+		port@3 {
+			/delete-node/ endpoint@0;
+
+			typec0_dcp0: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext0_typec0>;
+			};
+		};
+	};
+};
+
+&{/soc} {
+	atc0_dpin0: dp-in@701e50000 {
+		compatible = "apple,t6000-dpin";
+		reg = <0x7 0x1e50000 0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1306 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_atc0_cio>;
+	};
+	atc0_dpin1: dp-in@701e58000 {
+		compatible = "apple,t6000-dpin";
+		reg = <0x7 0x1e58000 0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1307 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_atc0_cio>;
+	};
+	atc1_dpin0: dp-in@b01e50000 {
+		compatible = "apple,t6000-dpin";
+		reg = <0xb 0x1e50000 0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1354 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_atc1_cio>;
+	};
+	atc1_dpin1: dp-in@b01e58000 {
+		compatible = "apple,t6000-dpin";
+		reg = <0xb 0x1e58000 0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1355 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_atc1_cio>;
+	};
+	atc2_dpin0: dp-in@f01e50000 {
+		compatible = "apple,t6000-dpin";
+		reg = <0xf 0x1e50000 0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1402 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_atc2_cio>;
+	};
+	atc2_dpin1: dp-in@f01e58000 {
+		compatible = "apple,t6000-dpin";
+		reg = <0xf 0x1e58000 0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1403 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_atc2_cio>;
+	};
+};

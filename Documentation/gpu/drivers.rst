@@ -6,6 +6,7 @@ GPU Driver Documentation
    :maxdepth: 3
 
    amdgpu/index
+   apple/usb4-dp
    i915
    imagination/index
    mcde

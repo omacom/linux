@@ -14,7 +14,12 @@ struct apple_connector;
 
 #include "dcp-internal.h"
 
+/* How long userspace gets to disable a disconnected Type-C port's CRTC. */
+#define DCP_STALE_CRTC_GRACE_MS 1000
+
 void dcp_hotplug(struct work_struct *work);
+void dcp_release_stale_crtc_work(struct work_struct *work);
+void dcp_schedule_stale_crtc_release(struct apple_connector *connector);
 void dcp_retrain_oob(struct apple_connector *connector);
 
 /*
@@ -46,6 +51,12 @@ struct apple_connector {
 
 	/* Workqueue for sending hotplug events to the associated device */
 	struct work_struct hotplug_wq;
+
+	/*
+	 * Releases the pipeline a disconnected Type-C port still holds when
+	 * userspace has not done so within the grace period.
+	 */
+	struct delayed_work release_crtc_wq;
 
 	struct mutex chunk_lock;
 

@@ -20,6 +20,7 @@
 #include <linux/usb/typec_mux.h>
 #include <linux/usb/typec_tbt.h>
 #include <linux/usb/role.h>
+#include <linux/suspend.h>
 #include <linux/workqueue.h>
 #include <linux/firmware.h>
 
@@ -703,13 +704,37 @@ static void cd321x_update_work(struct work_struct *work)
 
 	guard(mutex)(&tps->lock);
 
+	/*
+	 * Nothing below may run while the system is suspending or resuming. The
+	 * interrupt is a wakeup source, so a cable change during sleep is latched
+	 * and replayed from resume_device_irqs(); after the debounce it lands in
+	 * the middle of dpm_resume(). Tearing the session down there drops the USB
+	 * role and puts the Type-C mux back to safe against controllers that have
+	 * not resumed yet, which hangs the machine. Leave the accumulated status
+	 * alone; cd321x_pm_notify() replays it once the transition is over.
+	 */
+	if (cd321x->pm_transition)
+		return;
+
 	st = cd321x->update_status;
 	cd321x->update_status.status_changed = 0;
 	cd321x->update_status.data_status_changed = 0;
+	cd321x->update_status.events = 0;
 
 	bool old_connected = !!tps->partner;
 	bool new_connected = st.status & TPS_STATUS_PLUG_PRESENT;
-	bool was_disconnected = st.status_changed & TPS_STATUS_PLUG_PRESENT;
+	/*
+	 * A cable removed and replaced during sleep can leave status unchanged.
+	 * The latched plug event still requires a reconnect to reset ACIO and
+	 * rebuild the USB session.
+	 */
+	bool plug_edge_latched = st.events & APPLE_CD_REG_INT_PLUG_EVENT;
+	bool was_disconnected = (st.status_changed & TPS_STATUS_PLUG_PRESENT) ||
+				plug_edge_latched;
+
+	if (plug_edge_latched && !(st.status_changed & TPS_STATUS_PLUG_PRESENT))
+		dev_dbg(tps->dev,
+			"latched plug event with no status change, treating as a reconnect\n");
 
 	bool usb_connection = st.data_status &
 			      (TPS_DATA_STATUS_USB2_CONNECTION | TPS_DATA_STATUS_USB3_CONNECTION);
@@ -917,6 +942,13 @@ static irqreturn_t cd321x_interrupt(int irq, void *data)
 		goto err_unlock;
 	}
 	trace_cd321x_irq(event);
+
+	/*
+	 * Keep the raw events for the worker. The status registers only describe
+	 * the present state, so a plug edge that has already been undone by the
+	 * time the worker samples is visible nowhere else.
+	 */
+	container_of(tps, struct cd321x, tps)->update_status.events |= event;
 
 	if (!event)
 		goto err_unlock;
@@ -1297,6 +1329,42 @@ static int cd321x_register_port_altmodes(struct cd321x *cd321x)
 	return 0;
 }
 
+static int cd321x_pm_notify(struct notifier_block *nb, unsigned long action,
+			    void *data)
+{
+	struct cd321x *cd321x = container_of(nb, struct cd321x, pm_nb);
+
+	switch (action) {
+	case PM_SUSPEND_PREPARE:
+	case PM_HIBERNATION_PREPARE:
+	case PM_RESTORE_PREPARE:
+		/*
+		 * Taking the lock here also waits out an update that is already
+		 * running, so one can never overlap the sleep.
+		 */
+		scoped_guard(mutex, &cd321x->tps.lock)
+			cd321x->pm_transition = true;
+		break;
+	case PM_POST_SUSPEND:
+	case PM_POST_HIBERNATION:
+	case PM_POST_RESTORE:
+		scoped_guard(mutex, &cd321x->tps.lock)
+			cd321x->pm_transition = false;
+		/*
+		 * Replay after the usual debounce rather than immediately. The
+		 * work would otherwise start on another CPU while the rest of
+		 * this notifier chain is still running, and the session it
+		 * rebuilds reaches drivers further down the chain that have not
+		 * yet left their own sleep window.
+		 */
+		mod_delayed_work(system_wq, &cd321x->update_work,
+				 msecs_to_jiffies(CD321X_DEBOUNCE_DELAY_MS));
+		break;
+	}
+
+	return NOTIFY_DONE;
+}
+
 static int
 cd321x_register_port(struct tps6598x *tps, struct fwnode_handle *fwnode)
 {
@@ -1336,8 +1404,16 @@ cd321x_register_port(struct tps6598x *tps, struct fwnode_handle *fwnode)
 	cd321x->state.data = NULL;
 	typec_set_mode(tps->port, TYPEC_STATE_SAFE);
 
+	cd321x->pm_nb.notifier_call = cd321x_pm_notify;
+	ret = register_pm_notifier(&cd321x->pm_nb);
+	if (ret)
+		goto err_unregister_tbt_switch;
+
 	return 0;
 
+err_unregister_tbt_switch:
+	typec_thunderbolt_switch_put(cd321x->tbt_switch);
+	cd321x->tbt_switch = NULL;
 err_unregister_mux:
 	typec_mux_put(cd321x->mux);
 	cd321x->mux = NULL;
@@ -1787,6 +1863,7 @@ static void cd321x_remove(struct tps6598x *tps)
 	};
 	int ret;
 
+	unregister_pm_notifier(&cd321x->pm_nb);
 	cancel_delayed_work_sync(&cd321x->update_work);
 
 	/*
