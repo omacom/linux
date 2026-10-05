@@ -52,6 +52,8 @@ struct apple_dcp_typec_port {
 	struct apple_connector *secondary_connector;
 	/* tiled_split: the pipeline whose DPTX port 1 carries dpin1 */
 	struct apple_dcp *split_dcp;
+	/* how long dpin1 waits for dpin0's tile hint before routing normally */
+	unsigned long tile_hint_deadline;
 	/* last mux state acted on, to collapse the per-candidate notifications */
 	struct typec_altmode *applied_alt;
 	unsigned long applied_mode;
@@ -1891,6 +1893,8 @@ static void dcp_tb_claim(void *data)
 	unsigned int dpin = ctx->dpin;
 
 	*ctx->slot = best;
+	if (dpin == 0)
+		port->tile_hint_deadline = jiffies + msecs_to_jiffies(2000);
 	/* the port is in USB4 mode, not DP-alt */
 	port->dp_wanted = false;
 	dcp_tunnel_prepare(best, ctx->ctl);
@@ -1995,7 +1999,7 @@ static void dcp_tb_split_teardown_locked(struct apple_dcp_typec_port *port)
 	dev_info(dcp->dev, "tiled: dpin1 released from DPTX port 1\n");
 }
 
-/* -EOPNOTSUPP: route dpin1 as a display of its own. */
+/* -EOPNOTSUPP: not a tile, route dpin1 as a display of its own. */
 static int dcp_tb_split_locked(struct apple_dcp_typec_port *port,
 			       const struct dcp_tb_attach_context *req)
 {
@@ -2035,6 +2039,19 @@ static int dcp_tb_split_locked(struct apple_dcp_typec_port *port,
 			return -EOPNOTSUPP;
 		xbar = &route->xbar->chip->mux[2];
 	}
+	/*
+	 * Only the second half of a tiled display goes here; two separate
+	 * monitors behind a dock keep their own pipelines. DCP reports the
+	 * topology for dpin0 shortly after its link comes up: wait for that,
+	 * but not for ever, as a sink may never send one.
+	 */
+	if (!READ_ONCE(dcp->dptxport[0].tile_hint)) {
+		if (time_before(jiffies, port->tile_hint_deadline))
+			return -ENODEV;
+		return -EOPNOTSUPP;
+	}
+	if (dcp->dptxport[0].tiles_h * dcp->dptxport[0].tiles_v < 2)
+		return -EOPNOTSUPP;
 	state = route->mux_index | 1;
 
 	/* T602X points the DP IN at its pipeline before DCP probes AUX */

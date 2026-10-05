@@ -538,6 +538,7 @@ static int dcp_dptx_connect_session(struct apple_dcp *dcp, u32 port,
 		smp_store_release(&dcp->external_link_ready, false);
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
+	WRITE_ONCE(dcp->dptxport[port].tile_hint, false);
 	dcp->dptxport[port].atcphy = dcp->phy;
 	/* a tiled display's second half comes in on the port's dpin1 */
 	dfp_port = port && dcp->split.active ? 2 : dcp->dptx_dfp_port;
@@ -1087,6 +1088,8 @@ int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
 
 	mutex_lock(&dcp->hpd_mutex);
 	ret = dcp_dptx_release_locked(dcp, port);
+	if (!ret)
+		WRITE_ONCE(dcp->dptxport[port].tile_hint, false);
 	mutex_unlock(&dcp->hpd_mutex);
 
 	return ret;

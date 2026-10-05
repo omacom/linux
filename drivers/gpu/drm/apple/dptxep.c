@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 /* Copyright 2022 Sven Peter <sven@svenpeter.dev> */
 
+#include <linux/unaligned.h>
 #include <linux/bitfield.h>
 #include <linux/completion.h>
 #include <linux/module.h>
@@ -79,6 +80,19 @@ struct dptxport_apcall_drive_settings {
 struct dptxport_apcall_set_tiled {
 	__le32 retcode;
 };
+
+/*
+ * SetTiledDisplayHints payload, as DCP sends it for an LG UltraFine 5K
+ * (offsets in bytes): tile location (column, row) at 0x08/0x0c, tiles
+ * across and down at 0x30/0x34, the whole display's size at 0x38/0x3c.
+ */
+#define DPTX_TILE_HINT_LOC_X	0x08
+#define DPTX_TILE_HINT_LOC_Y	0x0c
+#define DPTX_TILE_HINT_TILES_H	0x30
+#define DPTX_TILE_HINT_TILES_V	0x34
+#define DPTX_TILE_HINT_WIDTH	0x38
+#define DPTX_TILE_HINT_HEIGHT	0x3c
+#define DPTX_TILE_HINT_MIN_SIZE	0x40
 
 /*
  * Ported from aurora-silicon/linux#8: a Thunderbolt DP tunnel uses the same
@@ -635,13 +649,35 @@ dptxport_call_get_supports_downspread(struct apple_epic_service *service,
 	return 0;
 }
 
-static int dptxport_call_set_tiled_display_hint(void *reply_,
-						 size_t reply_size)
+static int dptxport_call_set_tiled_display_hint(struct apple_epic_service *service,
+						 const void *data, size_t data_size,
+						 void *reply_, size_t reply_size)
 {
 	struct dptxport_apcall_set_tiled *reply = reply_;
+	struct dptx_port *dptx = service->cookie;
+	const u8 *hint = data;
 
 	if (reply_size < sizeof(*reply))
 		return -EINVAL;
+
+	if (dptx && data_size >= DPTX_TILE_HINT_MIN_SIZE) {
+		u32 h = get_unaligned_le32(hint + DPTX_TILE_HINT_TILES_H);
+		u32 v = get_unaligned_le32(hint + DPTX_TILE_HINT_TILES_V);
+		u32 x = get_unaligned_le32(hint + DPTX_TILE_HINT_LOC_X);
+		u32 y = get_unaligned_le32(hint + DPTX_TILE_HINT_LOC_Y);
+
+		dptx->tiles_h = min(h, 255U);
+		dptx->tiles_v = min(v, 255U);
+		dptx->tile_x = min(x, 255U);
+		dptx->tile_y = min(y, 255U);
+		WRITE_ONCE(dptx->tile_hint, true);
+		if (h * v > 1)
+			dev_info(service->ep->dcp->dev,
+				 "DPTXPort: port %u carries tile (%u,%u) of a %ux%u tiled %ux%u display\n",
+				 dptx->unit, x, y, h, v,
+				 get_unaligned_le32(hint + DPTX_TILE_HINT_WIDTH),
+				 get_unaligned_le32(hint + DPTX_TILE_HINT_HEIGHT));
+	}
 
 	reply->retcode = cpu_to_le32(1);
 	return 0;
@@ -776,7 +812,9 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		return 0;
 	case DPTX_APCALL_SET_TILED_DISPLAY_HINTS:
 		memcpy(reply, data, min(reply_size, data_size));
-		return dptxport_call_set_tiled_display_hint(reply, reply_size);
+		return dptxport_call_set_tiled_display_hint(service, data,
+							    data_size, reply,
+							    reply_size);
 	case DPTX_APCALL_GET_DRIVE_SETTINGS:
 		return dptxport_call_get_drive_settings(service, data, data_size,
 							reply, reply_size);
