@@ -26,6 +26,11 @@
 #include "ibootep.h"
 #include "parser.h"
 
+static bool tiled_split = true;
+module_param(tiled_split, bool, 0644);
+MODULE_PARM_DESC(tiled_split,
+		 "Drive both halves of a tiled Thunderbolt display (LG UltraFine 5K) on one pipeline, through its two DPTX ports (default: on)");
+
 static bool typec_follow_crtc = true;
 module_param(typec_follow_crtc, bool, 0444);
 MODULE_PARM_DESC(typec_follow_crtc,
@@ -45,6 +50,8 @@ struct apple_dcp_typec_port {
 	struct apple_connector *connector;
 	/* A second logical stream through this port's USB4 dock. */
 	struct apple_connector *secondary_connector;
+	/* tiled_split: the pipeline whose DPTX port 1 carries dpin1 */
+	struct apple_dcp *split_dcp;
 	/* last mux state acted on, to collapse the per-candidate notifications */
 	struct typec_altmode *applied_alt;
 	unsigned long applied_mode;
@@ -1478,12 +1485,42 @@ static bool dcp_t6030_dpin_route(struct apple_dcp_typec_route *route)
  * output enable are kept, see dcp_tunnel_crossbar_down()).
  * Runs inside a DCP apcall: only tb_lock, which nobody holds across a DCP call.
  */
-int dcp_tunnel_crossbar_up(struct apple_dcp *dcp)
+static int dcp_tunnel_split_up_locked(struct apple_dcp *dcp)
+{
+	int ret;
+
+	lockdep_assert_held(&dcp->tb_lock);
+	if (!dcp->split.active || !dcp->split.xbar)
+		return -ENODEV;
+	if (!dcp->split.clock_ok) {
+		dev_warn(dcp->dev, "tiled: no DP tunnel pixel clock, dpin1 crossbar left down\n");
+		return -EIO;
+	}
+	if (!dcp->split.xbar_up) {
+		/* never block a DCP call on the mux semaphore */
+		ret = mux_control_try_select(dcp->split.xbar, dcp->split.mux_state);
+		if (!ret)
+			dcp->split.xbar_up = true;
+	} else {
+		ret = dcp_dpxbar_link(dcp->split.xbar, true);
+	}
+	if (ret) {
+		dev_warn(dcp->dev, "tiled: dpin1 crossbar up failed: %d\n", ret);
+		return ret;
+	}
+	if (!dcp->split.set_active)
+		return -ENODEV;
+	return dcp->split.set_active(dcp->split.binding, true);
+}
+
+int dcp_tunnel_crossbar_up(struct apple_dcp *dcp, u32 unit)
 {
 	struct apple_dcp_typec_route *route;
 	int ret;
 
 	guard(mutex)(&dcp->tb_lock);
+	if (unit)
+		return dcp_tunnel_split_up_locked(dcp);
 	route = dcp->active_typec_route;
 	if (!route || !route->tunnel || !route->active_xbar)
 		return -ENODEV;
@@ -1516,11 +1553,18 @@ int dcp_tunnel_crossbar_up(struct apple_dcp *dcp)
  * link: DP IN inactive, crossbar clocks down (mux selection and ATC output
  * enable kept). DP IN goes active again in dcp_tunnel_crossbar_up().
  */
-int dcp_tunnel_crossbar_down(struct apple_dcp *dcp)
+int dcp_tunnel_crossbar_down(struct apple_dcp *dcp, u32 unit)
 {
 	struct apple_dcp_typec_route *route;
 
 	guard(mutex)(&dcp->tb_lock);
+	if (unit) {
+		if (!dcp->split.active || !dcp->split.xbar_up)
+			return 0;
+		if (dcp->split.set_active)
+			dcp->split.set_active(dcp->split.binding, false);
+		return dcp_dpxbar_link(dcp->split.xbar, false);
+	}
 	route = dcp->active_typec_route;
 	if (!route || !route->tunnel || !route->xbar_up)
 		return 0;
@@ -1572,7 +1616,8 @@ int dcp_direct_crossbar_link(struct apple_dcp *dcp, bool up)
  * Thunderbolt DP IN, from DCP's SetLinkRate: start (rate != 0) or stop the
  * tunnel pixel clock. A stopped clock also takes the crossbar connection down.
  */
-int dcp_tunnel_set_rate(struct apple_dcp *dcp, struct phy *phy, u32 link_rate)
+int dcp_tunnel_set_rate(struct apple_dcp *dcp, struct phy *phy, u32 unit,
+			u32 link_rate)
 {
 	typeof(apple_atc_dp_tunnel_rate) *fn;
 	struct apple_dcp_typec_route *route;
@@ -1598,6 +1643,27 @@ int dcp_tunnel_set_rate(struct apple_dcp *dcp, struct phy *phy, u32 link_rate)
 		dev_err(dcp->dev, "phy-apple-atc not loaded, no DP tunnel clock\n");
 		return -ENOENT;
 	}
+	if (unit) {
+		/*
+		 * t602x has a pixel clock per DP IN; t600x runs one for both,
+		 * which the second tile never stops on its own: dpin0 does.
+		 */
+		ret = 0;
+		if (!dcp->split.active) {
+			ret = -ENODEV;
+		} else {
+			if (!link_rate && dcp->split.xbar_up)
+				dcp_dpxbar_link(dcp->split.xbar, false);
+			if (link_rate || dcp->hw.t6020_tunnel_flow)
+				ret = fn(phy, 1, link_rate);
+		}
+		symbol_put(apple_atc_dp_tunnel_rate);
+		dcp->split.clock_ok = !ret && link_rate;
+		if (ret)
+			dev_warn(dcp->dev, "tiled: dpin1 pixel clock (rate 0x%x) failed: %d\n",
+				 link_rate, ret);
+		return ret;
+	}
 	if (!link_rate && route->xbar_up)
 		dcp_dpxbar_link(route->active_xbar, false);
 	ret = fn(phy, route->tunnel_dpin, link_rate);
@@ -1610,7 +1676,7 @@ int dcp_tunnel_set_rate(struct apple_dcp *dcp, struct phy *phy, u32 link_rate)
 }
 
 /* Thunderbolt DP IN: DCP Activate/Deactivate */
-int dcp_tunnel_dpin_activate(struct apple_dcp *dcp, bool active)
+int dcp_tunnel_dpin_activate(struct apple_dcp *dcp, u32 unit, bool active)
 {
 	struct apple_dcp_typec_route *route;
 	int ret;
@@ -1618,6 +1684,11 @@ int dcp_tunnel_dpin_activate(struct apple_dcp *dcp, bool active)
 	guard(mutex)(&dcp->tb_lock);
 	if (!dcp->dptx_tunnel)
 		return 0;
+	if (unit) {
+		if (!dcp->split.active || !dcp->split.set_active)
+			return 0;
+		return dcp->split.set_active(dcp->split.binding, active);
+	}
 	/* Route the upstream engine before firmware begins AUX negotiation.
 	 * T6030 DP IN .set does not enable clocks; DidChange does that later.
 	 */
@@ -1886,6 +1957,128 @@ static const struct dcp_fabric_attach_ops dcp_tb_attach_ops = {
 	.connect_oob = dcp_tb_connect_oob,
 };
 
+/*
+ * tiled_split: take the second half of a tiled display (dpin1) onto DPTX
+ * port 1 of the pipeline that already drives dpin0 on this port. DCP pairs
+ * the two tiles itself (PAVSplitDisplay) and presents one display; on its
+ * own pipeline the second tile is refused ("no single tile support").
+ * Fabric lock held.
+ */
+static void dcp_tb_split_teardown_locked(struct apple_dcp_typec_port *port)
+{
+	struct apple_dcp *dcp = port->split_dcp;
+
+	lockdep_assert_held(&dcp_typec_fabric_lock);
+	if (!dcp)
+		return;
+	if (dcp->dptxport[1].enabled)
+		dptxport_set_hpd(dcp->dptxport[1].service, false);
+	dcp_dptx_disconnect(dcp, 1);
+	scoped_guard(mutex, &dcp->tb_lock) {
+		if (dcp->split.xbar) {
+			if (dcp->split.xbar_up)
+				mux_control_deselect(dcp->split.xbar);
+			else
+				dcp_dpxbar_preselect(dcp->split.xbar,
+						     MUX_IDLE_DISCONNECT);
+			dcp_dpxbar_tunnel_select_source(dcp->split.xbar, -1);
+		}
+		dcp->split.active = false;
+		dcp->split.xbar = NULL;
+		dcp->split.xbar_up = false;
+		dcp->split.clock_ok = false;
+		dcp->split.generation = 0;
+		dcp->split.set_active = NULL;
+		dcp->split.binding = NULL;
+	}
+	port->split_dcp = NULL;
+	dev_info(dcp->dev, "tiled: dpin1 released from DPTX port 1\n");
+}
+
+/* -EOPNOTSUPP: route dpin1 as a display of its own. */
+static int dcp_tb_split_locked(struct apple_dcp_typec_port *port,
+			       const struct dcp_tb_attach_context *req)
+{
+	struct apple_dcp_typec_route *route = port->owner;
+	struct mux_control *xbar;
+	struct apple_dcp *dcp;
+	int ret, state;
+
+	lockdep_assert_held(&dcp_typec_fabric_lock);
+	if (port->split_dcp) {
+		dcp = port->split_dcp;
+		scoped_guard(mutex, &dcp->tb_lock)
+			ret = dcp_fabric_binding_request(dcp->split.generation,
+							 req->generation, req->active,
+							 dcp->split.set_active == req->set_active &&
+							 dcp->split.binding == req->binding);
+		if (ret)
+			return ret > 0 ? 0 : ret;
+		if (req->active)
+			return 0;
+		dcp_tb_split_teardown_locked(port);
+		return 0;
+	}
+	if (!req->active)
+		return -EOPNOTSUPP;
+	/* dpin0 first: the Thunderbolt side retries on -ENODEV */
+	if (!route || !route->tunnel || route->tunnel_dpin != 0)
+		return -ENODEV;
+	dcp = route->dcp;
+	if (dcp->external || !dcp->dptxport[1].enabled)
+		return -EOPNOTSUPP;
+	xbar = route->dpin[1];
+	if (!xbar) {
+		/* Legacy DT ABI: unnamed DPIN controls share the DP-alt chip. */
+		if (route->xbar != &route->xbar->chip->mux[0] ||
+		    route->xbar->chip->controllers < 3)
+			return -EOPNOTSUPP;
+		xbar = &route->xbar->chip->mux[2];
+	}
+	state = route->mux_index | 1;
+
+	/* T602X points the DP IN at its pipeline before DCP probes AUX */
+	ret = dcp_dpxbar_tunnel_select_source(xbar, state);
+	if (ret && ret != -EOPNOTSUPP) {
+		dev_warn(dcp->dev, "tiled: dpin1 source select failed: %d\n", ret);
+		goto unwind;
+	}
+	ret = dcp_dpxbar_preselect(xbar, state);
+	if (ret && ret != -EOPNOTSUPP) {
+		dev_warn(dcp->dev, "tiled: dpin1 crossbar preselect failed: %d\n", ret);
+		goto unwind;
+	}
+
+	/* Only a crossbar that carries dpin1 to the pipeline makes the split live. */
+	scoped_guard(mutex, &dcp->tb_lock) {
+		dcp->split.xbar = xbar;
+		dcp->split.mux_state = state;
+		dcp->split.xbar_up = false;
+		dcp->split.clock_ok = false;
+		dcp->split.generation = req->generation;
+		dcp->split.set_active = req->set_active;
+		dcp->split.binding = req->binding;
+		dcp->split.active = true;
+	}
+	port->split_dcp = dcp;
+	dev_info(dcp->dev,
+		 "tiled: dpin1 joins dpin0 on DPTX port 1 (crossbar state %d)\n",
+		 state);
+
+	ret = dcp_dptx_connect(dcp, 1);
+	if (ret) {
+		dev_warn(dcp->dev, "tiled: DPTX port 1 connect failed: %d\n", ret);
+		/* dpin0 keeps its route and stays a single-stream display */
+		dcp_tb_split_teardown_locked(port);
+	}
+	return ret;
+
+unwind:
+	dcp_dpxbar_preselect(xbar, MUX_IDLE_DISCONNECT);
+	dcp_dpxbar_tunnel_select_source(xbar, -1);
+	return ret;
+}
+
 static int dcp_tb_dispatch(void *data, const struct dcp_fabric_port *found)
 {
 	struct dcp_tb_attach_context *ctx = data;
@@ -1898,6 +2091,11 @@ static int dcp_tb_dispatch(void *data, const struct dcp_fabric_port *found)
 
 	slot = dpin ? &port->secondary_owner : &port->owner;
 
+	if (dpin == 1 && (tiled_split || port->split_dcp)) {
+		ret = dcp_tb_split_locked(port, ctx);
+		if (ret != -EOPNOTSUPP)
+			return ret;
+	}
 	if (*slot && (*slot)->tunnel && (*slot)->tunnel_dpin == dpin) {
 		dcp = (*slot)->dcp;
 		scoped_guard(mutex, &dcp->tb_lock) {
@@ -1914,6 +2112,9 @@ static int dcp_tb_dispatch(void *data, const struct dcp_fabric_port *found)
 	}
 
 	if (!ctx->active) {
+		/* the second tile goes before the route it shares */
+		if (dpin == 0)
+			dcp_tb_split_teardown_locked(port);
 		dcp = (*slot)->dcp;
 		dcp_tb_binding_drain(dcp);
 		dcp_dptx_disconnect_drained(dcp, 0);
@@ -2771,6 +2972,8 @@ static void dcp_typec_route_unregister(void *data)
 	guard(mutex)(&dcp_typec_fabric_lock);
 	if (port->preferred_route == route)
 		port->preferred_route = NULL;
+	if (port->split_dcp == route->dcp)
+		dcp_tb_split_teardown_locked(port);
 	if (route->tunnel) {
 		dcp_tb_binding_drain(route->dcp);
 		dcp_dptx_disconnect_drained(route->dcp, 0);

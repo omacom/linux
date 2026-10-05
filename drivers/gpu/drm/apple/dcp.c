@@ -497,6 +497,7 @@ static int dcp_dptx_connect_session(struct apple_dcp *dcp, u32 port,
 				    bool recovery)
 {
 	unsigned long timeout;
+	u8 dfp_port;
 	int ret = 0;
 
 	if (!dcp->phy) {
@@ -538,8 +539,10 @@ static int dcp_dptx_connect_session(struct apple_dcp *dcp, u32 port,
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
 	dcp->dptxport[port].atcphy = dcp->phy;
+	/* a tiled display's second half comes in on the port's dpin1 */
+	dfp_port = port && dcp->split.active ? 2 : dcp->dptx_dfp_port;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service,
-					   dcp->dptx_dfp_port,
+					   dfp_port,
 					   dcp->dptx_phy, dcp->dptx_die);
 	if (ret) {
 		dev_err(dcp->dev,
@@ -553,7 +556,7 @@ static int dcp_dptx_connect_session(struct apple_dcp *dcp, u32 port,
 		goto out_unlock;
 	}
 	ret = dptxport_connect(dcp->dptxport[port].service,
-			       dcp->dptx_dfp_port,
+			       dfp_port,
 			       dcp->dptx_phy, dcp->dptx_die,
 		       dcp_is_typec_output(dcp));
 	if (ret) {
@@ -886,13 +889,36 @@ void dcp_external_sink_irq(struct apple_dcp *dcp)
 	dcp_dptx_connect_oob(pdev, 0);
 }
 
+/*
+ * tiled_split: DPTX port 1 carries the second half of a tiled display on
+ * this pipeline. Bring it back whenever port 0 (re)connects, as DCP pairs
+ * the tiles only while both ports are connected.
+ */
+static void dcp_dptx_connect_tile(struct apple_dcp *dcp)
+{
+	bool split;
+	int ret;
+
+	scoped_guard(mutex, &dcp->tb_lock)
+		split = dcp->split.active;
+	if (!split)
+		return;
+	ret = dcp_dptx_connect(dcp, 1);
+	if (ret)
+		dev_warn(dcp->dev, "tiled: DPTX port 1 reconnect failed: %d\n", ret);
+}
+
 int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
 	struct dcp_fabric_session session;
+	int ret;
 
 	scoped_guard(mutex, &dcp->hpd_mutex)
 		session = dcp_session_locked(dcp);
-	return dcp_dptx_connect_session(dcp, port, session, !!session.cookie, false);
+	ret = dcp_dptx_connect_session(dcp, port, session, !!session.cookie, false);
+	if (!ret && !port)
+		dcp_dptx_connect_tile(dcp);
+	return ret;
 }
 
 static bool dcp_edid_is_placeholder(const struct drm_edid *drm_edid)
@@ -987,6 +1013,8 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 			return;
 	}
 	ret = dcp_dptx_connect_session(dcp, 0, session, true, false);
+	if (!ret)
+		dcp_dptx_connect_tile(dcp);
 	guard(mutex)(&dcp->hpd_mutex);
 	if (!dcp_session_valid_locked(dcp, session, true))
 		return;
@@ -1573,6 +1601,12 @@ void dcp_poweroff(struct platform_device *pdev)
 			dcp_external_retry(dcp, ret ? "display link released with an HPD error" :
 					   "display link released with no display described",
 					   ret, 500);
+		/* and the second tile's, which dcp_poweron() brings back too */
+		if (READ_ONCE(dcp->split.active) && dcp->dptxport[1].enabled &&
+		    dcp->dptxport[1].connected) {
+			dptxport_set_hpd(dcp->dptxport[1].service, false);
+			dcp_dptx_disconnect(dcp, 1);
+		}
 	} else if (dcp->hdmi_hpd) {
 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 		if (!connected) {

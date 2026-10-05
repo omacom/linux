@@ -578,7 +578,7 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 		 */
 		if (dptx->atcphy && service->ep->dcp->dptx_tunnel) {
 			dcp_tunnel_set_rate(service->ep->dcp, dptx->atcphy,
-					    link_rate);
+					    dptx->unit, link_rate);
 		} else if (dptx->atcphy) {
 			/* No clocked crossbar output across a PHY rate change. */
 			dcp_direct_crossbar_link(service->ep->dcp, false);
@@ -666,7 +666,7 @@ dptxport_call_activate(struct apple_epic_service *service,
 	if (dptx->atcphy && !dcp->phy_managed_by_typec)
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
 	if (dcp->dptx_tunnel)
-		dcp_tunnel_dpin_activate(dcp, true);
+		dcp_tunnel_dpin_activate(dcp, dptx->unit, true);
 
 	memcpy(reply, data, min(reply_size, data_size));
 	if (reply_size >= 4)
@@ -685,7 +685,7 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 
 	dev_info(dcp->dev, "DPTXPort: DEACTIVATE\n");
 	if (dcp->dptx_tunnel)
-		dcp_tunnel_dpin_activate(dcp, false);
+		dcp_tunnel_dpin_activate(dcp, dptx->unit, false);
 	else
 		dcp_direct_crossbar_link(dcp, false);
 	if (dptx->atcphy && !dcp->phy_managed_by_typec)
@@ -719,7 +719,7 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		 * first.
 		 */
 		if (service->ep->dcp->dptx_tunnel && dptx->link_rate)
-			dcp_tunnel_crossbar_down(service->ep->dcp);
+			dcp_tunnel_crossbar_down(service->ep->dcp, dptx->unit);
 		else if (dptx->link_rate)
 			dcp_direct_crossbar_link(service->ep->dcp, false);
 		return dptxport_call_will_change_link_config(service);
@@ -727,7 +727,7 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		int ret = dptxport_call_did_change_link_config(service);
 
 		if (!ret && service->ep->dcp->dptx_tunnel && dptx->link_rate)
-			dcp_tunnel_crossbar_up(service->ep->dcp);
+			dcp_tunnel_crossbar_up(service->ep->dcp, dptx->unit);
 		else if (!ret && dptx->link_rate)
 			dcp_direct_crossbar_link(service->ep->dcp, true);
 		if (!ret)
