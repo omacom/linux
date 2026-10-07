@@ -1999,6 +1999,55 @@ static void dcp_tb_split_teardown_locked(struct apple_dcp_typec_port *port)
 	dev_info(dcp->dev, "tiled: dpin1 released from DPTX port 1\n");
 }
 
+/*
+ * Feed dpin1 into DPTX port 1 of @route's pipeline, with its binding. The
+ * split goes live only once the crossbar carries dpin1 there; a failure is
+ * undone and returned.
+ */
+static int dcp_tb_split_join_locked(struct apple_dcp_typec_port *port,
+				    struct apple_dcp_typec_route *route,
+				    struct mux_control *xbar, u64 generation,
+				    int (*set_active)(void *binding, bool active),
+				    void *binding)
+{
+	struct apple_dcp *dcp = route->dcp;
+	int ret, state = route->mux_index | 1;
+
+	lockdep_assert_held(&dcp_typec_fabric_lock);
+	/* T602X points the DP IN at its pipeline before DCP probes AUX */
+	ret = dcp_dpxbar_tunnel_select_source(xbar, state);
+	if (ret && ret != -EOPNOTSUPP) {
+		dev_warn(dcp->dev, "tiled: dpin1 source select failed: %d\n", ret);
+		goto unwind;
+	}
+	ret = dcp_dpxbar_preselect(xbar, state);
+	if (ret && ret != -EOPNOTSUPP) {
+		dev_warn(dcp->dev, "tiled: dpin1 crossbar preselect failed: %d\n", ret);
+		goto unwind;
+	}
+
+	scoped_guard(mutex, &dcp->tb_lock) {
+		dcp->split.xbar = xbar;
+		dcp->split.mux_state = state;
+		dcp->split.xbar_up = false;
+		dcp->split.clock_ok = false;
+		dcp->split.generation = generation;
+		dcp->split.set_active = set_active;
+		dcp->split.binding = binding;
+		dcp->split.active = true;
+	}
+	port->split_dcp = dcp;
+	dev_info(dcp->dev,
+		 "tiled: dpin1 joins dpin0 on DPTX port 1 (crossbar state %d)\n",
+		 state);
+	return 0;
+
+unwind:
+	dcp_dpxbar_preselect(xbar, MUX_IDLE_DISCONNECT);
+	dcp_dpxbar_tunnel_select_source(xbar, -1);
+	return ret;
+}
+
 /* -EOPNOTSUPP: not a tile, route dpin1 as a display of its own. */
 static int dcp_tb_split_locked(struct apple_dcp_typec_port *port,
 			       const struct dcp_tb_attach_context *req)
@@ -2006,7 +2055,7 @@ static int dcp_tb_split_locked(struct apple_dcp_typec_port *port,
 	struct apple_dcp_typec_route *route = port->owner;
 	struct mux_control *xbar;
 	struct apple_dcp *dcp;
-	int ret, state;
+	int ret;
 
 	lockdep_assert_held(&dcp_typec_fabric_lock);
 	if (port->split_dcp) {
@@ -2052,35 +2101,10 @@ static int dcp_tb_split_locked(struct apple_dcp_typec_port *port,
 	}
 	if (dcp->dptxport[0].tiles_h * dcp->dptxport[0].tiles_v < 2)
 		return -EOPNOTSUPP;
-	state = route->mux_index | 1;
-
-	/* T602X points the DP IN at its pipeline before DCP probes AUX */
-	ret = dcp_dpxbar_tunnel_select_source(xbar, state);
-	if (ret && ret != -EOPNOTSUPP) {
-		dev_warn(dcp->dev, "tiled: dpin1 source select failed: %d\n", ret);
-		goto unwind;
-	}
-	ret = dcp_dpxbar_preselect(xbar, state);
-	if (ret && ret != -EOPNOTSUPP) {
-		dev_warn(dcp->dev, "tiled: dpin1 crossbar preselect failed: %d\n", ret);
-		goto unwind;
-	}
-
-	/* Only a crossbar that carries dpin1 to the pipeline makes the split live. */
-	scoped_guard(mutex, &dcp->tb_lock) {
-		dcp->split.xbar = xbar;
-		dcp->split.mux_state = state;
-		dcp->split.xbar_up = false;
-		dcp->split.clock_ok = false;
-		dcp->split.generation = req->generation;
-		dcp->split.set_active = req->set_active;
-		dcp->split.binding = req->binding;
-		dcp->split.active = true;
-	}
-	port->split_dcp = dcp;
-	dev_info(dcp->dev,
-		 "tiled: dpin1 joins dpin0 on DPTX port 1 (crossbar state %d)\n",
-		 state);
+	ret = dcp_tb_split_join_locked(port, route, xbar, req->generation,
+				       req->set_active, req->binding);
+	if (ret)
+		return ret;
 
 	ret = dcp_dptx_connect(dcp, 1);
 	if (ret) {
@@ -2088,11 +2112,6 @@ static int dcp_tb_split_locked(struct apple_dcp_typec_port *port,
 		/* dpin0 keeps its route and stays a single-stream display */
 		dcp_tb_split_teardown_locked(port);
 	}
-	return ret;
-
-unwind:
-	dcp_dpxbar_preselect(xbar, MUX_IDLE_DISCONNECT);
-	dcp_dpxbar_tunnel_select_source(xbar, -1);
 	return ret;
 }
 
@@ -2249,7 +2268,35 @@ struct dcp_typec_follow_slot {
 	u64 tunnel_generation;
 	int (*set_active)(void *binding, bool active);
 	void *binding;
+	/* tiled_split: the second tile, on DPTX port 1 of the same pipeline */
+	bool split;
+	u64 split_generation;
+	int (*split_set_active)(void *binding, bool active);
+	void *split_binding;
 };
+
+/* Record @route's second tile, if it has one, for the pipeline it joins. */
+static void dcp_follow_save_split(struct apple_dcp_typec_route *route,
+				  struct dcp_typec_follow_slot *slot)
+{
+	struct apple_dcp *dcp = route->dcp;
+
+	if (route->port->split_dcp != dcp)
+		return;
+	slot->split = true;
+	scoped_guard(mutex, &dcp->tb_lock) {
+		slot->split_generation = dcp->split.generation;
+		slot->split_set_active = dcp->split.set_active;
+		slot->split_binding = dcp->split.binding;
+	}
+}
+
+/* Can @route's pipeline take a second tile? */
+static bool dcp_follow_split_fits(struct apple_dcp_typec_route *route)
+{
+	return dcp_typec_tunnel_ctl(route, 1) && !route->dcp->external &&
+	       route->dcp->dptxport[1].enabled;
+}
 
 struct dcp_typec_follow_context {
 	struct dcp_typec_follow_slot slots[2];
@@ -2402,6 +2449,7 @@ static int dcp_typec_follow_decide(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	/* A tunnel's DP IN must reach the pipeline it is given. */
 	if (follow->action == DCP_FABRIC_FOLLOW_REFUSE ||
 	    (from->tunnel && !dcp_typec_tunnel_ctl(to, from->tunnel_dpin)) ||
+	    (port->split_dcp == from->dcp && !dcp_follow_split_fits(to)) ||
 	    (follow->action == DCP_FABRIC_FOLLOW_SWAP && holder->tunnel &&
 	     !dcp_typec_tunnel_ctl(back, holder->tunnel_dpin)))
 		return -EINVAL;
@@ -2433,6 +2481,7 @@ static int dcp_follow_prepare(void *data, unsigned int index)
 		if (!slot->tunnel_generation || !slot->set_active)
 			return -ESTALE;
 	}
+	dcp_follow_save_split(slot->from, slot);
 	{
 		struct drm_crtc *crtc = &slot->from->dcp->crtc->base;
 		struct drm_crtc_state *old = drm_atomic_get_old_crtc_state(ctx->state, crtc);
@@ -2475,6 +2524,8 @@ static int dcp_follow_release(struct apple_dcp_typec_route *route)
 	ret = dcp_dptx_park(dcp);
 	if (ret)
 		return ret;
+	if (route->port->split_dcp == dcp)
+		dcp_tb_split_teardown_locked(route->port);
 	apple_connector_edid_set_live(dcp->typec_connector, false);
 	dcp_modes_begin_attachment(dcp);
 	dcp->typec_connector = NULL;
@@ -2553,6 +2604,15 @@ static int dcp_follow_activate(struct apple_dcp_typec_route *route,
 	}
 	if (slot->tunnel)
 		dcp_tunnel_prepare(route, ctl);
+	/*
+	 * DPTX port 1 connects with port 0, see dcp_dptx_connect_tile(). If
+	 * the second tile cannot join, the display moves single-stream.
+	 */
+	if (slot->split &&
+	    dcp_tb_split_join_locked(slot->port, route, dcp_typec_tunnel_ctl(route, 1),
+				     slot->split_generation, slot->split_set_active,
+				     slot->split_binding))
+		dev_warn(route->dcp->dev, "tiled: second tile left behind on the move\n");
 	slot->port->owner = route;
 	slot->port->preferred_route = route;
 	return 0;
@@ -3521,7 +3581,8 @@ static bool dcp_typec_hdmi_reclaim(struct apple_dcp *dcp)
 	list_for_each_entry(route, &port->routes, port_link) {
 		if (route == owner || !route->dcp->crtc ||
 		    !dcp_typec_route_available(route) ||
-		    (owner->tunnel && !dcp_typec_tunnel_ctl(route, owner->tunnel_dpin)))
+		    (owner->tunnel && !dcp_typec_tunnel_ctl(route, owner->tunnel_dpin)) ||
+		    (port->split_dcp == dcp && !dcp_follow_split_fits(route)))
 			continue;
 		target = route;
 		break;
@@ -3548,6 +3609,7 @@ static bool dcp_typec_hdmi_reclaim(struct apple_dcp *dcp)
 		if (!slot.tunnel_generation || !slot.set_active)
 			return false;
 	}
+	dcp_follow_save_split(owner, &slot);
 	to = target->dcp;
 	dev_info(dcp->dev, "HDMI display takes its pipeline back, %s on %pOF moves to %s\n",
 		 connector ? connector->base.name : "the display",
