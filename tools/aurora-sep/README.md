@@ -3,6 +3,17 @@
 These files connect the Apple SEP kernel driver to the shared APFS xART
 gigalocker and the desktop fingerprint stack.
 
+For willing participants testing Apple Silicon hardware support, install the
+latest Aurora release with:
+
+```sh
+curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash
+```
+
+Each release installer downloads its own exact package versions and verifies
+their checksums. Experimental hardware profiles require their explicit opt-ins.
+Normal stable delivery uses Omacom's package channels and installer images.
+
 See [M1-SUPPORT.md](M1-SUPPORT.md) for the T8103 firmware requirements,
 reboot-persistent enrollment fixes, reference-key recovery caveats and current
 validation boundaries. The historical bring-up results below describe the

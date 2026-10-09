@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install the aurora custom/sep kernel and Touch ID on an Omarchy Mac.
 #
-#   curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash
+#   curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash
 #   ... | bash -s -- --read-only      install, but never let the driver write to the enclave
 #   ... | bash -s -- --uninstall      go back to the kernel this Mac had before
 #   ... | bash -s -- --reset-touchid  start Touch ID over: new keybag, enrol again
@@ -249,8 +249,8 @@ VERSION=7.1.12.aurora2-12.4
 TAG=sep-7.1.12.aurora2-12.4
 # Packages are fetched from this script's own tag, never from "latest": the
 # checksums below belong to this release and nothing else.
-PUBLIC_RELEASE_URL=https://github.com/iconidentify/aurora-linux/releases/download/$TAG
-PUBLIC_RELEASES_API=https://api.github.com/repos/iconidentify/aurora-linux/releases
+PUBLIC_RELEASE_URL=https://github.com/omacom/linux/releases/download/$TAG
+PUBLIC_RELEASES_API=https://api.github.com/repos/omacom/linux/releases
 # AURORA_RELEASE_URL and AURORA_RELEASES_API are a staging or mirror override
 # for these two (a file://, http:// or https:// URL; see release_source); the
 # checksums below still decide what is installed. The commands this script
@@ -260,7 +260,7 @@ PUBLIC_RELEASES_API=https://api.github.com/repos/iconidentify/aurora-linux/relea
 RELEASE_URL=${AURORA_RELEASE_URL:-$PUBLIC_RELEASE_URL}
 RELEASES_API=${AURORA_RELEASES_API:-$PUBLIC_RELEASES_API}
 # Where to always get the current script, whatever this copy turns out to be.
-LATEST_URL=https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh
+LATEST_URL=https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh
 PACKAGES=(
   "linux-aurora-$VERSION-aarch64.pkg.tar.zst fded7d73e13dbe7f82722b925a257835761584203c5189337a251abab298bbde"
   "linux-aurora-headers-$VERSION-aarch64.pkg.tar.zst a8da8cd00a40010ebe6096ae50c53b1ae461ae6570aa437f5b79a02f10b80cca"
@@ -5565,7 +5565,7 @@ SAFETY, NON-NEGOTIABLE
     keybag and writes to the enclave's anti-replay store (xART) -- before
     anyone enrols a finger. If the owner cannot DFU-restore, install with
     --read-only instead, before the first reboot:
-      curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --read-only
+      curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --read-only
     A 'blacklist apple_sep' line does not prevent this on its own; the
     installer detects one and leaves the driver off.
   - Do not run any enrol/delete/re-provision loop unless the owner asks for
@@ -5601,13 +5601,13 @@ fingerprint.
    every install and prints either "<tag> is the current release" or a warning
    naming the newer one. To check without installing:
 
-     curl -fsSL https://api.github.com/repos/iconidentify/aurora-linux/releases/latest \
+     curl -fsSL https://api.github.com/repos/omacom/linux/releases/latest \
        | grep -m1 '"tag_name"' 
 
    Always fetch the script from the "latest" URL rather than a tag you were
    handed, so you get the current one automatically:
 
-     curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash
+     curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash
 
    State the tag you installed in your report. If you were given a specific
    older tag on purpose, say so and say why.
@@ -5660,7 +5660,7 @@ fingerprint.
    Updating macOS from 26.2 or earlier to a later release after enrolling
    loses the enrolments: Touch ID then needs a new keybag. Say so if that
    is what happened. With the owner's agreement, start Touch ID over:
-     curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --reset-touchid
+     curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --reset-touchid
    then reboot and enrol again.
    The sensor itself: "sudo dmesg | grep apple-mesa" should say the power line
    came "from the device node". Quote it if it says anything else.
@@ -5873,7 +5873,7 @@ fingerprint.
         - The installer itself refuses unless the Mac has the macOS 14.8.3
           system-firmware stub that the Omarchy installer gives every M3.
         - Run:
-            curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-handoff
+            curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-handoff
           Keep the restore steps it prints (they name this Mac's EFI
           partition). It must end with "m1n1's boot.bin is this release's
           m1n1 with the M3 Pro handoff switches"; if it stops with an error
