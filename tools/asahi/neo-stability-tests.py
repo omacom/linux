@@ -109,6 +109,9 @@ int main(int argc,char**argv){
   wakeup_error=-ENOMEM;assert(dockchannel_init_wakeup(&dc)==-ENOMEM&&irq_calls==1);
   wakeup_error=0;irq_error=-EINVAL;assert(dockchannel_init_wakeup(&dc)==-EINVAL);
  }else if(!strcmp(argv[1],"sep")){
+  domain_count=-ENOENT;assert(!sep_pm_keep_domains(&d)&&!attach_calls);
+  domain_count=-EINVAL;assert(sep_pm_keep_domains(&d)==-EINVAL&&!attach_calls);
+  domain_count=0;assert(!sep_pm_keep_domains(&d)&&!attach_calls);
   domain_count=1;assert(!sep_pm_keep_domains(&d)&&!attach_calls);
   domain_count=2;attach_error=-EAGAIN;assert(sep_pm_keep_domains(&d)==-EAGAIN&&!pd0.syscore);
   attach_error=0;assert(!sep_pm_keep_domains(&d)&&pd0.syscore&&pd1.syscore&&cleanup);

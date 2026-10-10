@@ -92,6 +92,8 @@ int sep_pm_keep_domains(void *ptr)
 
 	count = of_count_phandle_with_args(dev->of_node, "power-domains",
 					   "#power-domain-cells");
+	if (count < 0 && count != -ENOENT)
+		return count;
 	if (count <= 1)
 		return 0;
 
