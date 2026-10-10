@@ -252,6 +252,7 @@ class M3FlowBase(unittest.TestCase):
         self.state = self.tmp / "state"
         self.fake = self.tmp / "fake"
         for name, body in (("pacman", PACMAN), ("update-m1n1", UPDATE_M1N1), ("curl", CURL),
+                           ("pacman-conf", '#!/bin/sh\n[ -z "$FAKE_FAIL_CONFIG" ] || exit 1\nprintf "%s\\n" "$FAKE_HOLDS"\n'),
                            ("id", ID), ("getent", GETENT), ("gpasswd", GPASSWD),
                            ("findmnt", "#!/bin/sh\ncase \"$*\" in *PARTUUID*) echo fake-uuid ;; *) echo vfat ;; esac\n"),
                            ("systemctl", "#!/bin/sh\nexit 0\n")):
@@ -868,6 +869,98 @@ class M3FlowTest(M3FlowBase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("omarchy update", proc.stderr)
         self.assertNotIn("pacman -U", self.log())
+
+    def test_frozen_image_installs_one_admitted_local_transaction(self):
+        self.mac("j516s")
+        self.extra_env["FAKE_HOLDS"] = "*"
+        self.extra_env["FAKE_UPGRADES"] = "\n".join(
+            f"held-{i} 1-1 -> 2-1 [ignored]" for i in range(108))
+        self.install(env='''
+frozen_dependency_prepare() {
+  echo "missing dependency plan" >>"$FAKE/log"
+  FROZEN_TRANSACTION_CONFIG="$work/transaction.conf"
+  FROZEN_TRANSACTION_FILES=("$work"/*.pkg.tar.zst)
+  printf '[options]\\nIgnorePkg = *\\n' >"$FROZEN_TRANSACTION_CONFIG"
+}
+snapshot() { echo snapshot >>"$FAKE/log"; }
+''')
+        log = self.log()
+        self.assertLess(log.index("missing dependency plan"), log.index("snapshot"))
+        transactions = [row for row in log.splitlines() if row.startswith("pacman -U")]
+        self.assertEqual(len(transactions), 1)
+        self.assertIn("--config", transactions[0])
+        self.assertIn(self.pro_mesa, transactions[0])
+        self.assertNotIn("pacman -S ", log)
+
+    def test_frozen_image_dependency_refusal_precedes_boot_changes(self):
+        self.mac("j613")
+        self.extra_env["FAKE_HOLDS"] = "*"
+        self.extra_env["FAKE_UPGRADES"] = "llvm-libs 20-1 -> 22-1 [ignored]"
+        before = self.boot.read_bytes()
+        proc = self.install(check=False, env='''
+frozen_dependency_prepare() { die "dependency would upgrade installed provider"; }
+snapshot() { echo snapshot >>"$FAKE/log"; }
+''')
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("installed provider", proc.stderr)
+        self.assertNotIn("snapshot", self.log())
+        self.assertNotIn("pacman -U", self.log())
+        self.assertEqual(self.boot.read_bytes(), before)
+        self.assertFalse(self.m1n1_conf.exists())
+
+    def test_frozen_image_does_not_hide_unheld_upgrades(self):
+        self.mac("j516s")
+        self.extra_env["FAKE_HOLDS"] = "*"
+        self.extra_env["FAKE_UPGRADES"] = "llvm-libs 20-1 -> 22-1"
+        proc = self.install(check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("omarchy update", proc.stderr)
+        self.assertEqual(self.downloaded(), [])
+
+    def test_package_hold_configuration_error_refuses_before_changes(self):
+        self.mac("j516s")
+        self.extra_env["FAKE_FAIL_CONFIG"] = "1"
+        proc = self.install(check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("could not read package holds", proc.stderr)
+        self.assertEqual(self.downloaded(), [])
+        self.assertNotIn("pacman -U", self.log())
+
+    def test_partial_hold_pattern_does_not_enter_frozen_route(self):
+        self.mac("j516s")
+        self.extra_env["FAKE_HOLDS"] = "linux-*"
+        self.extra_env["FAKE_UPGRADES"] = "llvm-libs 20-1 -> 22-1 [ignored]"
+        proc = self.install(check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("omarchy update", proc.stderr)
+        self.assertEqual(self.downloaded(), [])
+
+    def test_frozen_preparation_binds_requirements_and_explicit_archive_list(self):
+        self.mac("j516s")
+        proc = self.run_sh('''
+work="$FAKE/preparation"
+mkdir -p "$work"
+touch "$work/$(m3_pro_mesa_file)" "$work/unrelated.pkg.tar.zst" "$work/transaction.conf"
+python3() {
+  if [[ $1 == "$work/frozen-dependencies.py" ]]; then
+    printf 'planner-arg:%s\\n' "$@" >>"$FAKE/log"
+    printf '{"transaction_config":"%s/transaction.conf","candidate_sha256":{"%s/%s":"fixture"},"dependencies":[{"file":"%s/approved.pkg.tar.gz"}]}' "$work" "$work" "$(m3_pro_mesa_file)" "$work"
+  else command python3 "$@"; fi
+}
+FROZEN_PACKAGES=1
+M3_PRO_MESA_NEEDS='glibc>=2.43 libgcc>=3.0'
+M3_GPU_EXPERIMENT=1
+frozen_dependency_prepare "$work/$(m3_pro_mesa_file)"
+printf 'admitted-file:%s\\n' "${FROZEN_TRANSACTION_FILES[@]}" >>"$FAKE/log"
+M3_GPU_EXPERIMENT=0
+m3_install_packages
+''')
+        log = self.log()
+        for need in ("fprintd", "glibc>=2.43", "libgcc>=3.0", "python", "vulkan-icd-loader"):
+            self.assertIn("planner-arg:--require\nplanner-arg:" + need, log)
+        transaction = next(row for row in log.splitlines() if row.startswith("pacman -U"))
+        self.assertIn("approved.pkg.tar.gz", transaction)
+        self.assertNotIn("unrelated.pkg.tar.zst", transaction)
 
     def test_the_refresh_comes_before_any_download(self):
         self.mac("j516s")

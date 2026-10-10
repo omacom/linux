@@ -172,7 +172,7 @@ shutil.copyfile(src,dst)
   self.data['packages']['aquamarine']['sha256']='0'*64
   with self.assertRaisesRegex(ValueError,'checksum'):
    assembly.desktop_data({'desktop_fixes':self.data},self.assets)
- def install(self,old=False):
+ def install(self,old=False,frozen=False):
   self.save();source=ROOT/'install-aurora-sep.sh'
   if old:
    source=self.base/'old-installer.sh';source.write_bytes(subprocess.check_output(['git','show','05d6db:tools/aurora-sep/install-aurora-sep.sh'],cwd=ROOT))
@@ -180,6 +180,15 @@ shutil.copyfile(src,dst)
   keep={'install_all','m3_install_packages','m3_install_cleanup','say','warn','die'}|{n for n in names if n.startswith('desktop_fixes_')}
   stubs='\n'.join(n+'() { :; }' for n in names if n not in keep)
   kernel=self.assets/'linux-aurora-candidate-aarch64.pkg.tar.zst';kernel.write_bytes(b'kernel')
+  frozen_body='''
+FROZEN_PACKAGES=1
+frozen_dependency_prepare() {
+  FROZEN_TRANSACTION_CONFIG="$work/transaction.conf"
+  printf '[options]\\nIgnorePkg = *\\n' >"$FROZEN_TRANSACTION_CONFIG"
+  FROZEN_TRANSACTION_FILES=("$@")
+  touch "$work/unrelated.pkg.tar.zst"
+}
+''' if frozen else ''
   body=stubs+f'''
 sudo=""; STATE="{self.base}/state"; DESKTOP_FIXES=1
 mkdir -p "$STATE"
@@ -195,6 +204,7 @@ m1n1_rollback_check() {{ echo FIRST_WRITE >>"$DESKTOP_LOG"; }}
 snapshot() {{ echo SNAPSHOT >>"$DESKTOP_LOG"; }}
 systemctl() {{ :; }}
 desktop_fixes_run() {{ python3 "{ROOT}/desktop-fixes.py" "$1" "{self.manifest}" --root "{self.root}" "${{@:2}}"; }}
+{frozen_body}
 install_all
 '''
   return self.shell(body,source)
@@ -208,6 +218,13 @@ install_all
   self.assertEqual(len(tx),1)
   for name in ('linux-aurora-candidate','omarchy-4.0.4-2','omarchy-settings-4.0.4-2','aquamarine-0.15.1-1.3'):
    self.assertIn(name,tx[0])
+ def test_frozen_selected_desktop_packages_join_exact_transaction(self):
+  r=self.install(frozen=True);self.assertEqual(r.returncode,0,r.stderr)
+  tx=[l for l in self.log.read_text().splitlines() if l.startswith('pacman -U')]
+  self.assertEqual(len(tx),1);self.assertIn('--config',tx[0])
+  for name in ('linux-aurora-candidate','omarchy-4.0.4-2','omarchy-settings-4.0.4-2','aquamarine-0.15.1-1.3'):
+   self.assertIn(name,tx[0])
+  self.assertNotIn('unrelated.pkg.tar.zst',tx[0])
  def test_original_installer_has_no_desktop_admission_or_transaction(self):
   self.put('usr/bin/omarchy-test',b'unknown');r=self.install(old=True)
   self.assertEqual(r.returncode,0,r.stderr)

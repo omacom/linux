@@ -345,26 +345,39 @@ release_source() {
 # A saved copy of this script keeps installing its own build forever. Tell the
 # operator - human or agent - when a newer one exists. Never fatal: no network,
 # rate limit or API change should stop an install that was going to work.
+release_order() {
+  local tag=$1 year month day limit increment
+  if [[ $tag =~ ^sep-([A-Za-z0-9._]+)-([0-9]+(\.[0-9]+)*)(-stable)?$ ]]; then
+    printf '0.%s%s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[4]}"
+  elif [[ $tag =~ ^aurora-([0-9]{4})\.([0-9]{2})\.([0-9]{2})(\.([0-9]+))?$ ]]; then
+    year=${BASH_REMATCH[1]} month=${BASH_REMATCH[2]} day=${BASH_REMATCH[3]}
+    increment=${BASH_REMATCH[5]:-0}
+    (( 10#$year > 0 && 10#$month >= 1 && 10#$month <= 12 && 10#$day >= 1 )) || return 1
+    case $month in
+      04|06|09|11) limit=30 ;;
+      02) limit=28; (( 10#$year % 4 == 0 && (10#$year % 100 != 0 || 10#$year % 400 == 0) )) && limit=29 ;;
+      *) limit=31 ;;
+    esac
+    (( 10#$day <= limit )) || return 1
+    printf '1.%s.%s.%s.%s\n' "$year" "$month" "$day" "$increment"
+  else
+    return 1
+  fi
+}
+
 newer_release() {
-  # Explicitly non-fatal. The pipeline returns non-zero whenever there is no
-  # network, GitHub rate-limits, or the response is not what we expect, and
-  # whether set -e acts on that inside a command substitution is subtle enough
-  # that it should not be left to chance in a script that runs as root.
   local seen="" mine theirs
-  # Ask for the release marked Latest. Listing all releases is not ordered by
-  # version: they share a commit, so GitHub falls back to comparing tag names
-  # as text, and 11.9 sorts above 11.10. Only letters, digits, '.', '_' and
-  # '-' are taken as a tag, so a mirror's answer can't put terminal escapes
-  # into the notice.
+  # Only the Latest release and printable tag tokens are admitted. An unavailable
+  # API or an unknown tag must not stop installation or enter the terminal notice.
   seen=$(curl -fsSL --max-time 8 "$RELEASES_API/latest" 2>/dev/null |
-    LC_ALL=C grep -o '"tag_name"[[:space:]]*:[[:space:]]*"sep-[A-Za-z0-9._-]*"' |
-    head -1 | sed 's/.*"\(sep-[A-Za-z0-9._-]*\)"$/\1/') || true
-  # Only a higher release number counts, the part after the kernel version
-  # (sep-7.1.12.aurora2-12.0 is 12.0): a release staged before it is marked
-  # Latest must not be pointed at the older one.
-  mine=${TAG#sep-*-} theirs=${seen#sep-*-}
-  [[ $theirs == [0-9]* && $theirs != "$mine" &&
-    $(printf '%s\n' "$mine" "$theirs" | sort -V | tail -1) == "$theirs" ]] && echo "$seen"
+    LC_ALL=C grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[A-Za-z0-9._-]*"' |
+    head -1 | sed 's/.*"\([A-Za-z0-9._-]*\)"$/\1/') || true
+  mine=$(release_order "$TAG") || return 0
+  theirs=$(release_order "$seen") || return 0
+  # Calendar releases follow legacy releases; legacy ordering ignores the kernel
+  # version. Calendar ordering uses the date and optional numeric increment.
+  [[ $theirs != "$mine" &&
+    $(printf '%s\n' "$mine" "$theirs" | LC_ALL=C sort -V | tail -1) == "$theirs" ]] && echo "$seen"
   return 0
 }
 
@@ -1493,8 +1506,13 @@ m3_gpu_install() {
     record+="script $file ${entry#* }"$'\n'
   done
   # air-gpu-job.sh runs its job through Python and the Vulkan loader.
-  $sudo pacman -S --needed --noconfirm python vulkan-icd-loader ||
-    warn "could not install python and vulkan-icd-loader; air-gpu-job.sh needs them"
+  if ((FROZEN_PACKAGES)); then
+    pacman -T python vulkan-icd-loader >/dev/null ||
+      die "the admitted frozen transaction did not satisfy the GPU job dependencies"
+  else
+    $sudo pacman -S --needed --noconfirm python vulkan-icd-loader ||
+      warn "could not install python and vulkan-icd-loader; air-gpu-job.sh needs them"
+  fi
   record+=$(m3_gpu_optin)
   if [[ -n $record && $record != *$'\n' ]]; then record+=$'\n'; fi
   printf '%s' "$record" | $sudo tee "$STATE/m3-gpu-experiment" >/dev/null
@@ -2487,7 +2505,7 @@ m3_pro_mesa_files() {
 
 # After the download loop: keep the package out of the kernel's pacman -U ("$work"/*.pkg.tar.zst).
 m3_pro_mesa_set_aside() {
-  ((M3_GPU_PERSISTENT)) && return 0
+  ((M3_GPU_PERSISTENT || FROZEN_PACKAGES)) && return 0
   local file
   file=$(m3_pro_mesa_file)
   [[ -n $M3_PRO_MESA_PACKAGE && -f $work/$file ]] || return 0
@@ -2524,7 +2542,7 @@ m3_pro_mesa_needs_unmet() {
 # warning, the kernel install stays as it is, and the summary and exit status say so.
 m3_pro_mesa_install() {
   local file old name
-  if ((M3_GPU_PERSISTENT)) && [[ $M3_PRO_MESA_RESULT == installed ]]; then return 0; fi
+  if ((M3_GPU_PERSISTENT || FROZEN_PACKAGES)) && [[ $M3_PRO_MESA_RESULT == installed ]]; then return 0; fi
   file=$work/m3-pro/$(m3_pro_mesa_file)
   [[ -n $M3_PRO_MESA_PACKAGE && -f $file ]] || return 0
   old=$(m3_pro_mesa_needs_unmet)
@@ -3568,6 +3586,388 @@ packages_for_this_mac() {
   return 0
 }
 
+FROZEN_PACKAGES=0
+FROZEN_TRANSACTION_CONFIG=""
+FROZEN_TRANSACTION_FILES=()
+PACMAN_CONFIG=/etc/pacman.conf
+
+frozen_package_detection() {
+  local holds="" token
+  local -a held_words=()
+  FROZEN_PACKAGES=0
+  command -v pacman-conf >/dev/null || return 0
+  holds=$(pacman-conf --config "$PACMAN_CONFIG" IgnorePkg) ||
+    die "could not read package holds. Nothing was installed."
+  read -ra held_words <<<"${holds//$'\n'/ }"
+  for token in "${held_words[@]}"; do
+    if [[ $token == '*' ]]; then FROZEN_PACKAGES=1; fi
+  done
+}
+
+frozen_dependency_prepare() {
+  ((FROZEN_PACKAGES)) || return 0
+  local archive need
+  local -a args=(--config "$PACMAN_CONFIG" --work "$work" --require fprintd)
+  local -a mesa_needs=()
+  if [[ -n $M3_PRO_MESA_PACKAGE && -f $work/$(m3_pro_mesa_file) ]]; then
+    read -ra mesa_needs <<<"$M3_PRO_MESA_NEEDS"
+    for need in "${mesa_needs[@]}"; do args+=(--require "$need"); done
+  fi
+  if ((M3_GPU_EXPERIMENT)); then args+=(--require python --require vulkan-icd-loader); fi
+  for archive in "$@"; do args+=(--candidate "$archive"); done
+  args+=(--allow-remove linux-asahi --allow-remove linux-asahi-headers
+         --allow-remove m1n1 --allow-remove mesa-m3-g15g)
+  cat >"$work/frozen-dependencies.py" <<'FROZEN_DEPENDENCIES_PY'
+#!/usr/bin/env python3
+"""Admit missing repository dependencies without changing installed packages."""
+import argparse
+import ctypes
+import ctypes.util
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+NAME = re.compile(r"[A-Za-z0-9@_+][A-Za-z0-9@_.+:-]*\Z")
+DEPEND = re.compile(r"([^<>=\s]+)(>=|<=|=|>|<)?([^\s]*)\Z")
+FORMAT = "%n\t%v\t%h\t%l"
+
+
+def run(args, codes=(0,)):
+    result = subprocess.run(args, text=True, capture_output=True,
+                            env={**os.environ, "LC_ALL": "C"})
+    if result.returncode not in codes:
+        raise ValueError("Command failed: " + " ".join(args) + "\n" + result.stderr + result.stdout)
+    return result
+
+
+def metadata(text, pkginfo=False):
+    fields = {}
+    if pkginfo:
+        for line in text.splitlines():
+            if " = " in line:
+                key, value = line.split(" = ", 1)
+                fields.setdefault(key, []).append(value)
+    else:
+        key = None
+        for line in text.splitlines():
+            if line.startswith("%") and line.endswith("%"):
+                key = line.strip("%")
+                fields.setdefault(key, [])
+            elif line and key:
+                fields[key].append(line)
+    aliases = {"name": "pkgname" if pkginfo else "NAME",
+               "version": "pkgver" if pkginfo else "VERSION",
+               "arch": "arch" if pkginfo else "ARCH",
+               "depends": "depend" if pkginfo else "DEPENDS",
+               "provides": "provides" if pkginfo else "PROVIDES",
+               "conflicts": "conflict" if pkginfo else "CONFLICTS",
+               "replaces": "replaces" if pkginfo else "REPLACES"}
+    result = {key: fields.get(value, []) for key, value in aliases.items()}
+    for key in ("name", "version", "arch"):
+        if len(result[key]) != 1:
+            raise ValueError("Invalid package metadata " + key)
+        result[key] = result[key][0]
+    if not NAME.fullmatch(result["name"]):
+        raise ValueError("Invalid package name")
+    return result
+
+
+def archive(path):
+    result = run(["bsdtar", "-xOf", str(path), ".PKGINFO"])
+    return metadata(result.stdout, True)
+
+
+def sha(path):
+    with open(path, "rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def dependency(value):
+    match = DEPEND.fullmatch(value)
+    if not match or not NAME.fullmatch(match[1]) or (match[2] and not match[3]):
+        raise ValueError("Invalid dependency: " + value)
+    return match[1], match[2], match[3]
+
+
+_alpm = ctypes.CDLL(ctypes.util.find_library("alpm"))
+_alpm.alpm_pkg_vercmp.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+_alpm.alpm_pkg_vercmp.restype = ctypes.c_int
+
+
+def satisfies(pkg, requirement):
+    name, operator, version = dependency(requirement)
+    offers = [(pkg["name"], pkg["version"])]
+    for provide in pkg["provides"]:
+        pn, po, pv = dependency(provide)
+        if po not in (None, "="):
+            raise ValueError("Invalid versioned provider")
+        offers.append((pn, pv if po else None))
+    for offered, available in offers:
+        if offered != name:
+            continue
+        if not operator:
+            return True
+        if available is None:
+            continue
+        cmp = _alpm.alpm_pkg_vercmp(available.encode(), version.encode())
+        if {"=": cmp == 0, ">=": cmp >= 0, "<=": cmp <= 0,
+            ">": cmp > 0, "<": cmp < 0}[operator]:
+            return True
+    return False
+
+
+def database(root, repositories):
+    installed = []
+    for entry in sorted((root / "local").glob("*/desc")):
+        installed.append(metadata(entry.read_text()))
+    available = []
+    for repo in repositories:
+        if not NAME.fullmatch(repo):
+            raise ValueError("Invalid repository")
+        with tarfile.open(root / "sync" / (repo + ".db")) as db:
+            for entry in db:
+                if entry.isfile() and entry.name.endswith("/desc"):
+                    pkg = metadata(db.extractfile(entry).read().decode())
+                    pkg["repo"] = repo
+                    available.append(pkg)
+    return installed, available
+
+
+def resolve(requirements, candidates, installed, available):
+    selected = []
+    pending = list(requirements) + [d for pkg in candidates for d in pkg["depends"]]
+    while pending:
+        req = pending.pop(0)
+        dependency(req)
+        if any(satisfies(pkg, req) for pkg in candidates + installed + selected):
+            continue
+        name = dependency(req)[0]
+        if any(satisfies(pkg, name) for pkg in installed + candidates):
+            raise ValueError("Installed or matched provider is too old for " + req + "; run the full updater")
+        matches = [pkg for pkg in available if satisfies(pkg, req)]
+        # Repository order wins for an exact package name; alternative providers must be unique.
+        exact = [pkg for pkg in matches if pkg["name"] == name]
+        if exact:
+            chosen = exact[0]
+        else:
+            unique = {pkg["name"] for pkg in matches}
+            if len(unique) != 1:
+                raise ValueError("No unique missing provider for " + req)
+            chosen = matches[0]
+        if any(pkg["name"] == chosen["name"] for pkg in installed + candidates + selected):
+            raise ValueError("Repository plan would replace an installed or matched package: " + chosen["name"])
+        if chosen["replaces"] or chosen["conflicts"]:
+            raise ValueError("Missing dependency declares replacements/conflicts: " + chosen["name"])
+        selected.append(chosen)
+        pending.extend(chosen["depends"])
+    return selected
+
+
+def parse_plan(output):
+    result = []
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4 or not NAME.fullmatch(parts[0]) or not re.fullmatch(r"[0-9a-f]{64}", parts[2]):
+            raise ValueError("Malformed repository transaction plan")
+        result.append(dict(zip(("name", "version", "sha256", "location"), parts)))
+    if len({p["name"] for p in result}) != len(result):
+        raise ValueError("Duplicate repository transaction package")
+    return result
+
+
+def local_snapshot(dbpath):
+    return {str(p.relative_to(dbpath / "local")): sha(p)
+            for p in sorted((dbpath / "local").glob("*/desc"))}
+
+
+def verify_plan(path, expected_hash=None):
+    if expected_hash is not None and sha(path) != expected_hash:
+        raise ValueError("Admitted transaction receipt changed")
+    receipt = json.loads(Path(path).read_text())
+    if local_snapshot(Path(receipt["dbpath"])) != receipt["database_sha256"]:
+        raise ValueError("Installed package database changed; rerun dependency admission")
+    files = dict(receipt["candidate_sha256"])
+    files.update({p["file"]: p["sha256"] for p in receipt["dependencies"]})
+    files.update({p["signature_file"]: p["signature_sha256"] for p in receipt["dependencies"]
+                  if "signature_file" in p})
+    files[receipt["transaction_config"]] = receipt["transaction_config_sha256"]
+    files[receipt["helper"]] = receipt["helper_sha256"]
+    for filename, expected in files.items():
+        if sha(filename) != expected:
+            raise ValueError("Admitted transaction input changed: " + filename)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="/etc/pacman.conf")
+    parser.add_argument("--work")
+    parser.add_argument("--verify-plan")
+    parser.add_argument("--plan-sha256")
+    parser.add_argument("--candidate", action="append", default=[])
+    parser.add_argument("--require", action="append", default=[])
+    parser.add_argument("--allow-remove", action="append", default=[])
+    args = parser.parse_args()
+    if args.verify_plan:
+        verify_plan(args.verify_plan, args.plan_sha256)
+        return
+    if not args.work:
+        raise ValueError("Work directory is required")
+    work = Path(args.work).resolve()
+    if not work.is_dir() or not args.candidate:
+        raise ValueError("Work directory and verified candidate archives are required")
+    initial_hashes = {str(Path(p).resolve()): sha(p) for p in args.candidate}
+    candidates = [archive(Path(p)) for p in args.candidate]
+    if len({p["name"] for p in candidates}) != len(candidates):
+        raise ValueError("Duplicate local candidate")
+    full = run(["pacman-conf", "--config", args.config]).stdout
+    lines = full.splitlines()
+    if not lines or lines[0] != "[options]":
+        raise ValueError("Cannot resolve pacman configuration")
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.startswith("[")), len(lines))
+    options = lines[:end]
+    dbpath = run(["pacman-conf", "--config", args.config, "DBPath"]).stdout.strip()
+    repos = run(["pacman-conf", "--config", args.config, "--repo-list"]).stdout.splitlines()
+    dbpath = Path(dbpath)
+    initial_database = local_snapshot(dbpath)
+    installed, available = database(dbpath, repos)
+    candidate_names = {p["name"] for p in candidates}
+    allowed_removals = set(args.allow_remove)
+    if not all(NAME.fullmatch(name) for name in allowed_removals):
+        raise ValueError("Invalid authorized removal name")
+    removed = set()
+    for current in installed:
+        if current["name"] in candidate_names:
+            continue
+        affected = any(satisfies(current, d) for p in candidates
+                       for d in p["conflicts"] + p["replaces"])
+        affected |= any(satisfies(p, d) for p in candidates for d in current["conflicts"])
+        if affected:
+            removed.add(current["name"])
+        if affected and current["name"] not in allowed_removals:
+            raise ValueError("Local candidates conflict with another installed package: " + current["name"])
+    remaining = [p for p in installed
+                 if p["name"] not in candidate_names | removed]
+    selected = resolve(args.require, candidates, remaining, available)
+    for current in remaining:
+        if any(
+                satisfies(p, d) for p in selected for d in current["conflicts"]):
+            raise ValueError("Installed package conflicts with a missing dependency: " + current["name"])
+    staging = Path(tempfile.mkdtemp(prefix=".dependencies-", dir=work))
+    # Only the private download cache and log change; holds, trust and repository order remain intact.
+    private_options = [line for line in options if not line.startswith(("CacheDir = ", "LogFile = "))]
+    private_options += ["CacheDir = " + str(staging), "LogFile = " + str(staging / "pacman.log")]
+    download_config = staging / "download.conf"
+    download_config.write_text("\n".join(private_options + lines[end:]) + "\n")
+    commit_config = staging / "transaction.conf"
+    hookdir = staging / "hooks"
+    hookdir.mkdir()
+    helper = Path(__file__).resolve()
+    receipt_path = work / "dependency-plan.json"
+    if any(c.isspace() for c in str(helper) + str(receipt_path)):
+        raise ValueError("Helper and work paths must not contain whitespace")
+    hook = hookdir / "00-aurora-frozen-dependencies.hook"
+
+    commit_config.write_text("\n".join(private_options + ["HookDir = " + str(hookdir)]) + "\n")
+    base = ["pacman", "--config", str(download_config), "--noconfirm"]
+    plan = []
+    if selected:
+        targets = [p["repo"] + "/" + p["name"] for p in selected]
+        plan = parse_plan(run(base + ["-Sp", "--print-format", FORMAT, *targets]).stdout)
+        expected = {(p["name"], p["version"]) for p in selected}
+        if {(p["name"], p["version"]) for p in plan} != expected:
+            raise ValueError("Repository resolver changed the missing-only plan")
+        if any(p["name"] in {x["name"] for x in installed + candidates} for p in plan):
+            raise ValueError("Repository resolver would change an installed package")
+        run(base + ["-Sw", *targets])
+    verified = []
+    for record in plan:
+        matches = [p for p in staging.iterdir() if p.is_file() and sha(p) == record["sha256"]]
+        if len(matches) != 1:
+            raise ValueError("Downloaded dependency hash does not match resolver: " + record["name"])
+        path = matches[0]
+        pkg = archive(path)
+        if (pkg["name"], pkg["version"]) != (record["name"], record["version"]):
+            raise ValueError("Downloaded dependency metadata does not match resolver")
+        selected_pkg = next(p for p in selected if p["name"] == pkg["name"])
+        if any(pkg[k] != selected_pkg[k] for k in ("arch", "depends", "provides", "conflicts", "replaces")):
+            raise ValueError("Downloaded dependency declarations differ from repository")
+        signature = Path(str(path) + ".sig")
+        if signature.exists():
+            record["signature_sha256"] = sha(signature)
+        verified.append((path, record))
+    # With no repositories, this final check cannot discover extra upgrades or dependencies.
+    paths = args.candidate + [str(path) for path, _ in verified]
+    check = run(["pacman", "--config", str(commit_config), "-Up", "--noconfirm",
+                 "--ask", "4", "--print-format", "%n\t%v", *paths]).stdout
+    final = [tuple(line.split("\t")) for line in check.splitlines()]
+    expected = {(p["name"], p["version"]) for p in candidates + selected}
+    if len(final) != len(expected) or set(final) != expected:
+        raise ValueError("Local transaction differs from admitted packages")
+    if initial_database != local_snapshot(dbpath):
+        raise ValueError("Installed package database changed during dependency admission")
+    if initial_hashes != {str(Path(p).resolve()): sha(p) for p in args.candidate}:
+        raise ValueError("Local candidate changed during dependency admission")
+    # Publish dependency files only once the complete offline transaction is admitted.
+    published = []
+    for path, record in verified:
+        target = work / path.name
+        if target.exists() or Path(str(target) + ".sig").exists():
+            raise ValueError("Dependency output already exists")
+        published.append((path, target, record))
+    for path, target, record in published:
+        path.rename(target)
+        record["file"] = str(target)
+        if "signature_sha256" in record:
+            signature_target = Path(str(target) + ".sig")
+            Path(str(path) + ".sig").rename(signature_target)
+            record["signature_file"] = str(signature_target)
+    receipt = {"dependencies": plan, "transaction_config": str(commit_config),
+               "transaction_config_sha256": sha(commit_config),
+               "hook": str(hook), "helper": str(helper), "helper_sha256": sha(helper),
+               "dbpath": str(dbpath), "database_sha256": initial_database,
+               "candidate_sha256": initial_hashes,
+               "installed": {p["name"]: p["version"] for p in installed}}
+    (work / "dependency-plan.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    hook.write_text("[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\n"
+                    "Type = Package\nTarget = *\n[Action]\nWhen = PreTransaction\n"
+                    "Exec = /usr/bin/python3 " + str(helper) + " --verify-plan " + str(receipt_path) +
+                    " --plan-sha256 " + sha(receipt_path) + "\nAbortOnFail\n")
+    print(json.dumps(receipt))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, tarfile.TarError, KeyError, TypeError) as error:
+        print("Frozen dependency admission refused: " + str(error), file=sys.stderr)
+        sys.exit(1)
+FROZEN_DEPENDENCIES_PY
+  say "Resolving only missing dependencies while preserving this image's package holds"
+  $sudo python3 "$work/frozen-dependencies.py" "${args[@]}" >"$work/dependency-result.json" ||
+    die "could not admit a missing-only dependency transaction. Nothing was installed. The package holds were preserved."
+  FROZEN_TRANSACTION_CONFIG=$(python3 - "$work/dependency-result.json" <<'FROZEN_CONFIG_PY'
+import json, sys
+print(json.load(open(sys.argv[1]))['transaction_config'])
+FROZEN_CONFIG_PY
+  )
+  [[ -f $FROZEN_TRANSACTION_CONFIG ]] || die "missing admitted package transaction configuration"
+  python3 - "$work/dependency-result.json" >"$work/dependency-files" <<'FROZEN_FILES_PY'
+import json, sys
+plan = json.load(open(sys.argv[1]))
+for filename in list(plan['candidate_sha256']) + [p['file'] for p in plan['dependencies']]:
+    if '\n' in filename: raise SystemExit('invalid dependency archive path')
+    print(filename)
+FROZEN_FILES_PY
+  mapfile -t FROZEN_TRANSACTION_FILES <"$work/dependency-files"
+  ((${#FROZEN_TRANSACTION_FILES[@]})) || die "missing admitted package archives"
+}
+
 package_database_check() {
   local pending errors status=0 row name
   local -a unheld=()
@@ -3587,6 +3987,7 @@ package_database_check() {
     name=${row%% *}
     # The release replaces its pins; Mac image packages keep their deliberate hold.
     if [[ $row == *" [ignored]" ]]; then
+      if [[ ${1:-} == install ]] && ((FROZEN_PACKAGES)); then continue; fi
       if [[ " $PINNED " == *" $name "* ]]; then continue; fi
       case $name in omarchy|omarchy-mac|omarchy-mac-boot|omarchy-settings) continue ;; esac
     fi
@@ -3598,7 +3999,7 @@ package_database_check() {
 
 install_all() {
   local entry file sha kernel chain
-  local -a entries
+  local -a entries candidate_archives=()
   release_source
   require_supported_soc
   neo_gpu_plan
@@ -3614,15 +4015,18 @@ install_all() {
   m3_gpu_plan
   if ((M3_GPU_PERSISTENT)); then m3_gpu_check_plan; fi
   m3_pro_mesa_plan
+  frozen_package_detection
   if ((M3_GPU_PERSISTENT)); then
     [[ $M3_PRO_MESA_RESULT != current ]] || M3_PRO_MESA_RESULT=""
     [[ -z $M3_PRO_MESA_RESULT ]] || die "persistent GPU needs the matched Mesa package"
-    [[ -z $(m3_pro_mesa_needs_unmet) ]] || die "persistent GPU requires satisfied Mesa dependencies before installation"
+    if ((!FROZEN_PACKAGES)); then
+      [[ -z $(m3_pro_mesa_needs_unmet) ]] || die "persistent GPU requires satisfied Mesa dependencies before installation"
+    fi
   fi
   m1n1_keep_plan
   # Repository dependencies must resolve against an up-to-date system.
   # Install held release candidates together; update other packages first.
-  package_database_check
+  package_database_check install
   if ((!DESKTOP_FIXES)); then work=$(mktemp -d); fi
   trap 'm3_install_cleanup' EXIT
   if is_neo && ! m1n1_for_this_mac; then say "Keeping this MacBook Neo's own m1n1 (m1n1-aurora has no T8140 support)"; fi
@@ -3643,11 +4047,17 @@ install_all() {
     Please report it with the file name above."
     fi
     [[ $(sha256sum "$work/$file" | cut -d' ' -f1) == "$sha" ]] || die "$file does not match its published checksum"
+    if [[ $file == *.pkg.tar.zst ]]; then candidate_archives+=("$work/$file"); fi
   done
   neo_gpu_package_check
   desktop_fixes_verify "$work"
+  while read -r file sha; do
+    [[ -n $file ]] || continue
+    candidate_archives+=("$work/$file")
+  done < <(desktop_fixes_files)
   if ((M3_GPU_PERSISTENT)); then m3_persistent_package_check "$work/${M3_PRO_MESA_PACKAGE%% *}"; fi
   m3_pro_mesa_set_aside
+  frozen_dependency_prepare "${candidate_archives[@]}"
   if m1n1_for_this_mac; then
     sha=$(m1n1_pkg_sha "$work/${M1N1_PACKAGE%% *}")
     [[ $sha == "$M1N1_BIN_SHA" ]] ||
@@ -3700,19 +4110,28 @@ install_all() {
   say "Installing the aurora-sep kernel, libfprint with the Apple SEP driver, fprintd and aurora-touchid"
   # --ask 4 accepts replacing linux-asahi (and its headers), which linux-aurora conflicts with.
   m3_install_packages
-  $sudo pacman -S --needed --noconfirm fprintd
+  if ((!FROZEN_PACKAGES)); then $sudo pacman -S --needed --noconfirm fprintd; fi
   # linux-aurora carries the Apple video decoder, whose firmware linux-asahi
   # installs never needed; without it the decoder fails to load at boot.
-  $sudo pacman -S --needed --noconfirm avd-fw ||
-    warn "could not install avd-fw; hardware video decode will not work until it is installed"
+  if ((FROZEN_PACKAGES)); then
+    pacman -Q avd-fw >/dev/null 2>&1 ||
+      warn "avd-fw is absent; hardware video decode remains unavailable while this image is frozen"
+  else
+    $sudo pacman -S --needed --noconfirm avd-fw ||
+      warn "could not install avd-fw; hardware video decode will not work until it is installed"
+  fi
   # The VA-API bridge to that decoder. Without it, players fall back to
   # software decode with no error (reported on a 16" M1 Pro installed from the
   # Omarchy Mac ISO). Leave any other build of the bridge alone: the AUR
   # libva-v4l2_request packages conflict with it.
   if ! pacman -Qq libva-v4l2_request-avd libva-v4l2_request >/dev/null 2>&1 &&
     [[ ! -e /usr/lib/dri/v4l2_request_drv_video.so ]]; then
-    $sudo pacman -S --needed --noconfirm libva-v4l2_request-avd ||
-      warn "could not install libva-v4l2_request-avd; video players will decode in software until it is installed"
+    if ((FROZEN_PACKAGES)); then
+      warn "the VA-API bridge is absent; video players will decode in software while this image is frozen"
+    else
+      $sudo pacman -S --needed --noconfirm libva-v4l2_request-avd ||
+        warn "could not install libva-v4l2_request-avd; video players will decode in software until it is installed"
+    fi
   fi
   m3_gpu_install
   add_pin
@@ -6207,7 +6626,8 @@ m3_install_cleanup() {
       fi
     fi
   fi
-  rm -rf "${work:-}"
+  if ((FROZEN_PACKAGES)); then $sudo rm -rf "${work:-}"
+  else rm -rf "${work:-}"; fi
   return "$status"
 }
 
@@ -6271,7 +6691,15 @@ m3_install_packages() {
   # The generated main UKI remains unarmed until the matched transaction has
   # succeeded. The custom GPU-off entry was registered before this call.
   if ((M3_GPU_PERSISTENT)) && [[ $chain == limine ]]; then m3_persistent_cmdline "$chain" 0; fi
-  $sudo pacman -U --noconfirm --ask 4 "$work"/*.pkg.tar.zst
+  if ((FROZEN_PACKAGES)); then
+    [[ -f $FROZEN_TRANSACTION_CONFIG ]] || die "missing admitted frozen package transaction"
+    $sudo pacman -U --config "$FROZEN_TRANSACTION_CONFIG" --noconfirm --ask 4 "${FROZEN_TRANSACTION_FILES[@]}"
+    if [[ -n $M3_PRO_MESA_PACKAGE && -f $work/$(m3_pro_mesa_file) ]]; then
+      M3_PRO_MESA_RESULT=installed
+    fi
+  else
+    $sudo pacman -U --noconfirm --ask 4 "$work"/*.pkg.tar.zst
+  fi
   if ((M3_GPU_PERSISTENT)); then
     M3_PRO_MESA_RESULT=installed
     if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
@@ -6793,6 +7221,18 @@ m3_gpu_check_plan() {
   if [[ -e $M3_GPU_CHECK || -L $M3_GPU_CHECK ]]; then
     [[ -f $M3_GPU_CHECK && ! -L $M3_GPU_CHECK ]] || die "$M3_GPU_CHECK is not an installer-owned regular file; it was left unchanged"
     [[ -f $STATE/m3-gpu-check && ! -L $STATE/m3-gpu-check ]] || die "$M3_GPU_CHECK already exists without an ownership record; it was left unchanged"
+    # An explicit matching selection can restore an empty helper/record pair.
+    if [[ ! -s $M3_GPU_CHECK && ! -s $STATE/m3-gpu-check && $M3_GPU_PERSISTENT == 1 &&
+          -f $STATE/m3-gpu-persistent && ! -L $STATE/m3-gpu-persistent ]]; then
+      case $M3_GPU_PROFILE in
+        legacy|j613-25g83)
+          if [[ $(cat "$STATE/m3-gpu-persistent") == "$M3_GPU_PROFILE" ]]; then
+            say "Restoring the empty GPU checker and ownership record for this selected profile"
+            return 0
+          fi
+          ;;
+      esac
+    fi
     recorded=$(cat "$STATE/m3-gpu-check")
     current=$(sha256sum "$M3_GPU_CHECK" | cut -d' ' -f1)
     [[ $recorded =~ ^[0-9a-f]{64}$ && $current == "$recorded" ]] || die "$M3_GPU_CHECK was changed outside this installer; it was left unchanged"
@@ -6807,9 +7247,42 @@ m3_gpu_check_install() {
   m3_gpu_check_plan
   m3_gpu_check_builtin >"$work/aurora-m3-gpu-check"
   sha=$(sha256sum "$work/aurora-m3-gpu-check" | cut -d' ' -f1)
-  $sudo install -D -m 0755 "$work/aurora-m3-gpu-check" "$M3_GPU_CHECK"
-  printf '%s\n' "$sha" | $sudo tee "$STATE/m3-gpu-check" >/dev/null
-  $sudo chmod 0644 "$STATE/m3-gpu-check"
+  $sudo python3 - "$work/aurora-m3-gpu-check" "$M3_GPU_CHECK" "$STATE/m3-gpu-check" "$sha" <<'M3_CHECK_INSTALL_PY'
+import hashlib, os, stat, sys, tempfile
+from pathlib import Path
+source, helper, record = map(Path, sys.argv[1:4])
+data = source.read_bytes()
+if not data or hashlib.sha256(data).hexdigest() != sys.argv[4]:
+    raise SystemExit('GPU checker source is empty or changed')
+compile(data, str(helper), 'exec')
+staged = []
+try:
+    for path, content, mode in ((helper, data, 0o755),
+                               (record, (sys.argv[4] + '\n').encode(), 0o644)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() or path.is_symlink():
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise SystemExit('GPU checker destination is not a regular file: ' + str(path))
+        fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+        staged.append((name, path))
+        with os.fdopen(fd, 'wb') as output:
+            os.fchmod(output.fileno(), mode)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+    # Publish complete files; persist the helper before its ownership record.
+    for name, path in staged:
+        os.replace(name, path)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+finally:
+    for name, path in staged:
+        if os.path.exists(name):
+            os.unlink(name)
+M3_CHECK_INSTALL_PY
 }
 
 m3_gpu_check_remove() {

@@ -24,8 +24,8 @@ pub(crate) const TEXT_SHA256: [u8; 32] = [
 /// The same image with everything iBoot writes into it zeroed (the whole
 /// patchbay and `SETUP_WRITES`). The c000 __TEXT of Apple's 26.6.2
 /// Firmware/agx/armfw_g15g.im4p has this digest after the same normalization.
-/// This diagnostic digest never admits an image; it distinguishes changes
-/// in iBoot-written values from changes in the firmware code.
+/// J613 uses this digest only for diagnostics. An explicitly enabled J615
+/// setup-record override can admit it after carveout and image validation.
 #[cfg_attr(test, allow(dead_code))]
 const IMAGE_FILE_TEXT_SHA256: [u8; 32] = [
     0xc7, 0xec, 0x1a, 0xb3, 0x31, 0x8b, 0xe5, 0xa1, 0x0d, 0x4a, 0x2e, 0xeb, 0x5e, 0x25, 0x77, 0xbd,
@@ -102,7 +102,7 @@ fn normalize_carveouts(text: &mut [u8], regions: &[(u64, u64); 4], firmware_va: 
     true
 }
 
-/// Zero everything iBoot writes into the image (diagnosis only, after
+/// Zero everything iBoot writes into the image (after
 /// `normalize_carveouts`): what is left of the 26.6.2 image is the file's.
 #[cfg_attr(test, allow(dead_code))]
 fn normalize_iboot_writes(text: &mut [u8]) -> bool {
@@ -234,10 +234,22 @@ pub(crate) fn identify_loaded(
             unsafe { bindings::sha256(canonical.as_ptr(), canonical.len(), file.as_mut_ptr()) };
         }
         if file == IMAGE_FILE_TEXT_SHA256 {
+            // The J615 override accepts only the exact file after all
+            // per-boot carveouts and image layout fields have passed.
+            if board.name == "J615" && *crate::module_parameters::g16_j615_setup_records.value() == 1 {
+                dev_warn!(
+                    pdev.as_ref(),
+                    "G16G: {}: the 26.6.2 GPU image with this Mac's own iBoot-written values ({:02x?}), accepted by asahi.g16_j615_setup_records=1\n",
+                    board.name, digest
+                );
+                dev_info!(pdev.as_ref(), "G16G: {} firmware identified ({})\n", board.name, "RTKit-3255.160.4.release");
+                return Ok(Firmware { resources, board });
+            }
+            let retry = if board.name == "J615" { " (asahi.g16_j615_setup_records=1 accepts them)" } else { "" };
             dev_err!(
                 pdev.as_ref(),
-                "G16G: {}: the 26.6.2 GPU image, but iBoot wrote other values into it than on the Mac it was pinned on (normalized SHA-256 {:02x?}); not started, please report this line\n",
-                board.name, digest
+                "G16G: {}: the 26.6.2 GPU image has different setup-record values (normalized SHA-256 {:02x?}); not started{}\n",
+                board.name, digest, retry
             );
         } else {
             dev_err!(

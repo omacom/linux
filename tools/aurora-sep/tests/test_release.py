@@ -119,9 +119,9 @@ class ReleaseGuardTest(unittest.TestCase):
         self.assertEqual(pending, [], "placeholders left in install-aurora-sep.sh")
 
     def test_packages_follow_version(self):
-        names = [f for f, _ in package_entries()]
-        self.assertIn(f"linux-aurora-$VERSION-aarch64.pkg.tar.zst", names)
-        self.assertIn(f"linux-aurora-headers-$VERSION-aarch64.pkg.tar.zst", names)
+        names = [f.replace("$VERSION", VERSION) for f, _ in package_entries()]
+        self.assertIn(f"linux-aurora-{VERSION}-aarch64.pkg.tar.zst", names)
+        self.assertIn(f"linux-aurora-headers-{VERSION}-aarch64.pkg.tar.zst", names)
         self.assertEqual(len([n for n in names if n.startswith("m1n1-")]), 1, names)
 
 
@@ -319,14 +319,25 @@ TAG = re.search(r"^TAG=(\S+)$", SRC, re.M).group(1)
 DEFAULT_RELEASE_URL = f"https://github.com/iconidentify/aurora-linux/releases/download/{TAG}"
 DEFAULT_RELEASES_API = "https://api.github.com/repos/iconidentify/aurora-linux/releases"
 LATEST_URL = re.search(r"^LATEST_URL=(\S+)$", SRC, re.M).group(1)
-# sep-<kernel version>-<release>: the release number orders releases, whatever
-# the kernel version.
-_kernel, _major, _minor = re.match(r"sep-([^-]+)-(\d+)\.(\d+)", TAG).groups()
-_major, _minor = int(_major), int(_minor)
-NEWER_TAGS = (f"{TAG}.1", f"sep-{_kernel}-{_major}.{_minor + 1}", f"sep-{_kernel}-{_major + 1}.0",
-              f"sep-1.0.0.aurora1-{_major + 1}.0")
-OLDER_TAGS = (TAG, f"sep-{_kernel}-{_major - 1}.38", f"sep-{_kernel}-{_major - 1}.36.1",
-              f"sep-{_kernel}-{_major - 1}.9", f"sep-99.0.0.aurora9-{_major - 1}.99", "sep-latest")
+# Tags and package versions are separate release identities.
+_legacy = re.fullmatch(r"sep-([^-]+)-(\d+)\.(\d+)(?:-stable)?", TAG)
+_calendar = re.fullmatch(r"aurora-(\d{4})\.(\d{2})\.(\d{2})(?:\.(\d+))?", TAG)
+if _legacy:
+    _kernel, _major, _minor = _legacy.groups()
+    _major, _minor = int(_major), int(_minor)
+    NEWER_TAGS = (f"sep-{_kernel}-{_major}.{_minor}.1", f"sep-{_kernel}-{_major}.{_minor + 1}",
+                  f"sep-{_kernel}-{_major + 1}.0", f"sep-1.0.0.aurora1-{_major + 1}.0")
+    OLDER_TAGS = (TAG, f"sep-{_kernel}-{_major - 1}.38", f"sep-{_kernel}-{_major - 1}.36.1",
+                  f"sep-{_kernel}-{_major - 1}.9", f"sep-99.0.0.aurora9-{_major - 1}.99", "sep-latest")
+elif _calendar:
+    _year, _month, _day, _increment = _calendar.groups()
+    _increment = int(_increment or 0)
+    _date = f"{_year}.{_month}.{_day}"
+    NEWER_TAGS = (f"aurora-{_date}.{_increment + 1}", f"aurora-{_date}.{_increment + 10}",
+                  f"aurora-{int(_year) + 1}.01.01", f"aurora-{int(_year) + 2}.01.01")
+    OLDER_TAGS = (TAG, f"aurora-{int(_year) - 1}.12.31.99", "sep-99.0.0.aurora9-99.99", "aurora-latest")
+else:
+    raise AssertionError(f"unrecognized release tag: {TAG}")
 OVERRIDES = ("AURORA_RELEASE_URL", "AURORA_RELEASES_API")
 # Values release_source refuses: curl options, no or another scheme, spaces,
 # control characters and bytes outside printable ASCII.
@@ -431,9 +442,9 @@ class ReleaseUrlTest(unittest.TestCase):
             latest.write_text('{"tag_name": "%s"}' % TAG)
             proc = sourced("newer_release", AURORA_RELEASES_API=api)
             self.assertEqual((proc.returncode, proc.stdout), (0, ""), proc.stderr)
-            latest.write_text('{"tag_name": "sep-7.1.12.aurora2-99.0"}')
+            latest.write_text('{"tag_name": "%s"}' % NEWER_TAGS[-1])
             proc = sourced("newer_release", AURORA_RELEASES_API=api)
-            self.assertEqual(proc.stdout.strip(), "sep-7.1.12.aurora2-99.0", proc.stderr)
+            self.assertEqual(proc.stdout.strip(), NEWER_TAGS[-1], proc.stderr)
             # A tag with control characters or anything but [A-Za-z0-9._-] is not taken.
             for tag in (b"sep-7.1.12.aurora2-99.0\x1b]0;x\x07", b"sep-7.1.12.aurora2-99.0\x1b[2J",
                         b"sep-7.1.12.aurora2-99.0\\u001b[2J", b"sep-99.0$(id)", b"sep-99.0 x"):
@@ -454,6 +465,31 @@ class ReleaseUrlTest(unittest.TestCase):
                 with self.subTest(tag=tag):
                     proc = sourced("newer_release", AURORA_RELEASES_API=self.api(d, tag))
                     self.assertEqual(proc.stdout.strip(), tag if newer else "", proc.stderr)
+
+    def test_legacy_and_calendar_ordering(self):
+        cases = [
+            ("sep-7.1.12.aurora2-12.6", "aurora-2026.10.10.2", True),
+            ("aurora-2026.10.10.2", "sep-99.0.0.aurora9-99.99", False),
+            ("sep-9.0.0.aurora9-12.6", "sep-1.0.0.aurora1-12.7", True),
+            ("sep-7.1.12.aurora2-12.6", "sep-7.1.12.aurora2-12.6-stable", True),
+            ("aurora-2026.10.10.9", "aurora-2026.10.10.10", True),
+            ("aurora-2026.10.10.10", "aurora-2026.10.10.9", False),
+            ("aurora-2026.10.10", "aurora-2026.10.10.0", False),
+            ("aurora-2026.10.10.99", "aurora-2026.10.11", True),
+            ("aurora-2026.10.10", "aurora-2026.02.30", False),
+            ("aurora-2026.10.10", "aurora-2027.13.01", False),
+            ("unknown-current", "aurora-2027.01.01", False),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            for current, latest, newer in cases:
+                with self.subTest(current=current, latest=latest):
+                    proc = sourced(f"TAG={current}; newer_release", AURORA_RELEASES_API=self.api(d, latest))
+                    self.assertEqual((proc.returncode, proc.stdout.strip()), (0, latest if newer else ""), proc.stderr)
+            for latest in ("aurora-latest", "aurora-2027.01.01\n", "aurora-2027.01.01\x1b[2J",
+                           "aurora-2027.01.01\\u001b", "aurora-2027.01.01$(id)", "other-2027.01.01"):
+                with self.subTest(latest=latest):
+                    proc = sourced("TAG=aurora-2026.10.10.2; newer_release", AURORA_RELEASES_API=self.api(d, latest))
+                    self.assertEqual((proc.returncode, proc.stdout), (0, ""), proc.stderr)
 
     def notice(self, d, tag, override):
         api = self.api(d, tag)

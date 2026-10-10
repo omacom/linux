@@ -115,6 +115,6 @@ pub(crate) fn inputs(dev: &driver::AsahiDevice) -> Result<KVec<(Object, usize, u
     crate::g16_profile::calibration_words(board.calibration.as_ref().ok_or(EINVAL)?,
         board.sram_k, base as usize, |offset, value| words.push((Main, offset, value), GFP_KERNEL))?;
     w!(Globals,0xe4,0); w!(Globals,0xe8,0);
-    dev_info!(dev.as_ref(),"G16G: J613 DT controllers sample_ms={} max_power_mw={} base={} ceiling={} firmware_thermal_controller={} fast_ki_dt_bits={:#x}\n",period,max_power,base,max,u8::from(thermal.is_some()),unsafe { core::mem::transmute::<F32,u32>(fast_ki) });
+    dev_info!(dev.as_ref(),"G16G: {} DT controllers sample_ms={} max_power_mw={} base={} ceiling={} firmware_thermal_controller={} fast_ki_dt_bits={:#x}\n",board.name,period,max_power,base,max,u8::from(thermal.is_some()),unsafe { core::mem::transmute::<F32,u32>(fast_ki) });
     Ok(words)
 }

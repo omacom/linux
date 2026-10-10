@@ -248,7 +248,10 @@ static bool apple_pmgr_retained_25g83(struct device_node *node, u32 offset)
 	u32 profile, marker;
 	bool retained;
 
-	if (!of_machine_is_compatible("apple,j613") ||
+	/* J615: only after m1n1 published the 25G83 mapping handoff, which it
+	 * does on a J615 only with the owner's experimental opt-in. */
+	if ((!of_machine_is_compatible("apple,j613") &&
+	     !of_machine_is_compatible("apple,j615")) ||
 	    !of_device_is_compatible(node, "apple,t8122-pmgr-pwrstate") ||
 	    (offset != 0x1d8 && offset != 0x208 && offset != 0x10000 &&
 	     offset != 0x450 && offset != 0x458))

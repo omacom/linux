@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 import test_m3_handoff
 import test_m3_persistent
 
@@ -130,11 +131,30 @@ class Ownership(unittest.TestCase):
     def test_helper_install_remove_exact_owned(self):
         self.shell('m3_gpu_check_install')
         self.assertEqual((self.state/'m3-gpu-check').read_text().strip(),hashlib.sha256(self.helper().read_bytes()).hexdigest())
+        self.assertEqual(self.helper().stat().st_mode & 0o777, 0o755)
+        self.assertEqual((self.state/'m3-gpu-check').stat().st_mode & 0o777, 0o644)
         self.shell('m3_gpu_check_remove');self.assertFalse(self.helper().exists())
     def test_foreign_helper_refused_untouched(self):
         self.helper().write_text('foreign')
         self.assertNotEqual(self.shell('m3_gpu_check_install',False).returncode,0)
         self.assertEqual(self.helper().read_text(),'foreign')
+    def test_empty_pair_restored_only_with_matching_persistent_selection(self):
+        self.helper().write_bytes(b'')
+        (self.state/'m3-gpu-check').write_bytes(b'')
+        (self.state/'m3-gpu-persistent').write_text('j613-25g83\n')
+        self.shell('M3_GPU_PERSISTENT=1\nM3_GPU_PROFILE=j613-25g83\nm3_gpu_check_install')
+        self.assertTrue(self.helper().read_bytes().startswith(b'#!/usr/bin/python3'))
+        self.assertEqual((self.state/'m3-gpu-check').read_text().strip(),hashlib.sha256(self.helper().read_bytes()).hexdigest())
+    def test_empty_pair_without_matching_record_or_selection_is_refused(self):
+        self.helper().write_bytes(b'')
+        (self.state/'m3-gpu-check').write_bytes(b'')
+        for setting in ('M3_GPU_PERSISTENT=0', 'M3_GPU_PERSISTENT=1\nM3_GPU_PROFILE=legacy'):
+            (self.state/'m3-gpu-persistent').write_text('j613-25g83\n')
+            self.assertNotEqual(self.shell(setting+'\nm3_gpu_check_install',False).returncode,0)
+            self.assertEqual(self.helper().read_bytes(),b'')
+            self.assertEqual((self.state/'m3-gpu-check').read_bytes(),b'')
+        (self.state/'m3-gpu-persistent').unlink()
+        self.assertNotEqual(self.shell('M3_GPU_PERSISTENT=1\nM3_GPU_PROFILE=j613-25g83\nm3_gpu_check_install',False).returncode,0)
     def test_changed_owned_helper_retained(self):
         self.shell('m3_gpu_check_install');self.helper().write_text('changed')
         self.shell('m3_gpu_check_remove');self.assertEqual(self.helper().read_text(),'changed')
@@ -149,3 +169,68 @@ class Ownership(unittest.TestCase):
         self.shell('m3_gpu_check_install');(self.tmp/'work/aurora-m3-gpu-check').unlink();(self.tmp/'work').rmdir();old=self.helper().read_bytes();record=(self.state/'m3-gpu-check').read_bytes()
         self.run_sh(self.transaction_paths()+'m3_persistent_transaction_begin limine\nprintf successor > "$M3_GPU_CHECK"\nprintf changed > "$STATE/m3-gpu-check"\nm3_persistent_transaction_rollback')
         self.assertEqual(self.helper().read_bytes(),old);self.assertEqual((self.state/'m3-gpu-check').read_bytes(),record)
+
+class DurableChecker(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root/'source.py'
+        self.source.write_bytes(b"#!/usr/bin/python3\nprint('complete checker')\n")
+        self.helper = self.root/'bin/check'
+        self.record = self.root/'state/check.sha256'
+        for path, data in ((self.helper, b'old helper'), (self.record, b'old record')):
+            path.parent.mkdir()
+            path.write_bytes(data)
+        self.code = SOURCE.split("<<'M3_CHECK_INSTALL_PY'\n", 1)[1].split('\nM3_CHECK_INSTALL_PY', 1)[0]
+
+    def install(self):
+        digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        args = ['install', str(self.source), str(self.helper), str(self.record), digest]
+        with patch('sys.argv', args):
+            exec(compile(self.code, 'checker-install', 'exec'), {})
+
+    def test_sync_complete_files_before_publish_and_directories_after(self):
+        events = []
+        fsync = os.fsync
+        def synced(fd):
+            events.append((Path(os.readlink(f'/proc/self/fd/{fd}')),
+                           self.helper.read_bytes(), self.record.read_bytes()))
+            fsync(fd)
+        with patch('os.fsync', synced):
+            self.install()
+        self.assertEqual(len(events), 4)
+        self.assertTrue(all(helper == b'old helper' and record == b'old record'
+                            for path, helper, record in events[:2]))
+        self.assertEqual(events[2][0], self.helper.parent)
+        self.assertEqual(events[2][1], self.source.read_bytes())
+        self.assertEqual(events[2][2], b'old record')
+        self.assertEqual(events[3][0], self.record.parent)
+        self.assertEqual(events[3][2].strip(), hashlib.sha256(self.source.read_bytes()).hexdigest().encode())
+
+    def test_sync_failure_keeps_previous_pair_and_removes_staging_files(self):
+        with patch('os.fsync', side_effect=OSError('writeback failed')):
+            with self.assertRaisesRegex(OSError, 'writeback failed'):
+                self.install()
+        self.assertEqual(self.helper.read_bytes(), b'old helper')
+        self.assertEqual(self.record.read_bytes(), b'old record')
+        self.assertEqual(list(self.helper.parent.iterdir()), [self.helper])
+
+    def test_empty_or_invalid_python_source_never_replaces_previous_pair(self):
+        for data in (b'', b'not valid Python syntax!'):
+            with self.subTest(data=data):
+                self.source.write_bytes(data)
+                with self.assertRaises((SystemExit, SyntaxError)):
+                    self.install()
+                self.assertEqual(self.helper.read_bytes(), b'old helper')
+                self.assertEqual(self.record.read_bytes(), b'old record')
+
+    def test_record_symlink_keeps_helper_and_foreign_target(self):
+        foreign = self.root/'foreign'
+        foreign.write_bytes(b'foreign')
+        self.record.unlink()
+        self.record.symlink_to(foreign)
+        with self.assertRaises(SystemExit):
+            self.install()
+        self.assertEqual(self.helper.read_bytes(), b'old helper')
+        self.assertEqual(foreign.read_bytes(), b'foreign')

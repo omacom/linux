@@ -1394,17 +1394,15 @@ class SameAs122Test(MaxBase):
         self.old = self.tmp / "install-12.2.sh"
         self.old.write_bytes(old.stdout)
         self.old_version = re.search(rb"^VERSION=(\S+)$", old.stdout, re.M).group(1).decode()
+        self.assertEqual(re.search(rb"^TAG=(\S+)$", old.stdout, re.M).group(1).decode(), "sep-" + self.old_version)
 
     def as_this_release(self, run):
         # 12.2's run with its release number read as this one's: a release names its own packages,
         # tag and boot.bin copy, and nothing else may differ.
         old, new = self.old_version, VERSION
-        if old == new:
-            return run
-        ob, nb = old.encode(), new.encode()
-        return {"codes": run["codes"], "log": run["log"].replace(old, new),
-                "tree": {k.replace(old, new): v.replace(ob, nb) for k, v in run["tree"].items()},
-                "out": [x.replace(old, new) if x else x for x in run["out"]]}
+        result = pro.as_this_release(run, old, new)
+        result["out"] = [pro.release_text(x, old, new) if x else x for x in run["out"]]
+        return result
 
     def boards(self):
         for board, compat in flow.BOARDS.items():

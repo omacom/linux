@@ -37,6 +37,7 @@
 #include "xtlv.h"
 #include "ratespec.h"
 #include "interface_create.h"
+#include "scan_timeout.h"
 
 #define BRCMF_SCAN_IE_LEN_MAX		2048
 
@@ -84,7 +85,6 @@
 
 #define BRCMF_SCAN_CHANNEL_TIME		40
 #define BRCMF_SCAN_UNASSOC_TIME		40
-#define BRCMF_SCAN_PASSIVE_TIME		120
 
 #define BRCMF_ND_INFO_TIMEOUT		msecs_to_jiffies(2000)
 
@@ -1180,6 +1180,7 @@ brcmf_cfg80211_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
 	struct brcmf_pub *drvr = cfg->pub;
 	struct brcmf_cfg80211_vif *vif;
+	unsigned int timeout;
 	s32 err = 0;
 
 	brcmf_dbg(TRACE, "Enter\n");
@@ -1226,13 +1227,19 @@ brcmf_cfg80211_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
 	if (vif == cfg->p2p.bss_idx[P2PAPI_BSSCFG_DEVICE].vif)
 		vif = cfg->p2p.bss_idx[P2PAPI_BSSCFG_PRIMARY].vif;
 
+	/* P2P supplies its own dwell policy; retain its existing timeout. */
+	timeout = cfg->escan_info.run == brcmf_run_escan ?
+		brcmf_scan_timeout_ms(wiphy, request) : BRCMF_ESCAN_TIMER_INTERVAL_MS;
+	brcmf_dbg(SCAN, "scan timeout %u ms for %u channels\n",
+		  timeout, request->n_channels);
+
 	err = brcmf_do_escan(vif->ifp, request);
 	if (err)
 		goto scan_out;
 
 	/* Arm scan timeout timer */
 	mod_timer(&cfg->escan_timeout,
-		  jiffies + msecs_to_jiffies(BRCMF_ESCAN_TIMER_INTERVAL_MS));
+		  jiffies + msecs_to_jiffies(timeout));
 
 	return 0;
 
@@ -3217,8 +3224,47 @@ done:
 	return err;
 }
 
+static bool brcmf_bss_info_version_supported(u32 version)
+{
+	return (version >= BRCMF_BSS_INFO_MIN_VERSION &&
+		version <= BRCMF_BSS_INFO_MAX_VERSION) ||
+		version == BRCMF_BSS_INFO_VERSION_116;
+}
+
+static bool brcmf_bss_info_valid(const struct brcmf_bss_info_le *bi,
+			       size_t available)
+{
+	u32 version, length, ie_length;
+	u16 ie_offset;
+	size_t fixed_size = offsetof(struct brcmf_bss_info_le, SNR);
+
+	/* All scan consumers use the common prefix through ie_length. */
+	if (available < fixed_size)
+		return false;
+
+	version = le32_to_cpu(bi->version);
+	if (!brcmf_bss_info_version_supported(version))
+		return false;
+
+	/* Version 116 has two five-byte EHT maps and an MLD address.
+	 * Its common prefix has the same offsets; the tail stays opaque.
+	 */
+	if (version == BRCMF_BSS_INFO_VERSION_116)
+		fixed_size = BRCMF_BSS_INFO_V116_FIXED_SIZE;
+
+	length = le32_to_cpu(bi->length);
+	ie_offset = le16_to_cpu(bi->ie_offset);
+	ie_length = le32_to_cpu(bi->ie_length);
+	return length >= fixed_size && length <= available &&
+		bi->SSID_len <= sizeof(bi->SSID) &&
+		le32_to_cpu(bi->rateset.count) <= sizeof(bi->rateset.rates) &&
+		ie_offset >= fixed_size && ie_offset <= length &&
+		ie_length <= length - ie_offset;
+}
+
 static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
-				   struct brcmf_bss_info_le *bi)
+				   struct brcmf_bss_info_le *bi,
+				   size_t available)
 {
 	struct wiphy *wiphy = cfg_to_wiphy(cfg);
 	struct brcmf_pub *drvr = cfg->pub;
@@ -3234,8 +3280,9 @@ static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
 	size_t notify_ielen;
 	struct cfg80211_inform_bss bss_data = {};
 
-	if (le32_to_cpu(bi->length) > WL_BSS_INFO_MAX) {
-		bphy_err(drvr, "Bss info is larger than buffer. Discarding\n");
+	if (!brcmf_bss_info_valid(bi, available) ||
+	    le32_to_cpu(bi->length) > WL_BSS_INFO_MAX) {
+		bphy_err(drvr, "Invalid Bss info record. Discarding\n");
 		return -EINVAL;
 	}
 
@@ -3318,20 +3365,30 @@ static s32 brcmf_inform_bss(struct brcmf_cfg80211_info *cfg)
 	struct brcmf_scan_results *bss_list;
 	struct brcmf_bss_info_le *bi = NULL;	/* must be initialized */
 	s32 err = 0;
-	int i;
+	u32 i;
+	size_t remaining;
 
 	bss_list = (struct brcmf_scan_results *)cfg->escan_info.escan_buf;
 	if (bss_list->count != 0 &&
-	    (bss_list->version < BRCMF_BSS_INFO_MIN_VERSION ||
-	    bss_list->version > BRCMF_BSS_INFO_MAX_VERSION)) {
+	    !brcmf_bss_info_version_supported(bss_list->version)) {
 		bphy_err(drvr, "BSS info version %d unsupported\n",
 			 bss_list->version);
 		return -EOPNOTSUPP;
 	}
+	if (bss_list->buflen < sizeof(*bss_list) ||
+	    bss_list->buflen > BRCMF_ESCAN_BUF_SIZE)
+		return -EINVAL;
+	remaining = bss_list->buflen - sizeof(*bss_list);
+	if (bss_list->count > remaining /
+	    offsetof(struct brcmf_bss_info_le, SNR))
+		return -EINVAL;
 	brcmf_dbg(SCAN, "scanned AP count (%d)\n", bss_list->count);
 	for (i = 0; i < bss_list->count; i++) {
 		bi = next_bss_le(bss_list, bi);
-		err = brcmf_inform_single_bss(cfg, bi);
+		if (!brcmf_bss_info_valid(bi, remaining))
+			return -EINVAL;
+		err = brcmf_inform_single_bss(cfg, bi, remaining);
+		remaining -= le32_to_cpu(bi->length);
 		if (err)
 			break;
 	}
@@ -3375,6 +3432,10 @@ static s32 brcmf_inform_ibss(struct brcmf_cfg80211_info *cfg,
 	}
 
 	bi = (struct brcmf_bss_info_le *)(buf + 4);
+	if (!brcmf_bss_info_valid(bi, WL_BSS_INFO_MAX - 4)) {
+		err = -EINVAL;
+		goto cleanup;
+	}
 
 	ch.chspec = le16_to_cpu(bi->chanspec);
 	cfg->d11inf.decchspec(&ch);
@@ -3448,7 +3509,7 @@ static s32 brcmf_update_bss_info(struct brcmf_cfg80211_info *cfg,
 		goto update_bss_info_out;
 	}
 	bi = (struct brcmf_bss_info_le *)(cfg->extra_buf + 4);
-	err = brcmf_inform_single_bss(cfg, bi);
+	err = brcmf_inform_single_bss(cfg, bi, WL_EXTRA_BUF_MAX - 4);
 
 update_bss_info_out:
 	brcmf_dbg(TRACE, "Exit");
@@ -3558,7 +3619,8 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 
 	if (status == BRCMF_E_STATUS_PARTIAL) {
 		brcmf_dbg(SCAN, "ESCAN Partial result\n");
-		if (e->datalen < sizeof(*escan_result_le)) {
+		if (e->datalen < WL_ESCAN_RESULTS_FIXED_SIZE +
+		    offsetof(struct brcmf_bss_info_le, SNR)) {
 			bphy_err(drvr, "invalid event data length\n");
 			goto exit;
 		}
@@ -3570,7 +3632,8 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 		escan_buflen = le32_to_cpu(escan_result_le->buflen);
 		if (escan_buflen > BRCMF_ESCAN_BUF_SIZE ||
 		    escan_buflen > e->datalen ||
-		    escan_buflen < sizeof(*escan_result_le)) {
+		    escan_buflen < WL_ESCAN_RESULTS_FIXED_SIZE +
+		    offsetof(struct brcmf_bss_info_le, SNR)) {
 			bphy_err(drvr, "Invalid escan buffer length: %d\n",
 				 escan_buflen);
 			goto exit;
@@ -3581,19 +3644,18 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 			goto exit;
 		}
 		bss_info_le = &escan_result_le->bss_info_le;
+		bi_length = escan_buflen - WL_ESCAN_RESULTS_FIXED_SIZE;
+		if (!brcmf_bss_info_valid(bss_info_le, bi_length) ||
+		    le32_to_cpu(bss_info_le->length) != bi_length) {
+			bphy_err(drvr, "Ignoring invalid bss_info record\n");
+			goto exit;
+		}
 
 		if (brcmf_p2p_scan_finding_common_channel(cfg, bss_info_le))
 			goto exit;
 
 		if (!cfg->int_escan_map && !cfg->scan_request) {
 			brcmf_dbg(SCAN, "result without cfg80211 request\n");
-			goto exit;
-		}
-
-		bi_length = le32_to_cpu(bss_info_le->length);
-		if (bi_length != escan_buflen -	WL_ESCAN_RESULTS_FIXED_SIZE) {
-			bphy_err(drvr, "Ignoring invalid bss_info length: %d\n",
-				 bi_length);
 			goto exit;
 		}
 
@@ -3608,7 +3670,9 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 
 		list = (struct brcmf_scan_results *)
 				cfg->escan_info.escan_buf;
-		if (bi_length > BRCMF_ESCAN_BUF_SIZE - list->buflen) {
+		if (list->buflen < sizeof(*list) ||
+		    list->buflen > BRCMF_ESCAN_BUF_SIZE ||
+		    bi_length > BRCMF_ESCAN_BUF_SIZE - list->buflen) {
 			bphy_err(drvr, "Buffer is too small: ignoring\n");
 			goto exit;
 		}
@@ -6241,80 +6305,103 @@ static s32 brcmf_get_assoc_ies(struct brcmf_cfg80211_info *cfg,
 			       struct brcmf_if *ifp)
 {
 	struct brcmf_pub *drvr = cfg->pub;
-	struct brcmf_cfg80211_assoc_ielen_le *assoc_info;
+	struct brcmf_cfg80211_assoc_ielen_le assoc_info = {};
 	struct brcmf_cfg80211_connect_info *conn_info = cfg_to_conn(cfg);
 	struct brcmf_cfg80211_edcf_acparam edcf_acparam_info[EDCF_AC_COUNT];
-	u32 req_len;
-	u32 resp_len;
-	s32 err = 0;
+	u8 *buffer = NULL, *req_ie = NULL, *resp_ie = NULL;
+	u32 req_len, resp_len, received;
+	s32 err;
 
 	brcmf_clear_assoc_ies(cfg);
-
-	err = brcmf_fil_iovar_data_get(ifp, "assoc_info",
-				       cfg->extra_buf, WL_ASSOC_INFO_MAX);
+	err = brcmf_fil_iovar_data_get_len(ifp, "assoc_info", &assoc_info,
+					   sizeof(assoc_info), &received);
 	if (err) {
 		bphy_err(drvr, "could not get assoc info (%d)\n", err);
 		return err;
 	}
-	assoc_info =
-		(struct brcmf_cfg80211_assoc_ielen_le *)cfg->extra_buf;
-	req_len = le32_to_cpu(assoc_info->req_len);
-	resp_len = le32_to_cpu(assoc_info->resp_len);
+	if (received < sizeof(assoc_info)) {
+		bphy_err(drvr, "short assoc info: received %u required %zu\n",
+			 received, sizeof(assoc_info));
+		return -EBADMSG;
+	}
+	req_len = le32_to_cpu(assoc_info.req_len);
+	resp_len = le32_to_cpu(assoc_info.resp_len);
 	if (req_len > WL_EXTRA_BUF_MAX || resp_len > WL_EXTRA_BUF_MAX) {
 		bphy_err(drvr, "invalid lengths in assoc info: req %u resp %u\n",
 			 req_len, resp_len);
 		return -EINVAL;
 	}
+	if (req_len || resp_len) {
+		buffer = kzalloc(WL_EXTRA_BUF_MAX, GFP_KERNEL);
+		if (!buffer)
+			return -ENOMEM;
+	}
 	if (req_len) {
-		err = brcmf_fil_iovar_data_get(ifp, "assoc_req_ies",
-					       cfg->extra_buf,
-					       WL_ASSOC_INFO_MAX);
+		err = brcmf_fil_iovar_data_get_len(ifp, "assoc_req_ies", buffer,
+						   max_t(u32, req_len, WL_ASSOC_INFO_MAX),
+						   &received);
 		if (err) {
 			bphy_err(drvr, "could not get assoc req (%d)\n", err);
-			return err;
+			goto done;
 		}
-		conn_info->req_ie_len = req_len;
-		conn_info->req_ie =
-		    kmemdup(cfg->extra_buf, conn_info->req_ie_len,
-			    GFP_KERNEL);
-		if (!conn_info->req_ie)
-			conn_info->req_ie_len = 0;
-	} else {
-		conn_info->req_ie_len = 0;
-		conn_info->req_ie = NULL;
+		if (received < req_len) {
+			bphy_err(drvr, "short assoc req: received %u required %u\n",
+				 received, req_len);
+			err = -EBADMSG;
+			goto done;
+		}
+		req_ie = kmemdup(buffer, req_len, GFP_KERNEL);
+		if (!req_ie) {
+			err = -ENOMEM;
+			goto done;
+		}
 	}
 	if (resp_len) {
-		err = brcmf_fil_iovar_data_get(ifp, "assoc_resp_ies",
-					       cfg->extra_buf,
-					       WL_ASSOC_INFO_MAX);
+		memset(buffer, 0, WL_EXTRA_BUF_MAX);
+		err = brcmf_fil_iovar_data_get_len(ifp, "assoc_resp_ies", buffer,
+						   max_t(u32, resp_len, WL_ASSOC_INFO_MAX),
+						   &received);
 		if (err) {
 			bphy_err(drvr, "could not get assoc resp (%d)\n", err);
-			return err;
+			goto done;
 		}
-		conn_info->resp_ie_len = resp_len;
-		conn_info->resp_ie =
-		    kmemdup(cfg->extra_buf, conn_info->resp_ie_len,
-			    GFP_KERNEL);
-		if (!conn_info->resp_ie)
-			conn_info->resp_ie_len = 0;
-
+		if (received < resp_len) {
+			bphy_err(drvr, "short assoc resp: received %u required %u\n",
+				 received, resp_len);
+			err = -EBADMSG;
+			goto done;
+		}
+		resp_ie = kmemdup(buffer, resp_len, GFP_KERNEL);
+		if (!resp_ie) {
+			err = -ENOMEM;
+			goto done;
+		}
+	}
+	/* Publish both IE buffers only after both firmware replies succeed. */
+	conn_info->req_ie = req_ie;
+	conn_info->req_ie_len = req_len;
+	conn_info->resp_ie = resp_ie;
+	conn_info->resp_ie_len = resp_len;
+	req_ie = NULL;
+	resp_ie = NULL;
+	err = 0;
+	if (resp_len) {
 		err = brcmf_fil_iovar_data_get(ifp, "wme_ac_sta",
 					       edcf_acparam_info,
 					       sizeof(edcf_acparam_info));
 		if (err) {
 			brcmf_err("could not get wme_ac_sta (%d)\n", err);
-			return err;
+			goto done;
 		}
-
 		brcmf_wifi_prioritize_acparams(edcf_acparam_info,
 					       cfg->ac_priority);
-	} else {
-		conn_info->resp_ie_len = 0;
-		conn_info->resp_ie = NULL;
 	}
+done:
 	brcmf_dbg(CONN, "req len (%d) resp len (%d)\n",
 		  conn_info->req_ie_len, conn_info->resp_ie_len);
-
+	kfree(buffer);
+	kfree(req_ie);
+	kfree(resp_ie);
 	return err;
 }
 
@@ -6397,6 +6484,10 @@ brcmf_bss_roaming_done(struct brcmf_cfg80211_info *cfg,
 		goto done;
 
 	bi = (struct brcmf_bss_info_le *)(buf + 4);
+	if (!brcmf_bss_info_valid(bi, WL_BSS_INFO_MAX - 4)) {
+		err = -EINVAL;
+		goto done;
+	}
 	ch.chspec = le16_to_cpu(bi->chanspec);
 	cfg->d11inf.decchspec(&ch);
 
@@ -6906,6 +6997,8 @@ static s32 brcmf_dongle_roam(struct brcmf_if *ifp)
 	if (err)
 		bphy_err(drvr, "WLC_SET_ROAM_TRIGGER error (%d)\n", err);
 
+	roam_delta[0] = cpu_to_le32(WL_ROAM_DELTA);
+	roam_delta[1] = cpu_to_le32(BRCM_BAND_ALL);
 	err = brcmf_fil_cmd_data_set(ifp, BRCMF_C_SET_ROAM_DELTA,
 				     (void *)roam_delta, sizeof(roam_delta));
 	if (err)

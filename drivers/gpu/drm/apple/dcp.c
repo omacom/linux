@@ -23,6 +23,7 @@
 #include <linux/of_platform.h>
 #include <linux/slab.h>
 #include <linux/soc/apple/rtkit.h>
+#include <linux/soc/apple/j613-display.h>
 #include <linux/string.h>
 #include <linux/usb/typec_altmode.h>
 #include <linux/usb/typec_dp.h>
@@ -1819,13 +1820,13 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
 		return DCP_FIRMWARE_UNKNOWN;
 	}
 
-	/* J613 25G83 has a distinct callback table, never a v14 fallback. */
+	/* 25G83 (J613; J615 experimental) has a distinct callback table, never a v14 fallback. */
 	if (of_device_is_compatible(dev->of_node, "apple,t8122-dcp") &&
 	    of_property_present(dev->of_node, "apple,j613-25g83-profile")) {
 		const char *uuid;
 		u32 profile;
 
-		if (of_machine_is_compatible("apple,j613") &&
+		if (apple_t8122_25g83_board() &&
 		    !of_property_read_u32(dev->of_node, "apple,j613-25g83-profile", &profile) &&
 		    profile == 1 && !strcmp(compat_str, "26.6.2") &&
 		    !of_property_read_string(dev->of_node, "apple,firmware-uuid", &uuid) &&

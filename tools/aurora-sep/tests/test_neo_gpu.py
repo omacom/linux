@@ -110,7 +110,7 @@ neo_gpu_restore "$STATE/neo-transaction.json"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.original_m1n1.read_bytes(), b'original own stage2')
 
-    def hook(self, intent=True, profile='j700-g17p-hal200', abi=0):
+    def hook(self, intent=True, profile='j700-g17p-hal200', abi=0, display=True):
         for path in ['libexec', 'share/mesa-neo']:
             (self.prefix / path).mkdir(parents=True, exist_ok=True)
         (self.prefix / 'share/mesa-neo/profile').write_text('j700-g17p-hal200\n')
@@ -126,11 +126,36 @@ neo_gpu_restore "$STATE/neo-transaction.json"
         (render / 'compatible').write_bytes(b'apple,agx-t8140\0')
         (self.tmp / 'dev').mkdir(exist_ok=True)
         (self.tmp / 'dev/renderD128').touch()
+        gpu = render.parent
+        driver = self.tmp / 'drivers/asahi_neo'
+        driver.mkdir(parents=True, exist_ok=True)
+        if not (gpu / 'driver').is_symlink():
+            (gpu / 'driver').symlink_to(driver)
+        primary = self.tmp / 'sys/card1'
+        primary.mkdir(exist_ok=True)
+        if not (primary / 'device').is_symlink():
+            (primary / 'device').symlink_to(gpu)
+        if display:
+            kms = self.tmp / 'sys/card2/device/of_node'
+            kms.mkdir(parents=True, exist_ok=True)
+            (kms / 'compatible').write_bytes(b'apple,t8140-display-subsystem\0')
+            dcp = self.tmp / 'drivers/apple-drm-neo'
+            dcp.mkdir(parents=True, exist_ok=True)
+            if not (kms.parent / 'driver').is_symlink():
+                (kms.parent / 'driver').symlink_to(dcp)
+            (self.tmp / 'dev/card2').touch()
+            connector = self.tmp / 'sys/card2-eDP-1'
+            connector.mkdir(exist_ok=True)
+            (connector / 'status').write_text('connected\n')
+            (connector / 'modes').write_text('2408x1506\n')
+        shared = (ROOT / 'neo/mesa-neo-env').read_text()
         source = (ROOT / 'neo/mesa-neo-session-env').read_text()
         for old, new in [('/proc/device-tree', self.dt), ('/sys/class/drm', self.tmp / 'sys'),
                          ('/dev/dri', self.tmp / 'dev'), ('/etc/mesa-neo', self.config),
                          ('/opt/mesa-neo', self.prefix)]:
             source = source.replace(old, str(new))
+            shared = shared.replace(old, str(new))
+        (self.prefix / 'libexec/mesa-neo-env').write_text(shared)
         script = self.tmp / 'hook'
         script.write_text(source)
         env = {**os.environ, 'HOME': str(self.tmp), 'VK_DRIVER_FILES': '/stale/m3.json',
@@ -145,8 +170,9 @@ neo_gpu_restore "$STATE/neo-transaction.json"
         self.assertEqual(env['GALLIUM_DRIVER'], 'asahi')
         self.assertEqual(env['MESA_NEO_PROFILE'], 'j700-g17p-hal200')
         self.assertEqual(env['VK_DRIVER_FILES'], str(self.prefix / 'share/vulkan/icd.d/asahi_icd.aarch64.json'))
-        self.assertEqual(env['LD_LIBRARY_PATH'], str(self.prefix / 'lib') + ':/keep/lib')
+        self.assertEqual(env['LD_LIBRARY_PATH'], str(self.prefix / 'lib'))
         self.assertNotIn('LIBGL_ALWAYS_SOFTWARE', env)
+        self.assertNotIn('MESA_LOADER_DRIVER_OVERRIDE', env)
 
     def test_hook_requires_intent_exact_token_and_runtime_abi(self):
         for args in [dict(intent=False), dict(profile='j613-25g83-hal200'), dict(abi=1)]:
@@ -156,6 +182,14 @@ neo_gpu_restore "$STATE/neo-transaction.json"
                 self.assertNotIn('VK_DRIVER_FILES', env)
                 self.assertNotIn('MESA_NEO_PROFILE', env)
                 self.assertEqual(env['LD_LIBRARY_PATH'], '/keep/lib')
+
+    def test_hook_without_native_display_keeps_software_fallback(self):
+        env = self.hook(display=False)
+        self.assertEqual(env['LIBGL_ALWAYS_SOFTWARE'], '1')
+        self.assertEqual(env['MESA_NEO_FALLBACK_REASON'], 'native-display-unavailable')
+        self.assertNotIn('VK_DRIVER_FILES', env)
+        self.assertNotIn('MESA_NEO_PROFILE', env)
+        self.assertEqual(env['LD_LIBRARY_PATH'], '/keep/lib')
 
     def test_hook_leaves_other_macs_unchanged(self):
         self.mac('j613', 't8122')

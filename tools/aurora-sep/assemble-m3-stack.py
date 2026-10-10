@@ -13,6 +13,8 @@ ROLES = {'kernel':'linux-aurora', 'headers':'linux-aurora-headers', 'm1n1':'m1n1
          'mesa':'mesa-m3', 'libfprint':'libfprint', 'touchid':'aurora-touchid'}
 HEX = re.compile(r'[0-9a-f]{64}')
 NEO_KERNEL = '77030de18bbbbf077777da5f821e9c15dd1e4c47'
+NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa',
+               'e76133daffab1be549b47571691ab77ac7c28201')
 
 def member(path, name):
     return subprocess.check_output(['bsdtar', '-xOf', str(path), name])
@@ -43,7 +45,7 @@ def neo_data(manifest, directory):
     neo = manifest.get('neo')
     if neo is None:
         return {}
-    if manifest['source_commits']['kernel'] != NEO_KERNEL:
+    if manifest['source_commits']['kernel'] not in NEO_KERNELS:
         raise ValueError('Neo requires the matched T8140 kernel')
     if neo.get('profile') != 'j700-g17p-hal200':
         raise ValueError('Neo profile differs')
@@ -91,10 +93,13 @@ def neo_data(manifest, directory):
     hook = member(paths['mesa'], 'usr/share/uwsm/env.d/51-mesa-neo')
     if not re.search(rb'(?m)^ *\. /opt/mesa-neo/libexec/mesa-neo-session-env$', hook):
         raise ValueError('Neo session delegation differs')
-    session = member(paths['mesa'], 'opt/mesa-neo/libexec/mesa-neo-session-env')
-    canonical = Path(__file__).with_name('neo') / 'mesa-neo-session-env'
-    if session != canonical.read_bytes():
-        raise ValueError('Neo package session helper differs from installer')
+    for installed, local in (('libexec/mesa-neo-env', 'mesa-neo-env'),
+                             ('libexec/mesa-neo-session-env', 'mesa-neo-session-env'),
+                             ('bin/mesa-neo-probe', 'mesa-neo-probe-wrapper')):
+        canonical = Path(__file__).with_name('neo') / local
+        if member(paths['mesa'], 'opt/mesa-neo/' + installed) != canonical.read_bytes():
+            raise ValueError('Neo package helper differs from installer: ' + installed)
+    member(paths['mesa'], 'opt/mesa-neo/libexec/mesa-neo-probe.real')
     return pins
 
 def assemble(template, manifest, directory):
@@ -108,7 +113,7 @@ def assemble(template, manifest, directory):
     if (not isinstance(boards, list) or not boards or len(set(boards)) != len(boards) or
             any(b not in ('j613', 'j615') for b in boards)):
         raise ValueError('legacy GPU boards must name supported Air boards once')
-    if 'j615' in boards and sources['kernel'] not in ('a4d7ff4acdefcbce7daa7f57866413f21f05fb75', NEO_KERNEL):
+    if 'j615' in boards and sources['kernel'] not in ('a4d7ff4acdefcbce7daa7f57866413f21f05fb75', *NEO_KERNELS):
         raise ValueError('J615 legacy GPU requires the matched J615 kernel consumer')
     if 'j615' in boards and sources['m1n1'] != '74ba6bea52d1f865d204bb3f8168705a148fd5c5':
         raise ValueError('J615 legacy GPU requires the matched J615 m1n1 producer')

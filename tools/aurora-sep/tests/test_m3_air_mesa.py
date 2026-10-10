@@ -249,7 +249,7 @@ class M3ProAs123Test(flow.M3FlowBase):
                     out = self.RUN.sub("run_id=<id>", pro.MKTEMP.sub("<tmp>", proc.stdout))
                     out = pro.refresh_notice(air_default.normalize_undo_label(out))
                     # 12.3's release number read as this one's (its packages, tag and boot.bin copy).
-                    outs.append(out.replace(old_version, flow.VERSION).splitlines())
+                    outs.append(pro.release_text(out, old_version, flow.VERSION).splitlines())
                 changed = [l for l in difflib.unified_diff(outs[0], outs[1], lineterm="", n=0)
                            if l[:1] in "+-" and not l.startswith(("+++", "---"))]
                 self.assertEqual(changed, ["-" + l for l in air_default.REASONS_123.splitlines()]

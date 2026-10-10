@@ -1268,8 +1268,8 @@ static int __init apple_t6030_display_gate(void)
 	if (!gate_soc)
 		return 0;
 
-	/* The exact 25G83 tree has its own firmware and PMP admission gate. */
-	if (of_machine_is_compatible("apple,j613")) {
+	/* The exact 25G83 tree (J613; J615 experimental) has its own firmware and PMP admission gate. */
+	if (of_machine_is_compatible("apple,j613") || of_machine_is_compatible("apple,j615")) {
 		struct device_node *dcp = of_find_node_by_path("/soc/dcp@28ec00000");
 		bool native = dcp && of_property_present(dcp, "apple,j613-25g83-profile");
 

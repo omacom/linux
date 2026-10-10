@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
-/* Read-only J613/25G83 PMP telemetry. No cooling or firmware writes. */
+/* Read-only Air/25G83 PMP telemetry, gated by the admitted tunable UUID. */
 #include <linux/hwmon.h>
 #include <linux/io.h>
 #include <linux/module.h>
@@ -230,7 +230,8 @@ static int __init pmp_j613_init(void)
 	int index;
 	int ret;
 
-	if (!of_machine_is_compatible("apple,j613") ||
+	if ((!of_machine_is_compatible("apple,j613") &&
+	     !of_machine_is_compatible("apple,j615")) ||
 	    !of_machine_is_compatible("apple,t8122"))
 		return -ENODEV;
 	node = of_find_node_by_path("/soc/pmp@2d0500000");
