@@ -61,8 +61,10 @@ class Assembly(unittest.TestCase):
                 files.update({'opt/mesa-neo/share/mesa-neo/profile':b'j700-g17p-hal200\n',
                     'opt/mesa-neo/share/mesa-neo/capabilities':b'opengl=native-experimental\nvulkan=honeykrisp-experimental\n',
                     'usr/share/uwsm/env.d/51-mesa-neo':b'    . /opt/mesa-neo/libexec/mesa-neo-session-env\n',
-                    'opt/mesa-neo/libexec/mesa-neo-session-env':(ROOT/'neo/mesa-neo-session-env').read_bytes()})
-                for name2 in ('libexec/mesa-neo-abi-check','libexec/mesa-neo-loadcheck','bin/mesa-neo-probe','share/vulkan/icd.d/asahi_icd.aarch64.json'):
+                    'opt/mesa-neo/libexec/mesa-neo-session-env':(ROOT/'neo/mesa-neo-session-env').read_bytes(),
+                    'opt/mesa-neo/libexec/mesa-neo-env':(ROOT/'neo/mesa-neo-env').read_bytes(),
+                    'opt/mesa-neo/bin/mesa-neo-probe':(ROOT/'neo/mesa-neo-probe-wrapper').read_bytes()})
+                for name2 in ('libexec/mesa-neo-abi-check','libexec/mesa-neo-loadcheck','libexec/mesa-neo-probe.real','share/vulkan/icd.d/asahi_icd.aarch64.json'):
                     files['opt/mesa-neo/'+name2]=b'fixture'
             self.package('neo-'+role,name,files)
             neo['packages'][role]=self.manifest['packages'].pop('neo-'+role)
@@ -75,6 +77,29 @@ class Assembly(unittest.TestCase):
             self.assertIn('NEO_'+role.upper()+'_PACKAGE="'+neo['packages'][role]['file'],script)
         self.assertIn('M1N1_PACKAGE="m1n1-aurora-',script)
         self.assertIn('NEO_M1N1_BIN_SHA="'+neo['m1n1_bin_sha256']+'"',script)
+    def test_new_kernel_keeps_both_air_and_neo_pairs(self):
+        self.neo_pair()
+        self.manifest['legacy_gpu_boards']=['j613','j615']
+        self.manifest['source_commits']['m1n1']='74ba6bea52d1f865d204bb3f8168705a148fd5c5'
+        for kernel in mod.NEO_KERNELS:
+            with self.subTest(kernel=kernel):
+                self.manifest['source_commits']['kernel']=kernel
+                self.assertIn('M3_PERSISTENT_BOARDS="j613 j615"',self.assemble()[0])
+        self.manifest['source_commits']['kernel']='e'*40
+        with self.assertRaisesRegex(ValueError,'kernel consumer'):self.assemble()
+
+    def test_neo_helper_bytes_are_bound_after_valid_package_hash(self):
+        neo=self.neo_pair()
+        tree=self.root/'neo-mesa'
+        original={str(p.relative_to(tree)):p.read_bytes() for p in tree.rglob('*') if p.is_file()}
+        for name in ('libexec/mesa-neo-env','libexec/mesa-neo-session-env','bin/mesa-neo-probe'):
+            with self.subTest(name=name):
+                files=dict(original)
+                files['opt/mesa-neo/'+name]=b'#!/bin/sh\nexit 0\n'
+                self.package('neo-mesa','mesa-neo',files)
+                neo['packages']['mesa']=self.manifest['packages'].pop('neo-mesa')
+                with self.assertRaisesRegex(ValueError,'package helper differs'):self.assemble()
+
     def test_neo_pair_rejects_incomplete_or_mismatched_artifacts(self):
         neo=self.neo_pair()
         original=neo['packages']['mesa']['sha256']
