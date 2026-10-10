@@ -15,6 +15,7 @@
 #include <linux/sched/signal.h>
 #include <linux/kthread.h>
 #include <linux/io.h>
+#include <linux/iommu.h>
 #include <linux/random.h>
 #include <linux/unaligned.h>
 
@@ -2810,6 +2811,52 @@ static const struct brcmf_pcie_drvdata drvdata[] = {
 /* Forward declaration for pci_match_id() call */
 static const struct pci_device_id brcmf_pcie_devid_table[];
 
+static int brcmf_pcie_set_dma_mask(struct brcmf_pciedev_info *devinfo)
+{
+	struct pci_dev *pdev = devinfo->pdev;
+	struct device *dev = &pdev->dev;
+	struct iommu_domain *domain;
+	u64 end;
+	int ret;
+
+	if (pdev->vendor != BRCM_PCIE_VENDOR_ID_BROADCOM ||
+	    pdev->device != BRCM_PCIE_4388_DEVICE_ID ||
+	    devinfo->ci->chip != BRCM_CC_4388_CHIP_ID ||
+	    (devinfo->ci->chiprev != 4 && devinfo->ci->chiprev != 6))
+		return 0;
+
+	domain = iommu_get_domain_for_dev(dev);
+	if (!domain || !domain->geometry.force_aperture ||
+	    domain->geometry.aperture_start <= DMA_BIT_MASK(32))
+		return 0;
+	end = domain->geometry.aperture_end;
+	if (domain->geometry.aperture_start > end || end > DMA_BIT_MASK(42)) {
+		pci_warn(pdev, "unsupported high DMA aperture %#llx-%#llx\n",
+			 (unsigned long long)domain->geometry.aperture_start,
+			 (unsigned long long)end);
+		return 0;
+	}
+
+	if (dma_get_mask(dev) >= end && dev->coherent_dma_mask >= end)
+		return 0;
+
+	/* The message-buffer ABI carries both words of host DMA addresses. */
+	if (dma_get_mask(dev) < end) {
+		ret = dma_set_mask(dev, DMA_BIT_MASK(42));
+		if (ret)
+			goto fail;
+	}
+	if (dev->coherent_dma_mask < end) {
+		ret = dma_set_coherent_mask(dev, DMA_BIT_MASK(42));
+		if (ret)
+			goto fail;
+	}
+	return 0;
+fail:
+	pci_err(pdev, "failed to enable 42-bit DMA: %d\n", ret);
+	return ret;
+}
+
 static int
 brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
@@ -2844,6 +2891,10 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		devinfo->ci = NULL;
 		goto fail;
 	}
+
+	ret = brcmf_pcie_set_dma_mask(devinfo);
+	if (ret)
+		goto fail;
 
 	core = brcmf_chip_get_core(devinfo->ci, BCMA_CORE_PCIE2);
 	if (core->rev >= 64)
