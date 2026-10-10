@@ -13,7 +13,8 @@ ROLES = {'kernel':'linux-aurora', 'headers':'linux-aurora-headers', 'm1n1':'m1n1
          'mesa':'mesa-m3', 'libfprint':'libfprint', 'touchid':'aurora-touchid'}
 HEX = re.compile(r'[0-9a-f]{64}')
 NEO_KERNEL = '77030de18bbbbf077777da5f821e9c15dd1e4c47'
-NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa')
+NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa',
+               'e76133daffab1be549b47571691ab77ac7c28201')
 
 def member(path, name):
     return subprocess.check_output(['bsdtar', '-xOf', str(path), name])
