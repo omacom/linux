@@ -785,16 +785,16 @@ static void cd321x_dp_sid_replay(struct cd321x *cd321x, const struct cd321x_stat
  * runs the link, so that the display is released and its link taken down
  * before the PHY stops. The update that follows moves the PHY.
  */
-static void cd321x_dp_release_first(struct cd321x *cd321x)
+static int cd321x_dp_release_first(struct cd321x *cd321x)
 {
 	struct typec_displayport_data dp_data;
 	struct typec_mux_state state;
 	int ret;
 
 	if (cd321x->tps.data != &tipd_sn201202x_data || !cd321x->display_route_active ||
-	    !cd321x->state_valid || cd321x->state.alt != cd321x->port_altmode_dp ||
+	    cd321x->state.alt != cd321x->port_altmode_dp ||
 	    !(cd321x->dp_status & DP_STATUS_HPD_STATE))
-		return;
+		return 0;
 	dp_data.status = cd321x->dp_status & ~(DP_STATUS_HPD_STATE | DP_STATUS_IRQ_HPD);
 	dp_data.conf = cd321x->dp_conf;
 	state = cd321x->state;
@@ -804,6 +804,7 @@ static void cd321x_dp_release_first(struct cd321x *cd321x)
 		dev_warn(cd321x->tps.dev, "display not released before the port changes: %d\n", ret);
 	else
 		cd321x->dp_status = dp_data.status;
+	return ret;
 }
 
 static void cd321x_retry_revalidation(struct cd321x *cd321x, bool reconnect)
@@ -902,8 +903,11 @@ static void cd321x_update_work(struct work_struct *work)
 
 	/* The display goes before anything else on the port changes. */
 	if (dp_route_was_active &&
-	    (!new_connected || was_disconnected || !dp_connected || dp_mode_changed))
-		cd321x_dp_release_first(cd321x);
+	    (!new_connected || was_disconnected || !dp_connected || dp_mode_changed)) {
+		ret = cd321x_dp_release_first(cd321x);
+		if (ret)
+			goto retry;
+	}
 
 	/*
 	 * ACIO carries the tunneled PCIe reset handshake over the still-live
