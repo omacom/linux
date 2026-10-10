@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import resource
+import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,7 +34,7 @@ fn main(){
   let (p,n)=span(a.address,a.size);println!("init:{i} {p:x} {n:x}");}
  for i in 0..m3_shared_layout::COUNT {let a=m3_shared_layout::allocation(i).unwrap();
   if a.space==m3_pass_layout::Space::Firmware {let (p,n)=span(a.address,a.size);println!("render:{i} {p:x} {n:x}");}}
- let (p,n)=span(0xfffffc200062bfe0,16);println!("initbm {p:x} {n:x}");
+ let (p,n)=span(INIT_BM_ADDRESS,INIT_BM_SIZE);println!("initbm {p:x} {n:x}");
  for slot in 0..m3_pass_layout::SLOTS {for field in m3_pass_layout::FIELDS {
   let a=m3_pass_layout::board_allocation(slot,field,CLUSTERS).unwrap();
   if a.space==m3_pass_layout::Space::Firmware {let(p,n)=span(a.address,a.size);println!("pass:{slot}:{field:?} {p:x} {n:x}");}}}
@@ -106,6 +107,12 @@ def main():
     def source(path):
         return subprocess.check_output(['git', 'show', args.ref + ':' + path], cwd=ROOT)
     hashes = {}
+    render = source(PREFIX + 'm3_render.rs').decode()
+    sync = source(PREFIX + 'm3_sync_layout.rs').decode()
+    init_bm_address = re.search(r'let init_bm=Buffer::at_prot.*?Some\((0x[0-9a-f]+)\)', render, re.S).group(1)
+    init_bm_size = re.search(r'const INIT_BM_SIZE: usize = (0x[0-9a-f]+);', sync).group(1)
+    for name, content in [('m3_render.rs', render), ('m3_sync_layout.rs', sync)]:
+        hashes[PREFIX + name] = hashlib.sha256(content.encode()).hexdigest()
     for name in ['m3_init_layout.rs', 'm3_init_storage.rs', 'm3_pass_layout.rs', 'm3_shared_layout.rs']:
         content = source(PREFIX + name)
         (args.out / name).write_bytes(content)
@@ -116,7 +123,7 @@ def main():
     subprocess.run(['cc', '-Wall', '-fsanitize=address,undefined', '-g', str(args.out / 'reserve.c'), '-o', str(args.out / 'reserve')], check=True)
     results = {}
     for clusters in [1, 2]:
-        (args.out / 'main.rs').write_text(RUST.replace('CLUSTERS', str(clusters)))
+        (args.out / 'main.rs').write_text(RUST.replace('CLUSTERS', str(clusters)).replace('INIT_BM_ADDRESS', init_bm_address).replace('INIT_BM_SIZE', init_bm_size))
         subprocess.run(['rustc', '--edition=2021', '-Awarnings', str(args.out / 'main.rs'), '-o', str(args.out / 'layouts')], check=True)
         spans = args.out / f'clusters-{clusters}.txt'
         spans.write_bytes(subprocess.check_output([str(args.out / 'layouts')]))
