@@ -596,6 +596,9 @@ M3_25_J615=0
 M3_STAGE1_25_VERSIONS=""
 M3_STAGE1_25_J615_VERSIONS=""
 M3_MESA_NATIVE_MARKER=/opt/mesa-m3/25g83/share/mesa-m3/profile
+# The boards whose 25G83 sessions the installed Mesa's hook admits (mesa-m3 26.1.4.m3.2-4 on);
+# a J615 needs j615-experimental there, or its sessions stop at profile-mismatch.
+M3_MESA_NATIVE25_BOARDS=/opt/mesa-m3/share/mesa-m3/native25-boards
 M3_PROFILE_SELECTOR=j613-25g83-hal200
 M3_BOOT_PROFILE_HELPER=/usr/local/libexec/aurora-m3-boot-profile
 M3_GPU_PROFILE_FILE=/etc/mesa-m3/t8122-profile
@@ -6636,6 +6639,11 @@ m3_25_j615() {
   [[ $M3_GPU_PROFILE == j613-25g83 && $(this_board) == j615 ]]
 }
 
+# The installed Mesa's session hook admits a J615 on the 25G83 profile (its experimental switch).
+m3_mesa_admits_j615() {
+  grep -qxF j615-experimental "$M3_MESA_NATIVE25_BOARDS" 2>/dev/null
+}
+
 # The board and the 25G83 option must agree before any firmware check.
 m3_25_board_choice() {
   if ((M3_25_J615)) && [[ $(this_board) != j615 ]]; then
@@ -6798,6 +6806,8 @@ m3_install_packages() {
     if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
       [[ $(cat "$M3_MESA_NATIVE_MARKER" 2>/dev/null) == j613-25g83-gl-only ]] ||
         die "matched Mesa native profile marker is missing; activation was not published"
+      ! m3_25_j615 || m3_mesa_admits_j615 ||
+        die "matched Mesa does not admit the J615 to the 25G83 profile ($M3_MESA_NATIVE25_BOARDS); activation was not published"
     fi
     m3_persistent_cmdline "$chain"
     if [[ $chain == grub ]]; then
@@ -7294,6 +7304,8 @@ m3_persistent_select() {
   if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
     [[ $(cat "$M3_MESA_NATIVE_MARKER" 2>/dev/null) == j613-25g83-gl-only ]] ||
       die "matched Mesa native profile marker is missing; experimental intent remains unchanged"
+    ! m3_25_j615 || m3_mesa_admits_j615 ||
+      die "matched Mesa does not admit the J615 to the 25G83 profile ($M3_MESA_NATIVE25_BOARDS); experimental intent remains unchanged"
   fi
   $sudo install -d -m 0755 "$dir"
   if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then

@@ -505,3 +505,47 @@ false
                 self.assertEqual(result.returncode == 0, good, result.stderr)
                 if good: self.assertIn(want, result.stdout)
         self.assertIn('--m3-profile=j615-25g83', self.run_sh('preflight() { :; }\nset -- --bogus\n'+tail, check=False).stderr)
+
+    def test_j615_selection_needs_a_mesa_that_admits_it(self):
+        # The released Mesa's session hook stops a J615 at profile-mismatch; its replacement lists
+        # j615-experimental in share/mesa-m3/native25-boards. Without that, nothing is published.
+        (self.tmp/'native-marker').write_text('j613-25g83-gl-only\n')
+        boards = self.tmp/'native25-boards'
+        setup = self.setup_j615()+self.selection()+f'M3_MESA_NATIVE25_BOARDS="{boards}"\n'
+        for content in (None, 'j613\n', 'j613\nj615-experimental-old\n'):
+            with self.subTest(content=content):
+                if content is None: boards.unlink(missing_ok=True)
+                else: boards.write_text(content)
+                result = self.run_sh(setup+'m3_persistent_select', check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('does not admit the J615', result.stderr)
+                self.assertFalse((self.etc/'intent').exists())
+                self.assertFalse((self.etc/'profile').exists())
+                self.assertFalse((self.state/'m3-gpu-persistent').exists())
+        boards.write_text('j613\nj615-experimental\n')
+        self.run_sh(setup+'m3_persistent_select')
+        self.assertEqual((self.etc/'profile').read_text(), 'j613-25g83-hal200\n')
+        self.assertEqual((self.etc/'intent').read_text(), '1\n')
+
+    def test_j613_selection_ignores_the_j615_capability(self):
+        (self.tmp/'native-marker').write_text('j613-25g83-gl-only\n')
+        setup = (self.setup_j615(board='j613', stage1='source-built-25', choice=0)+self.selection()+
+                 f'M3_MESA_NATIVE25_BOARDS="{self.tmp}/absent"\n')
+        self.run_sh(setup+'m3_persistent_select')
+        self.assertEqual((self.etc/'profile').read_text(), 'j613-25g83-hal200\n')
+
+    def test_j615_mesa_capability_after_package_install_rolls_back_before_arming(self):
+        (self.tmp/'native-marker').write_text('j613-25g83-gl-only\n')
+        setup = (self.setup_j615()+self.transaction_paths()+f'M3_MESA_NATIVE25_BOARDS="{self.tmp}/absent"\n')
+        result = self.run_sh(setup+'''
+m3_persistent_transaction_begin "$chain"
+m3_switches_write
+pacman() { return 0; }
+m3_install_packages
+''', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('does not admit the J615', result.stderr)
+        self.assertNotIn('asahi.t8122_start=1', (self.etc/'default/limine').read_text())
+        self.assertFalse((self.etc/'intent').exists())
+        self.assertFalse((self.etc/'profile').exists())
+

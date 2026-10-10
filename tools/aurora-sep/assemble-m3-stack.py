@@ -16,9 +16,28 @@ NEO_KERNEL = '77030de18bbbbf077777da5f821e9c15dd1e4c47'
 NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa',
                'e76133daffab1be549b47571691ab77ac7c28201',
                '25b138b77409fcb49c2e4fbebee57d81bdea9bb3')
+# J615 native25 requires exact kernel, boot source and packaged binary bindings.
+J615_NATIVE25_PAIR = None
 
 def member(path, name):
     return subprocess.check_output(['bsdtar', '-xOf', str(path), name])
+
+def optional_member(path, name):
+    result = subprocess.run(['bsdtar', '-xOf', str(path), name], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return result.stdout if result.returncode == 0 else None
+
+def check_j615_native25(sources, binary_sha, mesa):
+    pair = J615_NATIVE25_PAIR
+    if not isinstance(pair, dict) or set(pair) != {'kernel', 'm1n1', 'm1n1_bin_sha256'}:
+        raise ValueError('J615 native25 requires the recorded J615 boot/kernel pair (J615_NATIVE25_PAIR)')
+    if sources['kernel'] != pair['kernel']: raise ValueError('J615 native25 requires the qualified J615 kernel')
+    if sources['m1n1'] != pair['m1n1']: raise ValueError('J615 native25 requires the qualified J615 m1n1 source')
+    if binary_sha != pair['m1n1_bin_sha256']: raise ValueError('J615 native25 requires the qualified J615 m1n1 binary')
+    boards = optional_member(mesa, 'opt/mesa-m3/share/mesa-m3/native25-boards')
+    if boards is None or b'j615-experimental' not in boards.splitlines() or b'j613' not in boards.splitlines():
+        raise ValueError('Mesa does not declare the J615 25G83 session capability')
+    if b'asahi,j615-25g83-experimental' not in member(mesa, 'opt/mesa-m3/libexec/mesa-m3-session-env'):
+        raise ValueError('Mesa session hook lacks the J615 25G83 admission')
 
 def desktop_data(manifest, directory):
     data = manifest.get('desktop_fixes')
@@ -153,6 +172,7 @@ def assemble(template, manifest, directory):
     session = member(resolved['mesa'],'opt/mesa-m3/libexec/mesa-m3-session-env')
     if b'j613-25g83-hal200' not in session: raise ValueError('Mesa session selector differs')
     member(resolved['mesa'],'opt/mesa-m3/libexec/mesa-m3-abi-check')
+    if 'j615' in native25: check_j615_native25(sources, binary_sha, resolved['mesa'])
     listing = subprocess.check_output(['bsdtar','-tf',str(resolved['kernel'])],text=True).splitlines()
     dt_path = re.compile(r'usr/lib/modules/[^/]+/dtbs/(?:apple/)?t8122-j613-25g83\.dtb')
     dtbs = [p for p in listing if dt_path.fullmatch(p)]

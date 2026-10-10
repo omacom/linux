@@ -4,6 +4,7 @@ import importlib.util
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 ROOT=Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location('assemble',ROOT/'assemble-m3-stack.py')
 mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
@@ -185,13 +186,23 @@ class Assembly(unittest.TestCase):
         files={'.PKGINFO':b'pkgname = linux-aurora\npkgver = candidate-1\narch = aarch64\n'}
         files.update(dtbs)
         self.package('kernel','linux-aurora',files)
+    J615_KERNEL='c'*40
+    J615_M1N1='d'*40
+    def j615_pair(self,**over):
+        pair=dict(kernel=self.J615_KERNEL,m1n1=self.J615_M1N1,m1n1_bin_sha256=self.manifest['m1n1_bin_sha256'],**over)
+        patch=mock.patch.object(mod,'J615_NATIVE25_PAIR',pair);patch.start();self.addCleanup(patch.stop)
     def j615_release(self):
         self.manifest['native25_boards']=['j613','j615']
         self.manifest['stage1_25_j615_versions']=['v1.6.1-m3air25.stage1']
+        self.manifest['source_commits'].update(kernel=self.J615_KERNEL,m1n1=self.J615_M1N1)
         self.binary+=b'asahi,j615-25g83-experimental\0'
         self.manifest['m1n1_bin_sha256']=hashlib.sha256(self.binary).hexdigest()
         self.package('m1n1','m1n1-aurora',{'.PKGINFO':b'pkgname = m1n1-aurora\npkgver = candidate-1\narch = aarch64\n',
                                            'usr/lib/asahi-boot/m1n1.bin':self.binary})
+        self.mesa_member('opt/mesa-m3/libexec/mesa-m3-session-env',
+                         b'profile=j613-25g83-hal200\n/proc/device-tree/chosen/asahi,j615-25g83-experimental\n')
+        self.mesa_member('opt/mesa-m3/share/mesa-m3/native25-boards',b'j613\nj615-experimental\n')
+        self.j615_pair()
         profile=b'apple,j613-25g83-profile\0apple,firmware-compat\0'
         self.kernel_files({'usr/lib/modules/test/dtbs/apple/t8122-j613-25g83.dtb':profile,
                           'usr/lib/modules/test/dtbs/apple/t8122-j615-25g83.dtb':b'apple,j615\0'+profile})
@@ -219,6 +230,7 @@ class Assembly(unittest.TestCase):
                     self.manifest['m1n1_bin_sha256']=hashlib.sha256(self.binary).hexdigest()
                     self.package('m1n1','m1n1-aurora',{'.PKGINFO':b'pkgname = m1n1-aurora\npkgver = candidate-1\narch = aarch64\n',
                                                        'usr/lib/asahi-boot/m1n1.bin':self.binary})
+                    self.j615_pair()
                 elif case=='no stage1':self.manifest['stage1_25_j615_versions']=[]
                 else:self.manifest['stage1_25_j615_versions']=['v1.6.1 m3air25']
                 with self.assertRaisesRegex(ValueError,why):self.assemble()
@@ -227,3 +239,33 @@ class Assembly(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.manifest['native25_boards']=bad
                 with self.assertRaisesRegex(ValueError,'native25'):self.assemble()
+    def test_j615_native25_needs_the_recorded_boot_kernel_pair(self):
+        self.j615_release()
+        self.assemble()
+        with mock.patch.object(mod,'J615_NATIVE25_PAIR',None):
+            with self.assertRaisesRegex(ValueError,'boot/kernel pair'):self.assemble()
+        for field,why in [('kernel','qualified J615 kernel'),('m1n1','qualified J615 m1n1 source'),
+                          ('m1n1_bin_sha256','qualified J615 m1n1 binary')]:
+            with self.subTest(field=field):
+                pair=dict(mod.J615_NATIVE25_PAIR);pair[field]='e'*len(pair[field])
+                with mock.patch.object(mod,'J615_NATIVE25_PAIR',pair):
+                    with self.assertRaisesRegex(ValueError,why):self.assemble()
+        pair=dict(mod.J615_NATIVE25_PAIR);pair['stage1']='x'
+        with mock.patch.object(mod,'J615_NATIVE25_PAIR',pair):
+            with self.assertRaisesRegex(ValueError,'boot/kernel pair'):self.assemble()
+    def test_j615_native25_needs_a_mesa_that_admits_it(self):
+        for case,name,data,why in [
+                ('no capability','opt/mesa-m3/share/mesa-m3/native25-boards',None,'session capability'),
+                ('j613 only','opt/mesa-m3/share/mesa-m3/native25-boards',b'j613\n','session capability'),
+                ('substring','opt/mesa-m3/share/mesa-m3/native25-boards',b'j613\nj615-experimental-no\n','session capability'),
+                ('old hook','opt/mesa-m3/libexec/mesa-m3-session-env',b'profile=j613-25g83-hal200\n','J615 25G83 admission')]:
+            with self.subTest(case=case):
+                self.setUp();self.j615_release()
+                self.mesa_member(name,data)
+                with self.assertRaisesRegex(ValueError,why):self.assemble()
+    def test_j613_release_needs_no_j615_capability(self):
+        # The released (pkgrel 3) Mesa has neither the list nor the J615 admission: J613 assembly is unchanged.
+        with mock.patch.object(mod,'J615_NATIVE25_PAIR',None):
+            self.assertIn('M3_NATIVE25_BOARDS="j613"\n',self.assemble()[0])
+        self.mesa_member('opt/mesa-m3/share/mesa-m3/native25-boards',b'j613\nj615-experimental\n')
+        self.assertIn('M3_NATIVE25_BOARDS="j613"\n',self.assemble()[0])
