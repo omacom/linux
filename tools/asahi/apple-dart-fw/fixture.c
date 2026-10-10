@@ -34,8 +34,9 @@ struct apple_dart_hw {int fmt;unsigned tcr_4level,ttbr_count;};
 #define U64_MAX UINT64_MAX
 #define min(a,b) ((a)<(b)?(a):(b))
 #define max(a,b) ((a)>(b)?(a):(b))
-#define spin_lock_irqsave(l,f) ((void)0)
-#define spin_unlock_irqrestore(l,f) ((void)0)
+static unsigned lock_depth;
+#define spin_lock_irqsave(l,f) (assert(!lock_depth),lock_depth++)
+#define spin_unlock_irqrestore(l,f) (assert(lock_depth==1),lock_depth--)
 #define BIT_WORD(n) ((n)/64)
 #define BIT_MASK(n) (1UL<<((n)%64))
 #define test_bit(n,p) (!!((p)[BIT_WORD(n)]&BIT_MASK(n)))
@@ -66,8 +67,8 @@ static int of_property_count_u32_elems(struct device_node*np,const char*s){asser
 static int of_property_read_u32(struct device_node*np,const char*s,u32*v){assert(!strcmp(s,"apple,firmware-root-handoff"));*v=np->value;return np->count<1?-EINVAL:0;}
 #define dev_iommu_priv_get(d) ((d)->cfg)
 #define IOMMU_RESV_RESERVED 0
-static struct iommu_resv_region regions[8];static int region_count;
-static struct iommu_resv_region*iommu_alloc_resv_region(u64 s,u64 l,int prot,int type,int g){assert(region_count<8&&type==IOMMU_RESV_RESERVED&&!prot);struct iommu_resv_region*r=&regions[region_count++];r->start=s;r->length=l;r->type=type;return r;}
+static struct iommu_resv_region regions[8];static int region_count,release_on_alloc;static struct apple_dart*retiring_dart;static u64*retired_table;
+static struct iommu_resv_region*iommu_alloc_resv_region(u64 s,u64 l,int prot,int type,int g){assert(!lock_depth&&region_count<8&&type==IOMMU_RESV_RESERVED&&!prot);if(release_on_alloc){release_on_alloc=0;retiring_dart->locked_ttbr[0][0]=NULL;retiring_dart->locked_owned[0][0]=NULL;free(retired_table);retired_table=NULL;}struct iommu_resv_region*r=&regions[region_count++];r->start=s;r->length=l;r->type=type;return r;}
 static void list_add_tail(struct list_head*l,struct list_head*h){h->count++;}
 struct apple_dart_fw_root {u64*entry;u64*accepted;u64**leaf;};
 #define DART_TCR(d,s) (s)
@@ -164,10 +165,12 @@ int main(int argc,char**argv){
  }
  else if(!strncmp(c,"reserve-",8)){
   root[0]=0x1401;d.locked_window[0]=1ULL<<40;
+  if(!strcmp(c,"reserve-teardown")){retired_table=calloc(2048,sizeof(u64));assert(retired_table);retired_table[0]=retired_table[5]=0x1401;d.locked_ttbr[0][0]=retired_table;release_on_alloc=1;retiring_dart=&d;}
   if(!strcmp(c,"reserve-unmatched"))d.fw_handoff=0;
   if(!strcmp(c,"reserve-owned"))shadow[0]=root[0];
   apple_dart_get_fw_resv_regions(&dev,&head);
   if(!strcmp(c,"reserve-unmatched")||!strcmp(c,"reserve-owned"))assert(!head.count);
+  else if(!strcmp(c,"reserve-teardown")){assert(head.count==2&&regions[1].start==(1ULL<<40)+(5ULL<<25)&&!retired_table&&!release_on_alloc);}
   else {assert(head.count==1&&regions[0].start==(1ULL<<40)&&regions[0].length==(1ULL<<25)&&regions[0].type==IOMMU_RESV_RESERVED);}
  }
  else if(!strncmp(c,"invalidate-",11)){

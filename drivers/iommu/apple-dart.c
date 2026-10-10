@@ -2224,29 +2224,40 @@ static void apple_dart_get_fw_resv_regions(struct device *dev,
 		return;
 	for_each_stream_map(i, cfg, stream) {
 		struct apple_dart *dart = stream->dart;
+		size_t entries = dart->pgsize / sizeof(u64);
 
-		if (!dart->fw_handoff)
+		if (!dart->fw_handoff || entries > DART_MAX_ROOT_ENTRIES)
 			continue;
 		for_each_set_bit(sid, stream->sidmap, dart->num_streams) {
-			bool four = apple_dart_readl(dart, DART_TCR(dart, sid)) &
-				    dart->hw->tcr_4level;
-
 			for (idx = 0; idx < dart->hw->ttbr_count; idx++) {
-				const u64 *live = dart->locked_ttbr[sid][idx];
-				const u64 *owned = dart->locked_owned[sid][idx];
-				size_t slot, entries = dart->pgsize / sizeof(u64);
+				DECLARE_BITMAP(slots, DART_MAX_ROOT_ENTRIES);
+				const u64 *live, *owned;
+				unsigned long flags;
+				size_t slot;
+				u64 window;
+				bool four;
 
-				for (slot = 0; live && slot < entries; slot++) {
+				bitmap_zero(slots, entries);
+				/* Teardown may unmap both tables after dropping this lock. */
+				spin_lock_irqsave(&dart->lock, flags);
+				live = dart->locked_ttbr[sid][idx];
+				owned = dart->locked_owned[sid][idx];
+				window = dart->locked_window[sid];
+				four = apple_dart_readl(dart, DART_TCR(dart, sid)) &
+				       dart->hw->tcr_4level;
+				for (slot = 0; live && slot < entries; slot++)
+					if (apple_dart_fw_slot_foreign(live, owned, slot))
+						__set_bit(slot, slots);
+				spin_unlock_irqrestore(&dart->lock, flags);
+
+				if (!four && check_add_overflow(window,
+					((u64)idx << (ilog2(dart->pgsize) + 2 * ilog2(entries))),
+					&window))
+					continue;
+				for_each_set_bit(slot, slots, entries) {
 					struct iommu_resv_region *region;
 					u64 start, length;
-					u64 window = READ_ONCE(dart->locked_window[sid]);
 
-					if (!apple_dart_fw_slot_foreign(live, owned, slot))
-						continue;
-					if (!four && check_add_overflow(window,
-						((u64)idx << (ilog2(dart->pgsize) +
-						 2 * ilog2(entries))), &window))
-						continue;
 					if (!apple_dart_fw_slot_range(dart, window, slot,
 						four, &start, &length))
 						continue;
