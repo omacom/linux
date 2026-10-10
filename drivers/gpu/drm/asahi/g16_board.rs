@@ -188,6 +188,16 @@ pub(crate) static J613: Board = Board {
     compute_self_test: true,
 };
 
+/// Experimental J615 uses the T8122 MMIO and exact 25G83 firmware profile.
+/// OPPs, voltages and power limits come from this Mac's own ADT and fuses.
+/// Firmware carveouts must match this boot's reservations.
+#[cfg_attr(test, allow(dead_code))]
+fn j615(mut board: Board) -> Board {
+    board.name = "J615";
+    board.root_compatible = [b"apple,j615", b"apple,t8122"];
+    board
+}
+
 #[cfg(not(test))]
 static CURRENT: kernel::sync::SetOnce<Board> = kernel::sync::SetOnce::new();
 
@@ -209,7 +219,11 @@ pub(crate) fn initialize(pdev: &kernel::platform::Device<kernel::device::Core>) 
         points.push((hz, core[0], sram[0], power), GFP_KERNEL)?;
     }
     let tables = crate::g16_profile::performance_tables(&points).ok_or(EINVAL)?;
-    let mut board = J613.clone();
+    let root = kernel::of::root().ok_or(ENODEV)?;
+    let names = root.get_property::<KVec<u8>>(c_str!("compatible"))?;
+    let is_j615 = names.split(|b| *b == 0).any(|s| s == b"apple,j615");
+    // g16_profile::selected admitted only a J613 or an opted-in J615.
+    let mut board = if is_j615 { j615(J613.clone()) } else { J613.clone() };
     board.pstate_count = tables.count;
     board.frequencies_mhz = tables.primary;
     board.aux_frequencies_mhz = tables.secondary;

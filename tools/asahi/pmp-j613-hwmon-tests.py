@@ -62,7 +62,7 @@ static struct platform_device supplier;
 static struct device_node node;
 static struct device hwdev;
 static u8 memory[0x80000];
-static bool j613 = true, t8122 = true, compatible = true, uuid_ok = true;
+static bool j613 = true, j615 = false, t8122 = true, compatible = true, uuid_ok = true;
 static bool no_node, no_parent, no_map, no_alloc, bad_resource, no_resource;
 static bool strict_reads = true, unstable, pause_read;
 static unsigned long reads;
@@ -92,7 +92,7 @@ static u32 readl(const void *p) {
 }
 static void *vmalloc(size_t n) { return no_alloc ? NULL : malloc(n); }
 static void vfree(void *p) { free(p); }
-static bool of_machine_is_compatible(const char *s) { return strcmp(s,"apple,j613") ? t8122 : j613; }
+static bool of_machine_is_compatible(const char *s) { return !strcmp(s,"apple,j613") ? j613 : !strcmp(s,"apple,j615") ? j615 : t8122; }
 static struct device_node *of_find_node_by_path(const char *s) { return no_node ? NULL : &node; }
 static int of_property_read_string(struct device_node *n, const char *s, const char **out) {
  *out = uuid_ok ? "EFD60284-7C58-33A9-8522-CB3366AF6040" : "wrong"; return 0;
@@ -154,7 +154,10 @@ int main(void) {
  bad_resource = true; assert(pmp_j613_init() == 0);
  puts("original controls: unfinished/unbound supplier and changed type accepted"); return 0;
 #else
- j613 = false; assert(pmp_j613_init() == -ENODEV); j613 = true;
+ j613 = false; assert(pmp_j613_init() == -ENODEV);
+ /* J615 (experimental): admitted by the same UUID/resource checks. */
+ j615 = true; t8122 = false; assert(pmp_j613_init() == -ENODEV); t8122 = true;
+ uuid_ok = false; assert(pmp_j613_init() == -ENODEV); uuid_ok = true; j615 = false; j613 = true;
  t8122 = false; assert(pmp_j613_init() == -ENODEV); t8122 = true;
  uuid_ok = false; assert(pmp_j613_init() == -ENODEV); uuid_ok = true;
  compatible = false; assert(pmp_j613_init() == -ENODEV); compatible = true;

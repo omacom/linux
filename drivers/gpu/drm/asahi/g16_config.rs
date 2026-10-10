@@ -241,7 +241,8 @@ impl Config {
         }
         self.object(PowerPerformance).u32(power_data::UNKNOWN_10, 4)?;
         self.object(PowerPerformance).u32(power_data::UNKNOWN_14, 0x3f800000)?;
-        let initial_pstate = if board.name == "J613" { 1 } else { pstate };
+        // Both T8122 Air profiles start from pstate 1.
+        let initial_pstate = if board.chip_id == 0x8122 { 1 } else { pstate };
         self.object(PowerPerformance).u32(power_data::INITIAL_ACTUAL, initial_pstate)?;
         self.object(PowerPerformance).u32(power_data::INITIAL_TARGET, initial_pstate)?;
         if board.chip_id != 0x8122 {
@@ -264,7 +265,7 @@ impl Config {
         for &(offset, value) in board.power_overlay {
             self.object(PowerPerformance).u32(offset, value)?;
         }
-        let trace = if self.board.name == "J613" {
+        let trace = if self.board.chip_id == 0x8122 {
             *crate::module_parameters::g16_trace_mask.value()
         } else { 0 };
         let base_trace = if self.board.chip_id == 0x8122 { 0 } else { 0x33 };
@@ -286,7 +287,7 @@ impl Config {
 
     pub(crate) fn apply_trace_mask(&mut self) -> Result<Option<(u8, u8)>> {
         let bits = *crate::module_parameters::g16_trace_mask.value() as u8;
-        if bits == 0 || self.board.name != "J613" { return Ok(None); }
+        if bits == 0 || self.board.chip_id != 0x8122 { return Ok(None); }
         let map = self.loader.iosys_map(0x1823a4 - 0x60000, 1)?;
         // SAFETY: one byte inside the retained firmware data reservation.
         let before = unsafe { map.as_ptr().read_volatile() };
