@@ -25,6 +25,7 @@ import test_m3_flow as flow
 
 SRC = flow.SRC
 VERSION = flow.VERSION
+TAG = re.search(r"^TAG=(\S+)$", SRC, re.M).group(1)
 PRO_MESA = flow.PRO_MESA
 PRO_MESA_VERSION = flow.PRO_MESA_VERSION
 # 12.2's script, the last one without the M3 Pro's Mesa.
@@ -72,6 +73,7 @@ def old_installer(tc, rev, name):
     path = tc.tmp / name
     path.write_bytes(old.stdout)
     version = re.search(rb"^VERSION=(\S+)$", old.stdout, re.M).group(1).decode()
+    tc.assertEqual(re.search(rb"^TAG=(\S+)$", old.stdout, re.M).group(1).decode(), "sep-" + version)
     return path, version
 
 
@@ -132,16 +134,37 @@ def same_commands(tc, before, after):
     tc.assertEqual([l for l in b if not l.startswith("sudo ")], [l for l in a if not l.startswith("sudo ")])
 
 
+def release_text(text, old, new):
+    """Replace only the earlier release's exact legacy tag and package version."""
+    binary = isinstance(text, bytes)
+    tag = "sep-" + old
+    pattern = r"(?<![A-Za-z0-9._-])" + re.escape(tag) + r"(?![A-Za-z0-9._-])"
+    if binary:
+        return re.sub(pattern.encode(), TAG.encode(), text).replace(old.encode(), new.encode())
+    return re.sub(pattern, TAG, text).replace(old, new)
+
+
 def as_this_release(run, old, new):
-    """A run of an earlier release's script with its release number read as this one's. A release
-    names its own packages, tag and boot.bin copy; nothing else may differ."""
-    if old == new:
-        return run
-    ob, nb = old.encode(), new.encode()
+    """A release names its own packages, tag and boot.bin copy; nothing else may differ."""
     out = dict(run)
-    out["log"] = run["log"].replace(old, new)
-    out["tree"] = {k.replace(old, new): v.replace(ob, nb) for k, v in run["tree"].items()}
+    out["log"] = release_text(run["log"], old, new)
+    out["tree"] = {release_text(k, old, new): release_text(v, old, new)
+                   for k, v in run["tree"].items()}
     return out
+
+
+class ReleaseIdentityComparisonTest(unittest.TestCase):
+    def test_only_known_identity_is_normalized(self):
+        old = "7.1.12.aurora2-12.2"
+        command = f"curl https://github.com/iconidentify/aurora-linux/releases/download/sep-{old}/linux-{old}.pkg"
+        expected = f"curl https://github.com/iconidentify/aurora-linux/releases/download/{TAG}/linux-{VERSION}.pkg"
+        self.assertEqual(release_text(command, old, VERSION), expected)
+        for changed in (expected.replace("github.com", "wrong.example"), expected + " --insecure",
+                        expected.replace("linux-", "other-")):
+            with self.subTest(changed=changed), self.assertRaises(AssertionError):
+                same_commands(self, expected, changed)
+        unknown = "sep-" + old + ".unexpected"
+        self.assertEqual(release_text(unknown, old, VERSION), "sep-" + VERSION + ".unexpected")
 
 
 def run_with(tc, installer, board, run, setup=None):

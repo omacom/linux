@@ -350,11 +350,11 @@ class SameAs123Test(flow.M3FlowBase):
         if self.old_version != flow.VERSION:
             before = pro.as_this_release(before, self.old_version, flow.VERSION)
             installed[0] = {k.replace(self.old_version, flow.VERSION):
-                            v.replace(self.old_version.encode(), flow.VERSION.encode())
+                            pro.release_text(v, self.old_version, flow.VERSION)
                             for k, v in installed[0].items()}
             # The kernel release the NEXT STEPS box names follows VERSION too (7.1.12-2-<rel>-sep-ARCH).
             krel = lambda v: f"-2-{v.rsplit('-', 1)[1]}-sep-ARCH"
-            outs[0] = tuple(x.replace(self.old_version, flow.VERSION).replace(krel(self.old_version),
+            outs[0] = tuple(pro.release_text(x, self.old_version, flow.VERSION).replace(krel(self.old_version),
                                                                           krel(flow.VERSION)) if x else x
                             for x in outs[0])
         self.assertEqual(after["codes"], before["codes"])

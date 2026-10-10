@@ -345,26 +345,39 @@ release_source() {
 # A saved copy of this script keeps installing its own build forever. Tell the
 # operator - human or agent - when a newer one exists. Never fatal: no network,
 # rate limit or API change should stop an install that was going to work.
+release_order() {
+  local tag=$1 year month day limit increment
+  if [[ $tag =~ ^sep-([A-Za-z0-9._]+)-([0-9]+(\.[0-9]+)*)(-stable)?$ ]]; then
+    printf '0.%s%s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[4]}"
+  elif [[ $tag =~ ^aurora-([0-9]{4})\.([0-9]{2})\.([0-9]{2})(\.([0-9]+))?$ ]]; then
+    year=${BASH_REMATCH[1]} month=${BASH_REMATCH[2]} day=${BASH_REMATCH[3]}
+    increment=${BASH_REMATCH[5]:-0}
+    (( 10#$year > 0 && 10#$month >= 1 && 10#$month <= 12 && 10#$day >= 1 )) || return 1
+    case $month in
+      04|06|09|11) limit=30 ;;
+      02) limit=28; (( 10#$year % 4 == 0 && (10#$year % 100 != 0 || 10#$year % 400 == 0) )) && limit=29 ;;
+      *) limit=31 ;;
+    esac
+    (( 10#$day <= limit )) || return 1
+    printf '1.%s.%s.%s.%s\n' "$year" "$month" "$day" "$increment"
+  else
+    return 1
+  fi
+}
+
 newer_release() {
-  # Explicitly non-fatal. The pipeline returns non-zero whenever there is no
-  # network, GitHub rate-limits, or the response is not what we expect, and
-  # whether set -e acts on that inside a command substitution is subtle enough
-  # that it should not be left to chance in a script that runs as root.
   local seen="" mine theirs
-  # Ask for the release marked Latest. Listing all releases is not ordered by
-  # version: they share a commit, so GitHub falls back to comparing tag names
-  # as text, and 11.9 sorts above 11.10. Only letters, digits, '.', '_' and
-  # '-' are taken as a tag, so a mirror's answer can't put terminal escapes
-  # into the notice.
+  # Only the Latest release and printable tag tokens are admitted. An unavailable
+  # API or an unknown tag must not stop installation or enter the terminal notice.
   seen=$(curl -fsSL --max-time 8 "$RELEASES_API/latest" 2>/dev/null |
-    LC_ALL=C grep -o '"tag_name"[[:space:]]*:[[:space:]]*"sep-[A-Za-z0-9._-]*"' |
-    head -1 | sed 's/.*"\(sep-[A-Za-z0-9._-]*\)"$/\1/') || true
-  # Only a higher release number counts, the part after the kernel version
-  # (sep-7.1.12.aurora2-12.0 is 12.0): a release staged before it is marked
-  # Latest must not be pointed at the older one.
-  mine=${TAG#sep-*-} theirs=${seen#sep-*-}
-  [[ $theirs == [0-9]* && $theirs != "$mine" &&
-    $(printf '%s\n' "$mine" "$theirs" | sort -V | tail -1) == "$theirs" ]] && echo "$seen"
+    LC_ALL=C grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[A-Za-z0-9._-]*"' |
+    head -1 | sed 's/.*"\([A-Za-z0-9._-]*\)"$/\1/') || true
+  mine=$(release_order "$TAG") || return 0
+  theirs=$(release_order "$seen") || return 0
+  # Calendar releases follow legacy releases; legacy ordering ignores the kernel
+  # version. Calendar ordering uses the date and optional numeric increment.
+  [[ $theirs != "$mine" &&
+    $(printf '%s\n' "$mine" "$theirs" | LC_ALL=C sort -V | tail -1) == "$theirs" ]] && echo "$seen"
   return 0
 }
 

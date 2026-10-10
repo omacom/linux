@@ -17,7 +17,7 @@ class Persistent(test_m3_handoff.M3PathTest):
         setup=self.setup_profile()
         self.mac('j615')
         (self.dt/'chosen/asahi,os-fw-version').write_bytes(b'14.7\0')
-        self.assertNotEqual(self.run_sh(setup+'M3_GPU_AUTO=1\nm3_plan',check=False).returncode,0)
+        self.assertNotEqual(self.run_sh(setup+'M3_PERSISTENT_BOARDS="j613"\nM3_GPU_AUTO=1\nm3_plan',check=False).returncode,0)
         matched=setup+'M3_PERSISTENT_BOARDS="j613 j615"\nM3_HANDOFF_BOARDS="j516s j613 j615"\nM3_GPU_AUTO=1\n'
         out=self.run_sh(matched+'m3_plan\nm3_persistent_preflight\necho "$M3_GPU_PROFILE:$M3_MODE"').stdout
         self.assertIn('legacy:handoff',out)
@@ -44,7 +44,7 @@ class Persistent(test_m3_handoff.M3PathTest):
         setup=self.setup_profile(stage1='v1.6.1')
         self.mac('j615',stage1='v1.6.1')
         (self.dt/'chosen/asahi,os-fw-version').write_bytes(b'14.7\0')
-        self.assertIn('stage 1 is',self.run_sh(setup+'m3_stage1_problem').stdout)
+        self.assertIn('stage 1 is',self.run_sh(setup+'M3_PERSISTENT_BOARDS="j613"\nm3_stage1_problem').stdout)
         setup+='M3_PERSISTENT_BOARDS="j613 j615"\n'
         self.assertEqual(self.run_sh(setup+'m3_stage1_problem').stdout,'')
         (self.dt/'chosen/asahi,m1n1-oslog-overlap').write_bytes(bytes(16))
@@ -155,7 +155,7 @@ class Persistent(test_m3_handoff.M3PathTest):
         (self.etc/'m1n1.conf').write_text('chosen.asahi,t8122-gpu=0\n')
         self.assertNotEqual(self.run_sh(setup+'M3_GPU_AUTO=1\nm3_plan\nm3_persistent_preflight',check=False).returncode,0)
         self.mac('j615')
-        self.assertNotEqual(self.run_sh('M3_GPU_AUTO=1\nm3_plan',check=False).returncode,0)
+        self.assertNotEqual(self.run_sh('M3_PERSISTENT_BOARDS="j613"\nM3_GPU_AUTO=1\nm3_plan',check=False).returncode,0)
 
     def test_real_option_parser_auto_and_conflicting_profiles(self):
         source=test_m3_handoff.INSTALLER.read_text()
