@@ -504,7 +504,10 @@ report:
 		spin_unlock_irqrestore(&m->response_lock, flags);
 		goto report;
 	}
-	response.status = ret ? WLAN_STATUS_UNSPECIFIED_FAILURE : WLAN_STATUS_SUCCESS;
+	/* No AP status was received on a timeout. Let cfg80211 report it as such. */
+	response.status = ret == -ETIMEDOUT ? -1 :
+		ret ? WLAN_STATUS_UNSPECIFIED_FAILURE : WLAN_STATUS_SUCCESS;
+	response.timeout_reason = NL80211_TIMEOUT_UNSPECIFIED;
 	response.links[0].bss = m->connect_bss;
 	response.links[0].bssid = m->connect_bssid;
 	if (m->assoc_request_seen) {
