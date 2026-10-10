@@ -831,6 +831,24 @@ class M3FlowTest(M3FlowBase):
         self.install()
         self.assertIn("pacman -U", self.log())
 
+    def test_held_mac_image_packages_do_not_block_install(self):
+        self.mac("j613")
+        self.extra_env["FAKE_UPGRADES"] = "\n".join(
+            name + " 1-1 -> 2-1 [ignored]"
+            for name in ("omarchy", "omarchy-mac", "omarchy-mac-boot", "omarchy-settings"))
+        self.install()
+        self.assertIn("pacman -U", self.log())
+
+    def test_held_mac_image_packages_do_not_hide_pending_dependency(self):
+        self.mac("j613")
+        self.extra_env["FAKE_UPGRADES"] = (
+            "omarchy-mac 1-1 -> 2-1 [ignored]\nllvm-libs 20.1-1 -> 22.1-1")
+        proc = self.install(check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("first: llvm-libs", proc.stderr)
+        self.assertNotIn("pacman -U", self.log())
+        self.assertEqual(self.downloaded(), [])
+
     def test_database_errors_refuse_before_download_or_install(self):
         self.mac("j516s")
         for failure in ("FAKE_FAIL_REFRESH", "FAKE_FAIL_QUERY"):

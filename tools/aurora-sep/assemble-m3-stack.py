@@ -12,7 +12,7 @@ import subprocess
 ROLES = {'kernel':'linux-aurora', 'headers':'linux-aurora-headers', 'm1n1':'m1n1-aurora',
          'mesa':'mesa-m3', 'libfprint':'libfprint', 'touchid':'aurora-touchid'}
 HEX = re.compile(r'[0-9a-f]{64}')
-NEO_KERNEL = '7ad228f79a98aad3ef63f90d1ffcddd880c9672d'
+NEO_KERNEL = '77030de18bbbbf077777da5f821e9c15dd1e4c47'
 
 def member(path, name):
     return subprocess.check_output(['bsdtar', '-xOf', str(path), name])
