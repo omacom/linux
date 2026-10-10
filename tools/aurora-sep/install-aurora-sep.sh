@@ -6793,6 +6793,18 @@ m3_gpu_check_plan() {
   if [[ -e $M3_GPU_CHECK || -L $M3_GPU_CHECK ]]; then
     [[ -f $M3_GPU_CHECK && ! -L $M3_GPU_CHECK ]] || die "$M3_GPU_CHECK is not an installer-owned regular file; it was left unchanged"
     [[ -f $STATE/m3-gpu-check && ! -L $STATE/m3-gpu-check ]] || die "$M3_GPU_CHECK already exists without an ownership record; it was left unchanged"
+    # An explicit matching selection can restore an empty helper/record pair.
+    if [[ ! -s $M3_GPU_CHECK && ! -s $STATE/m3-gpu-check && $M3_GPU_PERSISTENT == 1 &&
+          -f $STATE/m3-gpu-persistent && ! -L $STATE/m3-gpu-persistent ]]; then
+      case $M3_GPU_PROFILE in
+        legacy|j613-25g83)
+          if [[ $(cat "$STATE/m3-gpu-persistent") == "$M3_GPU_PROFILE" ]]; then
+            say "Restoring the empty GPU checker and ownership record for this selected profile"
+            return 0
+          fi
+          ;;
+      esac
+    fi
     recorded=$(cat "$STATE/m3-gpu-check")
     current=$(sha256sum "$M3_GPU_CHECK" | cut -d' ' -f1)
     [[ $recorded =~ ^[0-9a-f]{64}$ && $current == "$recorded" ]] || die "$M3_GPU_CHECK was changed outside this installer; it was left unchanged"
@@ -6807,9 +6819,42 @@ m3_gpu_check_install() {
   m3_gpu_check_plan
   m3_gpu_check_builtin >"$work/aurora-m3-gpu-check"
   sha=$(sha256sum "$work/aurora-m3-gpu-check" | cut -d' ' -f1)
-  $sudo install -D -m 0755 "$work/aurora-m3-gpu-check" "$M3_GPU_CHECK"
-  printf '%s\n' "$sha" | $sudo tee "$STATE/m3-gpu-check" >/dev/null
-  $sudo chmod 0644 "$STATE/m3-gpu-check"
+  $sudo python3 - "$work/aurora-m3-gpu-check" "$M3_GPU_CHECK" "$STATE/m3-gpu-check" "$sha" <<'M3_CHECK_INSTALL_PY'
+import hashlib, os, stat, sys, tempfile
+from pathlib import Path
+source, helper, record = map(Path, sys.argv[1:4])
+data = source.read_bytes()
+if not data or hashlib.sha256(data).hexdigest() != sys.argv[4]:
+    raise SystemExit('GPU checker source is empty or changed')
+compile(data, str(helper), 'exec')
+staged = []
+try:
+    for path, content, mode in ((helper, data, 0o755),
+                               (record, (sys.argv[4] + '\n').encode(), 0o644)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() or path.is_symlink():
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise SystemExit('GPU checker destination is not a regular file: ' + str(path))
+        fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+        staged.append((name, path))
+        with os.fdopen(fd, 'wb') as output:
+            os.fchmod(output.fileno(), mode)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+    # Publish complete files; persist the helper before its ownership record.
+    for name, path in staged:
+        os.replace(name, path)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+finally:
+    for name, path in staged:
+        if os.path.exists(name):
+            os.unlink(name)
+M3_CHECK_INSTALL_PY
 }
 
 m3_gpu_check_remove() {
