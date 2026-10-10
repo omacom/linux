@@ -31,7 +31,7 @@ PREFIX = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-typedef uint8_t u8; typedef uint64_t u64;
+typedef uint8_t u8; typedef uint32_t u32; typedef uint64_t u64;
 #define GENMASK_ULL(h,l) ((~0ULL << (l)) & (~0ULL >> (63-(h))))
 #define FIELD_GET(m,v) (((v) & (m)) >> __builtin_ctzll(m))
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
