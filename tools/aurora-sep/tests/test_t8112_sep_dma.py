@@ -191,6 +191,32 @@ int main(int argc, char **argv)
                 self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
                 self.assertIn("admission=-22", proc.stdout)
 
+    def test_j493_sensor_and_manifest_handoff(self):
+        dtb = self.compile_board("j493")
+        self.assertEqual(self.prop(dtb, "/aliases", "sep", "s"),
+                         ["/soc/sep@25e400000"])
+        bus = "/soc/spi@235108000"
+        sensor = bus + "/fingerprint@0"
+        self.assertEqual(self.prop(dtb, bus, "status", "s"), ["okay"])
+        self.assertEqual(self.prop(dtb, sensor, "status", "s"), ["okay"])
+        self.assertEqual(self.prop(dtb, sensor, "firmware-name", "s"),
+                         ["apple/mesacal-j493.bin"])
+        power = [int(value, 16) for value in self.prop(dtb, sensor, "enable-gpios")]
+        gpio = int(self.prop(dtb, "/soc/pinctrl@23c100000", "phandle")[0], 16)
+        self.assertEqual(power, [gpio, 178, 0])
+        self.assertEqual(self.prop(dtb, sensor, "spi-max-frequency", "u"), ["8000000"])
+        self.assertEqual(self.prop(dtb, sensor, "spi-cs-setup-delay-ns", "u"), ["20"])
+        self.assertEqual(self.prop(dtb, sensor, "spi-cs-hold-delay-ns", "u"), ["20"])
+        properties = subprocess.run(["fdtget", "-p", str(dtb), sensor],
+                                    check=True, capture_output=True, text=True).stdout.split()
+        self.assertIn("spi-cpha", properties)
+        self.assertNotIn("spi-cpol", properties)
+        self.assertNotIn("interrupts", properties)
+        self.assertNotIn("interrupts-extended", properties)
+        bus_properties = subprocess.run(["fdtget", "-p", str(dtb), bus],
+                                        check=True, capture_output=True, text=True).stdout.split()
+        self.assertNotIn("cs-gpios", bus_properties)
+
 
 if __name__ == "__main__":
     unittest.main()
