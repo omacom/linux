@@ -129,6 +129,9 @@ def archive(esp, state, destination, lock_paths=None):
                 finally:
                     if os.path.exists(name):
                         os.unlink(name)
+            # A verified pre-existing archive may still have dirty data pages.
+            with regular(target).open('rb') as stream:
+                os.fsync(stream.fileno())
             path_key = hashlib.sha256(item['file'].encode()).hexdigest()[:16]
             receipt = destination / (item['sha256'] + '-' + path_key + '.receipt')
             entry = {'original':item['file'], 'sha256':item['sha256'], 'bytes':item['bytes'], 'archive':target.name}

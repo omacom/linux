@@ -117,6 +117,17 @@ class HistoryTest(unittest.TestCase):
                 self.archive()
         self.assertTrue((self.boot / 'boot.bin.before-v0').exists())
 
+    def test_existing_correct_archive_sync_failure_retains_original(self):
+        self.destination.mkdir()
+        original = self.boot / 'boot.bin.before-v0'
+        saved = self.destination / (M.digest(original) + '.bin')
+        saved.write_bytes(original.read_bytes())
+        with patch.object(M.os, 'fsync', side_effect=OSError('archive sync failed')):
+            with self.assertRaisesRegex(OSError, 'archive sync failed'):
+                self.archive()
+        self.assertTrue(original.exists())
+        self.assertFalse(list(self.destination.glob('*.receipt')))
+
 
 if __name__ == '__main__':
     unittest.main()
