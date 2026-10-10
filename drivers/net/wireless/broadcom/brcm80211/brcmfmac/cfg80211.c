@@ -6319,8 +6319,11 @@ static s32 brcmf_get_assoc_ies(struct brcmf_cfg80211_info *cfg,
 		bphy_err(drvr, "could not get assoc info (%d)\n", err);
 		return err;
 	}
-	if (received < sizeof(assoc_info))
+	if (received < sizeof(assoc_info)) {
+		bphy_err(drvr, "short assoc info: received %u required %zu\n",
+			 received, sizeof(assoc_info));
 		return -EBADMSG;
+	}
 	req_len = le32_to_cpu(assoc_info.req_len);
 	resp_len = le32_to_cpu(assoc_info.resp_len);
 	if (req_len > WL_EXTRA_BUF_MAX || resp_len > WL_EXTRA_BUF_MAX) {
@@ -6342,6 +6345,8 @@ static s32 brcmf_get_assoc_ies(struct brcmf_cfg80211_info *cfg,
 			goto done;
 		}
 		if (received < req_len) {
+			bphy_err(drvr, "short assoc req: received %u required %u\n",
+				 received, req_len);
 			err = -EBADMSG;
 			goto done;
 		}
@@ -6361,6 +6366,8 @@ static s32 brcmf_get_assoc_ies(struct brcmf_cfg80211_info *cfg,
 			goto done;
 		}
 		if (received < resp_len) {
+			bphy_err(drvr, "short assoc resp: received %u required %u\n",
+				 received, resp_len);
 			err = -EBADMSG;
 			goto done;
 		}
