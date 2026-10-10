@@ -66,6 +66,13 @@ struct dptx_port {
 	 * link-training sequencing issues.
 	 */
 	u32 validate_calls, connect_calls, request_calls, release_calls;
+	/*
+	 * The sink's tile topology as DCP reports it in SetTiledDisplayHints:
+	 * tiles across and down, and this stream's tile. Valid once
+	 * tile_hint is set; cleared whenever the port (re)connects.
+	 */
+	bool tile_hint;
+	u8 tiles_h, tiles_v, tile_x, tile_y;
 };
 
 int dptxport_validate_connection(struct apple_epic_service *service, u8 core,

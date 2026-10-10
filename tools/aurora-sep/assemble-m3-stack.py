@@ -15,10 +15,45 @@ HEX = re.compile(r'[0-9a-f]{64}')
 NEO_KERNEL = '77030de18bbbbf077777da5f821e9c15dd1e4c47'
 NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa',
                'e76133daffab1be549b47571691ab77ac7c28201',
-               '25b138b77409fcb49c2e4fbebee57d81bdea9bb3')
+               '25b138b77409fcb49c2e4fbebee57d81bdea9bb3',
+               '417c8e5e26319366cb5fff32d9887abfaa599e76')
+# J615 native25 requires exact kernel, boot source and packaged binary bindings.
+J615_NATIVE25_PAIR = {
+    'kernel': '417c8e5e26319366cb5fff32d9887abfaa599e76',
+    'm1n1': '31501778e863feb5d2afe77be3a1edc588c98119',
+    'm1n1_bin_sha256': '88561de86ca41eb3cc94b0550674fe07c41a5b6ee5c45b8539c04e2443b0d9d7',
+}
+STANDARD_M1N1_SOURCE = "31501778e863feb5d2afe77be3a1edc588c98119"
+J615_LEGACY_M1N1_SOURCES = ("74ba6bea52d1f865d204bb3f8168705a148fd5c5", STANDARD_M1N1_SOURCE)
 
 def member(path, name):
     return subprocess.check_output(['bsdtar', '-xOf', str(path), name])
+
+def optional_member(path, name):
+    result = subprocess.run(['bsdtar', '-xOf', str(path), name], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return result.stdout if result.returncode == 0 else None
+
+def check_standard_m1n1_source(source, package):
+    if source != STANDARD_M1N1_SOURCE:
+        return
+    if optional_member(package, 'usr/share/m1n1-aurora/source') != (source + '\n').encode():
+        raise ValueError('standard m1n1 source marker differs')
+    expected = b'release=1\nchainloading=0\nj613_esp_stage1=0\ntag=v1.6.1-omarchy.aurora17\n'
+    if optional_member(package, 'usr/share/m1n1-aurora/build-config') != expected:
+        raise ValueError('standard m1n1 build configuration differs')
+
+def check_j615_native25(sources, binary_sha, mesa):
+    pair = J615_NATIVE25_PAIR
+    if not isinstance(pair, dict) or set(pair) != {'kernel', 'm1n1', 'm1n1_bin_sha256'}:
+        raise ValueError('J615 native25 requires the recorded J615 boot/kernel pair (J615_NATIVE25_PAIR)')
+    if sources['kernel'] != pair['kernel']: raise ValueError('J615 native25 requires the matched J615 kernel')
+    if sources['m1n1'] != pair['m1n1']: raise ValueError('J615 native25 requires the matched J615 m1n1 source')
+    if binary_sha != pair['m1n1_bin_sha256']: raise ValueError('J615 native25 requires the matched J615 m1n1 binary')
+    boards = optional_member(mesa, 'opt/mesa-m3/share/mesa-m3/native25-boards')
+    if boards is None or b'j615-experimental' not in boards.splitlines() or b'j613' not in boards.splitlines():
+        raise ValueError('Mesa does not declare the J615 25G83 session capability')
+    if b'asahi,j615-25g83-experimental' not in member(mesa, 'opt/mesa-m3/libexec/mesa-m3-session-env'):
+        raise ValueError('Mesa session hook lacks the J615 25G83 admission')
 
 def desktop_data(manifest, directory):
     data = manifest.get('desktop_fixes')
@@ -116,8 +151,13 @@ def assemble(template, manifest, directory):
         raise ValueError('legacy GPU boards must name supported Air boards once')
     if 'j615' in boards and sources['kernel'] not in ('a4d7ff4acdefcbce7daa7f57866413f21f05fb75', *NEO_KERNELS):
         raise ValueError('J615 legacy GPU requires the matched J615 kernel consumer')
-    if 'j615' in boards and sources['m1n1'] != '74ba6bea52d1f865d204bb3f8168705a148fd5c5':
+    if 'j615' in boards and sources['m1n1'] not in J615_LEGACY_M1N1_SOURCES:
         raise ValueError('J615 legacy GPU requires the matched J615 m1n1 producer')
+    # 25G83 is one firmware ABI profile (j613-25g83); J615 opts in to it as an experiment.
+    native25 = manifest.get('native25_boards', ['j613'])
+    if (not isinstance(native25, list) or 'j613' not in native25 or len(set(native25)) != len(native25) or
+            any(b not in ('j613', 'j615') for b in native25)):
+        raise ValueError('native25 boards must name supported Air boards once, including j613')
     packages = manifest['packages']
     if set(packages) != set(ROLES): raise ValueError('manifest must name every matched and auxiliary package')
     pins = {}; resolved = {}
@@ -133,11 +173,14 @@ def assemble(template, manifest, directory):
         if role in ('kernel','headers') and re.findall(r'^pkgver = (.+)$',metadata,re.M) != [manifest['version']]:
             raise ValueError('kernel package version and installer version differ')
         pins[role] = f'{path.name} {digest}'; resolved[role] = path
+    check_standard_m1n1_source(sources['m1n1'], resolved['m1n1'])
     binary = member(resolved['m1n1'],'usr/lib/asahi-boot/m1n1.bin')
     binary_sha = hashlib.sha256(binary).hexdigest()
     if binary_sha != manifest.get('m1n1_bin_sha256'): raise ValueError('unified m1n1 binary hash differs')
     for marker in (b'apple,j613-25g83-mapping-handoff', b'apple,j613-25g83-gpu-handoff'):
         if marker not in binary: raise ValueError('unified m1n1 lacks required handoff')
+    if 'j615' in native25 and b'asahi,j615-25g83-experimental' not in binary:
+        raise ValueError('unified m1n1 lacks the experimental J615 25G83 switch')
     native = member(resolved['mesa'],'opt/mesa-m3/25g83/share/mesa-m3/profile')
     if native != b'j613-25g83-gl-only\n': raise ValueError('native Mesa marker differs')
     hook = member(resolved['mesa'],'usr/share/uwsm/env.d/50-mesa-m3')
@@ -146,6 +189,7 @@ def assemble(template, manifest, directory):
     session = member(resolved['mesa'],'opt/mesa-m3/libexec/mesa-m3-session-env')
     if b'j613-25g83-hal200' not in session: raise ValueError('Mesa session selector differs')
     member(resolved['mesa'],'opt/mesa-m3/libexec/mesa-m3-abi-check')
+    if 'j615' in native25: check_j615_native25(sources, binary_sha, resolved['mesa'])
     listing = subprocess.check_output(['bsdtar','-tf',str(resolved['kernel'])],text=True).splitlines()
     dt_path = re.compile(r'usr/lib/modules/[^/]+/dtbs/(?:apple/)?t8122-j613-25g83\.dtb')
     dtbs = [p for p in listing if dt_path.fullmatch(p)]
@@ -153,16 +197,27 @@ def assemble(template, manifest, directory):
     dt = member(resolved['kernel'],dtbs[0])
     for marker in (b'apple,j613-25g83-profile\0', b'apple,firmware-compat\0'):
         if marker not in dt: raise ValueError('J61325 DTB profile is missing')
-    for field in ('stage1_25_versions',):
+    if 'j615' in native25:
+        dt_path = re.compile(r'usr/lib/modules/[^/]+/dtbs/(?:apple/)?t8122-j615-25g83\.dtb')
+        dtbs = [p for p in listing if dt_path.fullmatch(p)]
+        if len(dtbs) != 1: raise ValueError('kernel must supply exactly one separate J61525 DTB')
+        dt = member(resolved['kernel'],dtbs[0])
+        for marker in (b'apple,j613-25g83-profile\0', b'apple,firmware-compat\0', b'apple,j615\0'):
+            if marker not in dt: raise ValueError('J61525 DTB profile is missing')
+    fields = ('stage1_25_versions','stage1_25_j615_versions') if 'j615' in native25 else ('stage1_25_versions',)
+    for field in fields:
         versions = manifest.get(field,[])
-        if not versions or any(not re.fullmatch(r'[A-Za-z0-9._+-]+',v) for v in versions):
-            raise ValueError('qualified source-built stage1 versions required for 25 profile')
+        if (not isinstance(versions, list) or not versions or
+                any(not isinstance(v, str) or not re.fullmatch(r'[A-Za-z0-9._+-]+',v) for v in versions)):
+            raise ValueError(f'qualified source-built stage1 versions required for 25 profile ({field})')
     neo_pins = neo_data(manifest, directory)
     stack_id = hashlib.sha256(json.dumps(manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     s = template
     substitutions = dict(VERSION=manifest['version'],TAG=manifest['tag'],M1N1_BIN_SHA=binary_sha,
                          DESKTOP_FIXES_DATA=desktop_data(manifest, directory),
                          M3_STACK_ID=stack_id, M3_PERSISTENT_BOARDS=' '.join(boards), M3_STAGE1_25_VERSIONS=' '.join(manifest['stage1_25_versions']),
+                         M3_NATIVE25_BOARDS=' '.join(native25),
+                         M3_STAGE1_25_J615_VERSIONS=' '.join(manifest['stage1_25_j615_versions']) if 'j615' in native25 else '',
                          M1N1_PACKAGE=pins['m1n1'],M3_PRO_MESA_PACKAGE=pins['mesa'])
     substitutions.update(neo_pins)
     for key,value in substitutions.items():

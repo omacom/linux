@@ -392,3 +392,159 @@ false
         self.assertFalse((self.etc/'intent').exists())
         self.assertFalse((self.state/'m3-gpu-persistent').exists())
         self.assertFalse((self.etc/'hooks/profile.hook').exists())
+
+    # The 25G83 ABI profile on a J615: experimental, behind the release's and the owner's opt-ins.
+    J615_STAGE1 = 'v1.6.1-m3air25.stage1'
+
+    def setup_j615(self, native25='j613 j615', choice=1, board='j615', stage1=J615_STAGE1):
+        setup = self.setup_profile('j613-25g83', 'source-built-25')
+        self.mac(board, stage1=stage1, stub='26.6.2')
+        (self.dt/'chosen/asahi,os-fw-version').write_bytes(b'26.6.2\0')
+        return setup + (f'M3_NATIVE25_BOARDS="{native25}"\nM3_25_J615={choice}\n'
+                        f'M3_STAGE1_25_J615_VERSIONS="{self.J615_STAGE1}"\n')
+
+    def test_both_gates_admit_with_j615_switch_and_warning(self):
+        result = self.run_sh(self.setup_j615()+'m3_plan\nm3_persistent_preflight\necho "$M3_GPU_PROFILE:$M3_MODE"\nm3_switches\nm3_handoff_name')
+        self.assertIn('j613-25g83:handoff', result.stdout)
+        self.assertIn('chosen.asahi,t8122-dcp=1 chosen.asahi,t8122-gpu=1 chosen.asahi,j615-25g83-experimental=1', result.stdout)
+        self.assertNotIn('power-standin', result.stdout)
+        self.assertIn('experimental J615 (untested)', result.stdout)
+        self.assertIn('EXPERIMENTAL', result.stderr)
+        self.assertIn('Aurora previous (GPU off)', result.stderr)
+
+    def test_release_without_j615_refuses(self):
+        result = self.run_sh(self.setup_j615(native25='j613')+'m3_plan', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('lists j615', result.stderr)
+        result = self.run_sh(self.setup_j615(native25='j613')+'m3_persistent_preflight', check=False)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_j613_option_on_j615_refused(self):
+        result = self.run_sh(self.setup_j615(choice=0)+'m3_plan', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--m3-profile=j615-25g83', result.stderr)
+        self.assertIn('j615', self.run_sh(self.setup_j615(choice=0)+'m3_25_boot_problem').stdout)
+
+    def test_j615_option_on_j613_refused(self):
+        result = self.run_sh(self.setup_j615(board='j613', stage1='source-built-25')+'m3_plan', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--m3-profile=j613-25g83', result.stderr)
+        self.assertNotEqual(self.run_sh(self.setup_j615(board='j613', stage1='source-built-25')+'m3_25_boot_problem').stdout, '')
+
+    def test_j613_unchanged_by_j615_capability(self):
+        setup = self.setup_j615(board='j613', stage1='source-built-25', choice=0)
+        out = self.run_sh(setup+'m3_plan\nm3_persistent_preflight\necho "$M3_MODE"\nm3_switches').stdout
+        self.assertIn('handoff', out)
+        self.assertNotIn('j615-25g83-experimental', out)
+
+    def test_j615_uses_its_own_stage1_list(self):
+        setup = self.setup_j615()
+        self.assertEqual(self.run_sh(setup+'m3_stage1_problem').stdout, '')
+        for stage1 in ('source-built-25', 'v1.6.1-m3next.stage1', 'v1.6.1'):
+            with self.subTest(stage1=stage1):
+                setup = self.setup_j615(stage1=stage1)+'M3_STAGE1_25_VERSIONS="source-built-25 v1.6.1-m3next.stage1"\n'
+                self.assertIn('stage 1 is', self.run_sh(setup+'m3_stage1_problem').stdout)
+        setup = self.setup_j615()+'M3_STAGE1_25_J615_VERSIONS=""\n'
+        self.assertIn('stage 1 is', self.run_sh(setup+'m3_stage1_problem').stdout)
+        self.assertNotEqual(self.run_sh(setup+'m3_plan', check=False).returncode, 0)
+
+    def test_j615_on_other_firmware_refused(self):
+        setup = self.setup_j615()
+        (self.dt/'chosen/asahi,os-fw-version').write_bytes(b'14.8.3\0')
+        result = self.run_sh(setup+'m3_plan', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('J615', result.stderr)
+
+    def test_auto_never_selects_j615_native25(self):
+        setup = self.setup_j615()+'M3_PERSISTENT_BOARDS="j613 j615"\n'
+        self.gpu_descriptor((26,6,2))
+        result = self.run_sh(setup.replace('M3_25_J615=1','M3_25_J615=0')+'M3_GPU_AUTO=1\nm3_plan', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--m3-profile=j615-25g83', result.stderr)
+
+    def test_owner_switch_off_of_j615_line_refused(self):
+        (self.etc/'m1n1.conf').write_text('chosen.asahi,j615-25g83-experimental=0\n')
+        result = self.run_sh(self.setup_j615()+'m3_plan\nm3_persistent_preflight', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('explicit owner switch-off', result.stderr)
+
+    def test_plain_update_keeps_j615_choice_while_release_lists_it(self):
+        setup = self.setup_j615()
+        (self.state/'m3-gpu-persistent').write_text('j613-25g83\n')
+        plain = setup.replace('M3_GPU_PERSISTENT=1\n','M3_GPU_PERSISTENT=0\n').replace('M3_25_J615=1','M3_25_J615=0')
+        out = self.run_sh(plain+'m3_plan\necho "$M3_GPU_PERSISTENT:$M3_25_J615:$M3_MODE"\nm3_switches').stdout
+        self.assertIn('1:1:handoff', out)
+        self.assertIn('chosen.asahi,j615-25g83-experimental=1', out)
+        result = self.run_sh(plain.replace('M3_NATIVE25_BOARDS="j613 j615"','M3_NATIVE25_BOARDS="j613"')+'m3_plan', check=False)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_m1n1_must_know_the_j615_switch(self):
+        common = ['asahi,t8122-dcp', 'asahi,t8122-gpu', 'apple,j613-25g83-profile',
+                  'apple,j613-25g83-mapping-handoff', 'apple,j613-25g83-gpu-handoff']
+        setup = self.setup_j615()
+        without = self.package(common)
+        self.assertEqual(self.run_sh(setup+f"m1n1_pkg_has_handoff '{without}' && echo yes || echo no").stdout.strip(), 'no')
+        self.assertEqual(self.run_sh(self.setup_j615(board='j613', choice=0, stage1='source-built-25')+
+                                     f"m1n1_pkg_has_handoff '{without}' && echo yes || echo no").stdout.strip(), 'yes')
+        import shutil
+        shutil.rmtree(self.tmp/'pkgroot'); without.unlink()
+        both = self.package(common+['asahi,j615-25g83-experimental'])
+        self.assertEqual(self.run_sh(setup+f"m1n1_pkg_has_handoff '{both}' && echo yes || echo no").stdout.strip(), 'yes')
+
+    def test_real_option_parser_j615_profile(self):
+        source = test_m3_handoff.INSTALLER.read_text()
+        tail = source[source.index('\nargs=()\n'):]
+        for args, good, want in [(['--m3-profile=j615-25g83'], True, 'parsed=j613-25g83:1:1:1'),
+                                 (['--m3-profile=j613-25g83'], True, 'parsed=j613-25g83:1:1:0'),
+                                 (['--m3-profile=j615-25g83', '--m3-gpu'], False, ''),
+                                 (['--m3-profile=j615-25g83', '--uninstall'], False, '')]:
+            with self.subTest(args=args):
+                body = ('preflight() { :; }\ninstall_all() { echo "parsed=$M3_GPU_PROFILE:$M3_GPU_PERSISTENT:$M3_TRY:$M3_25_J615"; }\n'
+                        'uninstall_all() { :; }\nset -- '+shlex.join(args)+'\n'+tail)
+                result = self.run_sh(body, check=False)
+                self.assertEqual(result.returncode == 0, good, result.stderr)
+                if good: self.assertIn(want, result.stdout)
+        self.assertIn('--m3-profile=j615-25g83', self.run_sh('preflight() { :; }\nset -- --bogus\n'+tail, check=False).stderr)
+
+    def test_j615_selection_needs_a_mesa_that_admits_it(self):
+        # The released Mesa's session hook stops a J615 at profile-mismatch; its replacement lists
+        # j615-experimental in share/mesa-m3/native25-boards. Without that, nothing is published.
+        (self.tmp/'native-marker').write_text('j613-25g83-gl-only\n')
+        boards = self.tmp/'native25-boards'
+        setup = self.setup_j615()+self.selection()+f'M3_MESA_NATIVE25_BOARDS="{boards}"\n'
+        for content in (None, 'j613\n', 'j613\nj615-experimental-old\n'):
+            with self.subTest(content=content):
+                if content is None: boards.unlink(missing_ok=True)
+                else: boards.write_text(content)
+                result = self.run_sh(setup+'m3_persistent_select', check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('does not admit the J615', result.stderr)
+                self.assertFalse((self.etc/'intent').exists())
+                self.assertFalse((self.etc/'profile').exists())
+                self.assertFalse((self.state/'m3-gpu-persistent').exists())
+        boards.write_text('j613\nj615-experimental\n')
+        self.run_sh(setup+'m3_persistent_select')
+        self.assertEqual((self.etc/'profile').read_text(), 'j613-25g83-hal200\n')
+        self.assertEqual((self.etc/'intent').read_text(), '1\n')
+
+    def test_j613_selection_ignores_the_j615_capability(self):
+        (self.tmp/'native-marker').write_text('j613-25g83-gl-only\n')
+        setup = (self.setup_j615(board='j613', stage1='source-built-25', choice=0)+self.selection()+
+                 f'M3_MESA_NATIVE25_BOARDS="{self.tmp}/absent"\n')
+        self.run_sh(setup+'m3_persistent_select')
+        self.assertEqual((self.etc/'profile').read_text(), 'j613-25g83-hal200\n')
+
+    def test_j615_mesa_capability_after_package_install_rolls_back_before_arming(self):
+        (self.tmp/'native-marker').write_text('j613-25g83-gl-only\n')
+        setup = (self.setup_j615()+self.transaction_paths()+f'M3_MESA_NATIVE25_BOARDS="{self.tmp}/absent"\n')
+        result = self.run_sh(setup+'''
+m3_persistent_transaction_begin "$chain"
+m3_switches_write
+pacman() { return 0; }
+m3_install_packages
+''', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('does not admit the J615', result.stderr)
+        self.assertNotIn('asahi.t8122_start=1', (self.etc/'default/limine').read_text())
+        self.assertFalse((self.etc/'intent').exists())
+        self.assertFalse((self.etc/'profile').exists())

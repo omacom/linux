@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+ OR MIT
 /*
- * Apple MacBook Pro (13-inch, M1, 2022)
+ * Apple MacBook Pro (13-inch, M2, 2022)
  *
  * target-type: J493
  *
@@ -25,6 +25,7 @@
 	aliases {
 		bluetooth0 = &bluetooth0;
 		keyboard = &keyboard;
+		sep = &sep;
 		touchbar0 = &touchbar0;
 		wifi0 = &wifi0;
 	};
@@ -308,6 +309,23 @@
 
 	tp_accel {
 	};
+};
+
+/*
+ * SPI2 uses native chip select. The sensor power line is AP GPIO 178,
+ * active high; the data-ready line is omitted so captures use polling.
+ */
+&spi2 {
+	status = "okay";
+};
+
+&mesa {
+	status = "okay";
+	enable-gpios = <&pinctrl_ap 178 GPIO_ACTIVE_HIGH>;
+	spi-cs-setup-delay-ns = <20>;
+	spi-cs-hold-delay-ns = <20>;
+	/* Factory calibration is extracted from this Mac's iBoot container. */
+	firmware-name = "apple/mesacal-j493.bin";
 };
 
 #include "isp-imx248.dtsi"

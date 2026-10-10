@@ -15,8 +15,14 @@ FUNCTIONS = {
     'drivers/gpu/drm/apple/dcp.c': [
         'dcp_dptx_release_locked', 'dcp_dptx_disconnect',
         'dcp_dptx_disconnect_drained', 'dcp_dptx_disconnect_oob',
+        'dcp_dptx_connect_tile', 'dcp_dptx_connect',
         'dcp_dptx_park', 'dcp_external_retry_work', 'dcp_external_sink_irq'],
     'drivers/gpu/drm/apple/dcp-fabric.c': [
+        'dcp_tb_reserve_revoke', 'dcp_tb_invalidate', 'dcp_tb_drain_unlock',
+        'dcp_tb_drain_wait', 'dcp_tb_drain_lock', 'dcp_tb_binding_drain',
+        'dcp_tb_finish_request', 'dcp_tb_dispatch', 'dcp_follow_save_split',
+        'dcp_tb_split_teardown_locked', 'dcp_tb_split_join_locked',
+        'dcp_tb_split_locked', 'dcp_tb_release_locked', 'dcp_tunnel_set_rate',
         'dcp_typec_route_activate', 'dcp_typec_route_deactivate',
         'dcp_rebalance_deactivate', 'dcp_follow_release', 'dcp_follow_owned',
         'dcp_follow_retained', 'dcp_follow_detach',
@@ -24,6 +30,8 @@ FUNCTIONS = {
         'dcp_reclaim_release', 'dcp_reclaim_retained',
         'dcp_fabric_hdmi_retry', 'dcp_typec_route_is_dp', 'dcp_typec_route_set',
         'dcp_typec_route_unregister'],
+    'drivers/gpu/drm/apple/dptxep.c': ['dptxport_call_set_tiled_display_hint'],
+    'drivers/gpu/drm/apple/dcp-fabric-session.h': ['dcp_fabric_binding_request', 'dcp_fabric_callback_valid', 'dcp_fabric_drain_binding'],
     'drivers/gpu/drm/apple/dcp-fabric-core.c': ['dcp_fabric_follow_execute'],
     'drivers/gpu/drm/apple/dcp-fabric-effects.h': ['dcp_fabric_reclaim_execute'],
     'drivers/usb/typec/tipd/core.c': [
@@ -47,7 +55,25 @@ CASES = ['release-success', 'release-failure', 'hpd-failure',
          'follow-executor-retained', 'follow-executor-second-retained',
          'follow-executor-destination-retained', 'follow-executor-null-callback',
          'follow-restore-occupied', 'follow-executor-reverse-restore',
-         'reclaim-null-retained', 'reclaim-null-released-error']
+         'reclaim-null-retained', 'reclaim-null-released-error',
+         'tile-hint-valid', 'tile-hint-short', 'tile-hint-location',
+         'tile-hint-many', 'tile-hint-overflow', 'tile-hint-zero-size',
+         'tile-hint-single', 'tile-rate-stop', 'tile-rate-error',
+         'tile-teardown-hpd-failure', 'tile-teardown-release-failure',
+         'tile-teardown-remove-hpd', 'tile-teardown-remove-release',
+         'tile-teardown-success', 'tile-park-hpd-failure',
+         'tile-park-release-failure', 'tile-park-success',
+         'tile-split-connect-failure', 'tile-split-unsupported-connect',
+         'tile-split-source-failure', 'tile-split-preselect-failure',
+         'tile-split-no-hint', 'tile-split-wait-hint', 'tile-split-success',
+         'tile-follow-source-failure', 'tile-follow-preselect-failure',
+         'tile-follow-main-release-failure', 'tile-follow-success',
+         'tile-split-retained-connect-failure', 'tile-parent-connect-failure',
+         'tile-parent-connect-success', 'tile-main-release-hpd-failure',
+         'tile-main-release-failure', 'tile-main-release-success', 'tile-provider-main-release-failure',
+         'tile-provider-split-release-failure', 'tile-provider-split-attach-failure',
+         'tile-provider-main-unrelated', 'tile-provider-split-unrelated',
+         'tile-follow-save-retired']
 
 
 def function(source, name):
@@ -73,18 +99,42 @@ def main():
         args.out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='dp-release-') as directory:
         output = args.out or Path(directory)
-        bodies, hashes, additions = [], {}, []
-        for path, names in FUNCTIONS.items():
+        bodies, hashes, additions, original_hashes = [], {}, [], {}
+        for path, names in sorted(FUNCTIONS.items(), key=lambda item: item[0] != 'drivers/gpu/drm/apple/dcp-fabric-session.h'):
             source = (subprocess.check_output(['git', 'show', f'{args.ref}:{path}'],
                        cwd=ROOT, text=True) if args.ref else (ROOT / path).read_text())
             for name in names:
                 try:
                     body = function(source, name)
                 except ValueError:
-                    if not args.ref or name not in ('dcp_follow_owned', 'dcp_follow_retained', 'dcp_reclaim_retained'):
+                    if not args.ref or name not in ('dcp_follow_owned', 'dcp_follow_retained', 'dcp_reclaim_retained', 'dcp_tb_finish_request', 'dcp_tb_reserve_revoke', 'dcp_tb_invalidate', 'dcp_tb_drain_unlock',
+        'dcp_tb_drain_wait', 'dcp_tb_drain_lock', 'dcp_tb_binding_drain',
+        'dcp_tb_finish_request', 'dcp_tb_dispatch', 'dcp_follow_save_split',
+        'dcp_tb_split_teardown_locked', 'dcp_tb_split_join_locked', 'dcp_tb_split_locked', 'dcp_tb_release_locked', 'dcp_tunnel_set_rate', 'dptxport_call_set_tiled_display_hint'):
                         raise
                     body = function((ROOT / path).read_text(), name)
                     additions.append(name)
+                original_hashes[name] = None if name in additions else hashlib.sha256(body.encode()).hexdigest()
+                if name == 'dcp_tb_finish_request' and args.ref and name in additions:
+                    body = 'static void dcp_tb_finish_request(struct apple_dcp_typec_port *p, const struct dcp_tb_attach_context *r) {}\n'
+                    additions.append('terminal_finish_absent_in_ref')
+                if name == 'dcp_tb_dispatch' and 'dcp_tb_finish_request' not in source:
+                    body = 'static int dcp_tb_dispatch(void *data, const struct dcp_fabric_port *found) {return dcp_tb_dispatch_request(data, found); }\n'
+                    additions.append('terminal_dispatch_envelope_adapter')
+                if name == 'dcp_dptx_connect_tile'  and body.startswith('static void'):
+                    body = body.replace('static void', 'static int', 1).replace('\t\treturn;', '\t\treturn 0;')
+                    body = body.rstrip()[:-1] + '\treturn ret;\n}\n'
+                    additions.append('tile_connect_return_adapter')
+                if name == 'dcp_tb_split_teardown_locked'  and body.startswith('static void'):
+                    body = body.replace('static void', 'static int', 1).replace(
+                        'struct apple_dcp_typec_port *port)',
+                        'struct apple_dcp_typec_port *port, bool force)')
+                    body = body.replace('\t\treturn;', '\t\treturn 0;')
+                    body = body.rstrip()[:-1] + '\treturn 0;\n}\n'
+                    additions.append('teardown_return_adapter')
+                if 'teardown_return_adapter' in additions:
+                    body = re.sub(r'dcp_tb_split_teardown_locked\((port|route->port)\);',
+                                  r'dcp_tb_split_teardown_locked(\1, false);', body)
                 bodies.append(body)
                 hashes[name] = hashlib.sha256(body.encode()).hexdigest()
         header = (subprocess.check_output(['git', 'show',
@@ -95,6 +145,20 @@ def main():
         fixture = (ROOT / 'tools/asahi/dp-release/fixture.c').read_text()
         code = fixture.replace('/* PM_HEADER */', header).replace(
             '/* PRODUCTION_FUNCTIONS */', '\n'.join(bodies))
+        fabric = (subprocess.check_output(['git', 'show', f'{args.ref}:drivers/gpu/drm/apple/dcp-fabric.c'], cwd=ROOT, text=True) if args.ref else (ROOT / 'drivers/gpu/drm/apple/dcp-fabric.c').read_text())
+        drain_table = re.search(r'static const struct dcp_fabric_drain_ops dcp_tb_drain_ops = \{.*?\n\};', fabric, re.S).group()
+        def read_ref(path):
+            return subprocess.check_output(['git', 'show', f'{args.ref}:{path}'], cwd=ROOT, text=True) if args.ref else (ROOT / path).read_text()
+        provider_names = ['apple_dpin_provider_call', 'apple_dpin_provider_get',
+                          'apple_dpin_provider_held', 'apple_dpin_provider_invoke',
+                          'apple_dpin_provider_put', 'apple_dpin_dcp_set_active']
+        provider_bodies = [function(read_ref('drivers/thunderbolt/apple-dpin-request.h'), provider_names[0])]
+        provider_bodies.extend(function(read_ref('drivers/thunderbolt/apple.c'), name) for name in provider_names[1:])
+        release = function(read_ref('drivers/thunderbolt/apple.c'), 'apple_dpin_release_binding')
+        code = code.replace('/* DRAIN_TABLE */', drain_table).replace('/* PROVIDER_FUNCTIONS */', '\n'.join(provider_bodies)).replace('/* RELEASE_BINDING */', release)
+        for name, body in zip(provider_names, provider_bodies):
+            hashes[name] = hashlib.sha256(body.encode()).hexdigest()
+        hashes['apple_dpin_release_binding'] = hashlib.sha256(release.encode()).hexdigest()
         unit = output / 'production.c'
         unit.write_text(code)
         subprocess.run(['cc', '-std=gnu11', '-g', '-Wall', '-Wextra', '-Werror',
@@ -110,7 +174,7 @@ def main():
             results.append({'case': case, 'exit': run.returncode,
                             'stdout': run.stdout, 'stderr': run.stderr})
         receipt = {'ref': args.ref, 'bodies': hashes,
-                   'shared_ownership_queries': additions,
+                   'shared_ownership_queries': additions, 'original_source_bodies': original_hashes,
                    'translation_sha256': hashlib.sha256(code.encode()).hexdigest(),
                    'results': results}
         (output / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')

@@ -87,4 +87,23 @@ curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download
 Reboot, log in and run `aurora-m3-gpu-check`. The native25 profile reports
 OpenGL readback and Vulkan unavailable. Keyboard/trackpad recovery, suspend,
 night light and extended stability still require hardware verification on
-this update. J615 native25 remains a separate experimental development route.
+this update. J615 native25 requires its own explicit experimental profile.
+
+## J615 native25
+
+The 15-inch M3 Air requires its own exact 26.6.2/25G83 volume group and
+J615-capable stage1 `v1.6.1-m3air25.stage1`. A matched release must list J615
+native25 capability and contain the admitted kernel, m1n1 and Mesa package pair.
+Other bundles refuse activation.
+
+```sh
+curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-profile=j615-25g83
+```
+
+This selects experimental native OpenGL and sets the independent J615 boot
+switch. Vulkan hardware support is unavailable. `--m3-gpu` and the J613 option
+do not enable this profile on a J615. Firmware and calibration remain specific
+to this Mac; neither the installer nor this option migrates firmware or stage1.
+J615 hardware qualification is pending. The retained **Aurora previous (GPU off)**
+entry remains available. After reboot and desktop login, run
+`aurora-m3-gpu-check --details` and collect the installer's `--m3-report`.

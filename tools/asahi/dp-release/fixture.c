@@ -10,11 +10,13 @@
 typedef uint32_t u32; typedef uint64_t u64; typedef uint8_t u8;
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x,v) ((x)=(v))
+#define smp_load_acquire(p) (*(p))
 #define smp_store_release(p,v) (*(p)=(v))
 #define JOIN_(a,b) a##b
 #define JOIN(a,b) JOIN_(a,b)
 #define guard(x) __attribute__((unused)) void *JOIN(_guard_,__LINE__) =
 #define scoped_guard(x,p) for (bool once=true; once; once=false)
+#define lockdep_assert_not_held(x) ((void)0)
 #define lockdep_assert_held(x) ((void)0)
 #define dev_warn(...) ((void)0)
 #define dev_info(...) ((void)0)
@@ -70,8 +72,24 @@ struct typec_partner_desc {bool usb_pd; int accessory; struct usb_pd_identity *i
 #define TYPEC_ACCESSORY_NONE 0
 struct apple_connector {bool connected; void *dcp;int bl_sync_wq;
  struct {unsigned possible_crtcs;} *port_encoder;unsigned candidate_crtcs;};
-struct mux_control {int id;struct {struct mux_control *mux;} *chip;};
+struct mux_control {int id;struct {struct mux_control *mux;unsigned controllers;} *chip;};
 struct apple_epic_service;
+struct phy;
+struct dcp_fabric_session {u64 generation,cookie;};
+struct apple_epic_service {void *cookie;struct {struct apple_dcp *dcp;} *ep;};
+struct dptxport_apcall_set_tiled {u32 retcode;};
+static unsigned long jiffies;
+#define time_before(a,b) ((a)<(b))
+#define cpu_to_le32(v) (v)
+#define min(a,b) ((a)<(b)?(a):(b))
+static u32 get_unaligned_le32(const void *p){const u8 *b=p;return b[0]|((u32)b[1]<<8)|((u32)b[2]<<16)|((u32)b[3]<<24);}
+#define DPTX_TILE_HINT_LOC_X 0x08
+#define DPTX_TILE_HINT_LOC_Y 0x0c
+#define DPTX_TILE_HINT_TILES_H 0x30
+#define DPTX_TILE_HINT_TILES_V 0x34
+#define DPTX_TILE_HINT_WIDTH 0x38
+#define DPTX_TILE_HINT_HEIGHT 0x3c
+#define DPTX_TILE_HINT_MIN_SIZE 0x40
 #define DRM_MODE_CONNECTOR_USB 1
 #define MUX_IDLE_DISCONNECT -1
 #define symbol_get(n) (&n)
@@ -79,7 +97,9 @@ struct apple_epic_service;
 struct platform_device;
 struct apple_dcp_typec_route;
 struct apple_dcp {void *dev; bool external,external_native,external_link_ready;
-    struct {bool enabled,connected; void *service;} dptxport[1];
+    struct dptx_port {bool enabled,connected;void *service,*atcphy;bool tile_hint;u8 tiles_h,tiles_v,tile_x,tile_y;u32 unit;} dptxport[2];
+    struct {bool active,ready,xbar_up,clock_ok;struct mux_control *xbar;int mux_state;u64 generation;int(*set_active)(void *,bool);void *binding;} split;
+    struct {bool t6020_tunnel_flow;} hw;
     int hpd_mutex,typec_iomfb_hpd_ready; bool typec_cable_connected,typec_crtc_off;
     u64 typec_generation; struct delayed_work external_retry_wq,typec_reconnect_wq,placeholder_edid_wq;
     void *avep; struct apple_connector *connector,*typec_connector;
@@ -93,17 +113,18 @@ struct apple_dcp {void *dev; bool external,external_native,external_link_ready;
     int fixed_connector_type,connector_type,fixed_mux_index;
     struct mux_control *xbar;bool fixed_route_selected;
     struct {void *phy;int dptx_phy;} typec_routes[1];};
-struct apple_dcp_typec_port {bool applied_valid,hpd,dp_wanted,dp_hpd;
+struct dcp_fabric_port {int unused;};
+struct apple_dcp_typec_port {struct dcp_fabric_port core;bool applied_valid,hpd,dp_wanted,dp_hpd;
     void *applied_alt; int applied_mode; u32 applied_status,applied_conf;
     struct apple_dcp_typec_route *owner,*secondary_owner,*preferred_route,*target;struct apple_connector *connector,*secondary_connector;
-    struct {int count;} routes; int link; void *connector_np;};
+    struct apple_dcp *split_dcp;unsigned long tile_hint_deadline;struct {int count;} routes; int link; void *connector_np;};
 struct apple_dcp_typec_route {struct apple_dcp *dcp; struct apple_dcp_typec_port *port;
     bool tunnel,dual_stream,xbar_up,selected; int core,port_link,mux_index;
-    struct typec_mux_dev *typec_mux;struct mux_control *xbar,*active_xbar;
+    struct typec_mux_dev *typec_mux;struct mux_control *xbar,*active_xbar,*dpin[2];
     unsigned tunnel_dpin,dptx_phy;void *phy;u64 tunnel_generation;};
 struct dcp_typec_follow_slot {struct apple_dcp_typec_route *from,*to;
     struct apple_dcp_typec_port *port;bool tunnel;unsigned dpin;
-    void *set_active,*binding;u64 tunnel_generation,attachment_generation;};
+    void *set_active,*binding;u64 tunnel_generation,attachment_generation;bool split;u64 split_generation;int(*split_set_active)(void *,bool);void *split_binding;};
 struct dcp_typec_follow_context {struct dcp_typec_follow_slot slots[2];};
 struct dcp_hdmi_reclaim_context {struct apple_dcp *from;struct apple_dcp_typec_route *owner,*target;};
 struct dcp_fabric_reclaim_ops {int (*release)(void *);bool (*retained)(void *);void (*unplug)(void *);void (*connect_hdmi)(void *);int (*activate)(void *,bool);void (*publish)(void *,bool);void (*lost)(void *);};
@@ -118,8 +139,12 @@ struct cd321x {struct tps6598x tps;struct delayed_work update_work,resume_work;
     bool state_valid,dp_sid_valid,cur_partner_is_pd;struct typec_mux_state state;
     struct typec_altmode *port_altmode_dp;u32 dp_status,dp_conf;
     struct usb_pd_identity cur_partner_identity;void *connector_fwnode,*tbt_switch,*mux;};
+struct dcp_tb_attach_context {unsigned dpin;bool active;u64 generation;int(*set_active)(void *,bool);void *binding;};
 static int tipd_sn201202x_data,other_tipd_data;
 static int dcp_typec_fabric_lock,dcp_tb_handoff_lock,dcp_dual_stream_routes;
+static int binding_drains;
+static int preselect_error,source_error,connect_error,clock_calls,clock_error;
+static unsigned clock_dpin,clock_rate;
 static int hpd_error,release_error,hpd_calls,release_calls,crossbar_calls;
 static int role_changes,safe_changes,orientation_changes,tbt_changes,queues,connect_calls;
 static int deactivations,rebalance_calls,freed_ports,unregisters;
@@ -147,15 +172,17 @@ static void reinit_completion(int *c){}
 static void disconnected_hpd_event(struct apple_connector *c){if(c)c->connected=false;}
 static void av_service_disconnect(struct apple_dcp *d){}
 static void cancel_delayed_work(struct delayed_work *w){}
-static void cancel_delayed_work_sync(struct delayed_work *w){}
+static void cancel_delayed_work_sync(struct delayed_work *w){binding_drains++;}
 static struct apple_dcp_typec_route *typec_mux_get_drvdata(struct typec_mux_dev *m){return m->data;}
 static bool dcp_typec_keep_order(void){return keep_order;}
 static struct apple_dcp_typec_route *dcp_typec_rebalance_locked(void *a,int b){rebalance_calls++;return NULL;}
 static int mux_control_deselect(struct mux_control *m){xbar_deselections++;return xbar_error;}
 static int mux_control_select(struct mux_control *m,int s){xbar_selections++;return 0;}
-static int dcp_dpxbar_preselect(struct mux_control *m,int s){return 0;}
-static int dcp_dpxbar_tunnel_select_source(struct mux_control *m,int s){return 0;}
-static int apple_atc_dp_tunnel_rate(void *p,unsigned dpin,unsigned rate){return 0;}
+static int dcp_dpxbar_preselect(struct mux_control *m,int s){return s==MUX_IDLE_DISCONNECT?0:preselect_error;}
+static int dcp_dpxbar_tunnel_select_source(struct mux_control *m,int s){return s==-1?0:source_error;}
+static int apple_atc_dp_tunnel_rate(void *p,unsigned dpin,unsigned rate){clock_calls++;clock_dpin=dpin;clock_rate=rate;return clock_error;}
+static int dcp_dpxbar_link(struct mux_control *m,bool up){crossbar_calls++;return 0;}
+static bool of_machine_is_compatible(const char *s){return false;}
 static bool dcp_modes_end_typec(struct apple_dcp *d,struct apple_dcp_typec_route *r){deactivations++;return false;}
 static bool dcp_typec_dual_stream(void){return false;}
 static void apple_connector_set_pipeline(struct apple_connector *c,void *p){c->dcp=p;}
@@ -163,7 +190,9 @@ static void schedule_work(int *w){}
 
 static void dcp_typec_pipeline_freed(void){}
 static int gpiod_get_value_cansleep(int p){return hdmi_level;}
-static int dcp_dptx_connect(struct apple_dcp *d,int p){connect_calls++;return 0;}
+static int dcp_dptx_connect(struct apple_dcp *,u32);
+static struct dcp_fabric_session dcp_session_locked(struct apple_dcp *d){return (struct dcp_fabric_session){1,d->tb_generation};}
+static int dcp_dptx_connect_session(struct apple_dcp *d,u32 p,struct dcp_fabric_session session,bool cable,bool recovery){connect_calls++;if(!connect_error)d->dptxport[p].connected=true;return p?connect_error:0;}
 static int dcp_dptx_connect_oob(void *d,int p){connect_calls++;return 0;}
 static struct apple_dcp_typec_route *dcp_typec_free_route(struct apple_dcp_typec_port *p){return route_available?spare_route:NULL;}
 
@@ -171,7 +200,7 @@ static struct apple_dcp_typec_route *dcp_typec_free_route(struct apple_dcp_typec
 static int dcp_dptx_recover_irq(struct apple_dcp *d){return 0;}
 static void dcp_retrain_oob(struct apple_connector *c){}
 static void typec_mux_unregister(struct typec_mux_dev *m){unregisters++;}
-static void dcp_tb_binding_drain(struct apple_dcp *d){}
+static void dcp_tb_binding_drain(struct apple_dcp *);
 static void list_del(int *l){}
 static void atomic_dec(int *p){(*p)--;}
 static bool list_empty(void *l){return true;}
@@ -224,6 +253,12 @@ static void dcp_tunnel_prepare(struct apple_dcp_typec_route *r,struct mux_contro
 static u64 dcp_modes_transfer_begin(struct apple_dcp *d){return 1;}
 
 
+struct dcp_fabric_drain_ops {void(*reserve_revoke)(void*);void(*invalidate)(void*);void(*unlock)(void*);void(*drain)(void*);void(*lock)(void*);};
+static const struct dcp_fabric_drain_ops dcp_tb_drain_ops;
+static int dcp_tb_dispatch_request(void *,const struct dcp_fabric_port *);
+static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *);
+static int dcp_tb_split_teardown_locked(struct apple_dcp_typec_port *,bool);
+static int dcp_tb_split_join_locked(struct apple_dcp_typec_port *,struct apple_dcp_typec_route *,struct mux_control *,u64,int(*)(void *,bool),void *);
 /* PRODUCTION_FUNCTIONS */
 static bool dcp_fabric_run_deactivate(void *ops,struct dcp_deactivate_context *ctx){
     int ret=dcp_typec_route_deactivate(ctx->owner);
@@ -265,6 +300,38 @@ static int follow_attach_adapter(void *ctx,unsigned i,bool restore){
 static void follow_publish_adapter(void *ctx,unsigned i,bool restore){publish_calls++;}
 static void follow_lost_adapter(void *ctx,unsigned i){lost_calls++;}
 
+/* DRAIN_TABLE */
+struct apple_dpin_ctx {int lock;void *regs;struct {bool alive;} state;struct {int unused;} tokens;struct {void *dev,*connector_np;} *acio;unsigned idx;};
+struct device_node;
+struct apple_dpin_binding {struct apple_dpin_ctx *ctx;u64 generation;int (*tunnel)(struct device_node *,unsigned,u64,bool,int(*)(void *,bool),void *);};
+struct apple_dpin_provider_ops {bool(*get)(void*);bool(*held)(void*);int(*call)(void*,bool);void(*put)(void*);void *ctx;};
+static struct apple_dcp_typec_port *provider_port;
+static bool provider_split,provider_attach_error,provider_unrelated;
+static int tile_active(void *binding,bool active){assert(binding);return 0;}
+static int dcp_tb_dispatch_request(void *data,const struct dcp_fabric_port *found){
+ struct dcp_tb_attach_context *req=data;struct apple_dcp_typec_port *p=container_of(found,struct apple_dcp_typec_port,core);
+ if(provider_unrelated)return -ESTALE;
+ if(provider_split)return dcp_tb_split_locked(p,req);
+ return dcp_tb_release_locked(p,req->dpin);
+}
+static bool apple_dpin_token_access(void *tokens,u64 generation){return false;}
+static int apple_dpin_set_active(void *acio,void *regs,unsigned idx,bool active){return 0;}
+static int apple_dcp_tb_dp_tunnel(struct device_node *np,unsigned dpin,u64 generation,bool active,int(*set_active)(void *,bool),void *binding){
+ struct dcp_tb_attach_context req={.dpin=dpin,.active=active,.generation=generation,.set_active=set_active,.binding=binding};
+ return dcp_tb_dispatch(&req,&provider_port->core);
+}
+static void apple_dpin_token_revoke(void *tokens,u64 generation){}
+static int apple_dpin_dcp_set_active(void *,bool);
+/* PROVIDER_FUNCTIONS */
+static int apple_dpin_connect(struct apple_dpin_ctx *c,struct apple_dpin_binding *b,bool active){
+ struct apple_dpin_provider_ops ops={apple_dpin_provider_get,apple_dpin_provider_held,apple_dpin_provider_invoke,apple_dpin_provider_put,b};
+ return apple_dpin_provider_call(active,&ops);
+}
+#define kfree(p) free(p)
+/* RELEASE_BINDING */
+#undef kfree
+
+static void put32(u8 *b,unsigned offset,u32 value){for(unsigned i=0;i<4;i++)b[offset+i]=value>>(8*i);}
 int main(int argc,char **argv)
 {
     assert(argc==2);const char *name=argv[1];
@@ -285,6 +352,121 @@ int main(int argc,char **argv)
         .display_route_active=true,.state_valid=true,.state={.alt=&alt,.mode=TYPEC_DP_STATE_A},
         .port_altmode_dp=&alt,.dp_status=DP_STATUS_HPD_STATE|DP_STATUS_IRQ_HPD,.mux=&mux};
     c.pm.phase=CD321X_PM_RUNNING;c.update_status.status_changed=TPS_STATUS_PLUG_PRESENT;
+    if(!strncmp(name,"tile-",5)){
+        d.external=d.external_native=false;d.phy=&d;d.dptx_tunnel=true;
+        d.dptxport[1].enabled=true;d.dptxport[1].service=&other;
+        route.tunnel=true;route.tunnel_generation=d.tb_generation=7;
+        d.dptxport[0].tile_hint=true;d.dptxport[0].tiles_h=2;d.dptxport[0].tiles_v=1;
+        route.dpin[1]=&xbar;
+        if(!strncmp(name,"tile-provider-",14)){
+            struct apple_dpin_ctx c={0};typeof(*c.acio) acio={0};c.acio=&acio;struct apple_dpin_binding *binding=calloc(1,sizeof(*binding));
+            binding->ctx=&c;binding->generation=7;binding->tunnel=apple_dcp_tb_dp_tunnel;provider_port=&p;
+            provider_split=strstr(name,"split")!=NULL;c.idx=provider_split;
+            provider_unrelated=strstr(name,"unrelated")!=NULL;
+            d.tb_dpin_set_active=apple_dpin_dcp_set_active;d.tb_dpin_ctx=binding;
+            struct apple_dpin_binding *other_binding=NULL;
+            if(provider_unrelated){binding->generation=8;other_binding=calloc(1,sizeof(*other_binding));d.tb_dpin_ctx=other_binding;}
+            if(provider_split){p.split_dcp=&d;d.split.active=true;d.split.ready=false;d.split.generation=7;d.split.set_active=apple_dpin_dcp_set_active;d.split.binding=provider_unrelated?other_binding:binding;d.split.ready=provider_unrelated;d.split.xbar=&xbar;d.dptxport[1].connected=true;}
+            release_error=-EIO;
+            if(strstr(name,"attach")){
+                d.split.active=false;d.split.ready=false;d.split.generation=0;d.split.binding=NULL;d.split.set_active=NULL;p.split_dcp=NULL;
+                connect_error=-EIO;d.dptxport[1].connected=true;
+                int ret=apple_dpin_connect(&c,binding,true);assert(ret);free(binding);
+            }else apple_dpin_release_binding(binding);
+            if(!provider_unrelated){
+                if(provider_split&&d.split.set_active)d.split.set_active(d.split.binding,false);
+                else if(!provider_split&&d.tb_dpin_set_active)((int(*)(void *,bool))d.tb_dpin_set_active)(d.tb_dpin_ctx,false);
+            }
+            if(provider_unrelated){assert(d.tb_dpin_ctx==other_binding&&d.tb_generation==7);if(provider_split)assert(d.split.binding==other_binding&&d.split.generation==7&&d.split.ready);free(other_binding);d.tb_dpin_ctx=NULL;}
+            else if(provider_split){assert(p.split_dcp==&d&&d.split.active&&!d.split.ready&&!d.split.binding&&!d.split.set_active&&!d.split.generation);}
+            else {assert(p.owner==&route&&route.selected&&d.tb_retiring&&!d.tb_dpin_ctx&&!d.tb_dpin_set_active&&!d.tb_generation&&!route.tunnel_generation&&binding_drains==2);}
+            if(!provider_unrelated){
+                struct dcp_tb_attach_context next={.dpin=provider_split,.active=true,.generation=8,.set_active=tile_active,.binding=&p};
+                if(provider_split){
+                    assert(dcp_tb_split_locked(&p,&next)==-EIO&&!d.split.binding&&!d.split.generation);
+                    release_error=connect_error=0;assert(!dcp_tb_split_locked(&p,&next)&&d.split.binding==&p&&d.split.ready&&d.split.generation==8);
+                }else {
+                    assert(dcp_tb_release_locked(&p,0)==-EIO&&p.owner==&route&&!d.tb_dpin_ctx);
+                    release_error=0;assert(!dcp_tb_release_locked(&p,0)&&!p.owner&&!route.selected);
+                }
+            }
+        }else if(!strncmp(name,"tile-parent-connect-",20)){
+            d.split.active=true;d.split.ready=true;d.split.generation=7;
+            if(strstr(name,"failure"))connect_error=-EIO;
+            int ret=dcp_dptx_connect(&d,0);
+            assert(ret==connect_error&&connect_calls==2);
+        }else if(!strncmp(name,"tile-main-release-",18)){
+            if(strstr(name,"hpd"))hpd_error=-ETIMEDOUT;
+            if(strstr(name,"failure"))release_error=-EIO;
+            int ret=dcp_tb_release_locked(&p,0);
+            if(hpd_error||release_error)assert(ret&&p.owner==&route&&route.selected&&!binding_drains&&!xbar_deselections);
+            else assert(!ret&&!p.owner&&!route.selected&&binding_drains==2);
+        }else if(!strncmp(name,"tile-hint-",10)){
+            u8 payload[64]={0};struct dptxport_apcall_set_tiled reply={0};
+            struct apple_epic_service service={.cookie=&d.dptxport[0]};
+            put32(payload,0x30,2);put32(payload,0x34,1);put32(payload,0x38,5120);put32(payload,0x3c,2880);
+            if(!strcmp(name,"tile-hint-location"))put32(payload,8,2);
+            if(!strcmp(name,"tile-hint-many"))put32(payload,0x30,256);
+            if(!strcmp(name,"tile-hint-overflow")){put32(payload,0x30,0x80000002);put32(payload,0x34,2);}
+            if(!strcmp(name,"tile-hint-zero-size"))put32(payload,0x38,0);
+            if(!strcmp(name,"tile-hint-single"))put32(payload,0x30,1);
+            int ret=dptxport_call_set_tiled_display_hint(&service,payload,!strcmp(name,"tile-hint-short")?63:64,&reply,sizeof(reply));
+            assert(!ret&&reply.retcode==1);
+            assert(d.dptxport[0].tile_hint==!strcmp(name,"tile-hint-valid"));
+        }else if(!strcmp(name,"tile-follow-save-retired")){
+            struct dcp_typec_follow_slot saved={0};p.split_dcp=&d;d.split.active=true;d.split.generation=0;
+            dcp_follow_save_split(&route,&saved);assert(!saved.split&&!saved.split_binding&&!saved.split_generation);
+        }else if(!strncmp(name,"tile-follow-",12)){
+            struct dcp_typec_follow_slot slot={.port=&p,.tunnel=true,.split=true,.dpin=0,.tunnel_generation=7,.split_generation=8,.split_set_active=tile_active};
+            p.owner=NULL;d.active_typec_route=NULL;route.selected=false;
+            if(!strcmp(name,"tile-follow-source-failure"))source_error=-EIO;
+            if(!strcmp(name,"tile-follow-preselect-failure"))preselect_error=-ETIMEDOUT;
+            if(!strcmp(name,"tile-follow-main-release-failure"))release_error=-EIO;
+            int ret=dcp_follow_activate(&route,&slot);
+            if(source_error||preselect_error)assert(ret&&(p.owner==NULL)&&!route.selected&&!d.split.active&&!p.split_dcp&&!release_calls);
+            else if(release_error)assert(ret&&!p.owner&&!route.selected&&!d.split.active&&!p.split_dcp);
+            else assert(!ret&&p.owner==&route&&route.selected&&p.split_dcp==&d&&d.split.active&&d.split.ready);
+        }else if(!strcmp(name,"tile-rate-stop")||!strcmp(name,"tile-rate-error")){
+            d.split.active=true;d.split.generation=7;d.split.xbar_up=true;d.split.xbar=&xbar;d.split.clock_ok=true;
+            if(strstr(name,"error"))clock_error=-EIO;
+            int ret=dcp_tunnel_set_rate(&d,(struct phy *)&d,1,0);
+            assert(ret==clock_error&&clock_calls==1&&clock_dpin==1&&!clock_rate&&!d.split.clock_ok);
+        }else if(!strncmp(name,"tile-teardown-",14)||!strncmp(name,"tile-park-",10)){
+            p.split_dcp=&d;d.split.active=d.split.ready=true;d.split.xbar=&xbar;d.split.set_active=tile_active;d.split.binding=&p;d.dptxport[1].connected=true;
+            if(strstr(name,"hpd"))hpd_error=-ETIMEDOUT;
+            if(strstr(name,"release"))release_error=-EIO;
+            bool force=strstr(name,"remove")!=NULL;int ret;
+            if(!strncmp(name,"tile-park-",10))ret=dcp_dptx_park(&d);else ret=dcp_tb_split_teardown_locked(&p,force);
+            if((hpd_error||release_error)&&!force)assert(ret&&p.split_dcp==&d&&d.split.active&&d.split.binding==&p&&!clock_calls&&!xbar_deselections);
+            else if(!strncmp(name,"tile-park-",10))assert(!ret&&!d.dptxport[0].connected&&!d.dptxport[1].connected);
+            else assert(!ret&&!p.split_dcp&&!d.split.active&&!d.split.binding&&!d.split.xbar&&clock_calls==1&&clock_dpin==1);
+        }else{
+            struct dcp_tb_attach_context req={.dpin=1,.active=true,.generation=8,.set_active=tile_active,.binding=&p};
+            if(!strcmp(name,"tile-split-connect-failure"))connect_error=-EIO;
+            if(!strcmp(name,"tile-split-retained-connect-failure")){connect_error=-EIO;release_error=-ETIMEDOUT;d.dptxport[1].connected=true;}
+            if(!strcmp(name,"tile-split-unsupported-connect"))connect_error=-EOPNOTSUPP;
+            if(!strcmp(name,"tile-split-source-failure"))source_error=-EIO;
+            if(!strcmp(name,"tile-split-preselect-failure"))preselect_error=-ETIMEDOUT;
+            if(!strcmp(name,"tile-split-no-hint")){d.dptxport[0].tile_hint=false;p.tile_hint_deadline=0;}
+            if(!strcmp(name,"tile-split-wait-hint")){d.dptxport[0].tile_hint=false;p.tile_hint_deadline=10;}
+            int ret=dcp_tb_split_locked(&p,&req);
+            if(!strcmp(name,"tile-split-no-hint"))assert(ret==-EOPNOTSUPP&&!p.split_dcp&&!connect_calls);
+            else if(!strcmp(name,"tile-split-wait-hint"))assert(ret==-ENODEV&&!p.split_dcp&&!connect_calls);
+            else if(!strcmp(name,"tile-split-retained-connect-failure")){
+                assert(ret==-ETIMEDOUT&&p.split_dcp==&d&&d.split.active&&!d.split.ready);
+                assert(dcp_tb_split_locked(&p,&req)==-EAGAIN);
+                req.active=false;release_error=0;assert(!dcp_tb_split_locked(&p,&req)&&!p.split_dcp&&p.owner==&route);
+            }
+            else if(connect_error||source_error||preselect_error)assert(ret&&ret!=-EOPNOTSUPP&&!p.split_dcp&&!d.split.active&&p.owner==&route&&route.selected);
+            else {
+                assert(!ret&&p.split_dcp==&d&&d.split.ready&&d.dptxport[1].connected&&p.owner==&route);
+                assert(!dcp_tb_split_locked(&p,&req));
+                req.generation=9;assert(dcp_tb_split_locked(&p,&req)==-ESTALE);req.generation=8;
+                req.active=false;assert(!dcp_tb_split_locked(&p,&req)&&!p.split_dcp&&p.owner==&route);
+            }
+        }
+        return 0;
+    }
     if(!strcmp(name,"release-failure")||!strcmp(name,"release-repeat")||!strcmp(name,"safe-release-failure")||!strcmp(name,"remove-release-failure"))release_error=-EIO;
     if(!strcmp(name,"hpd-failure")||!strcmp(name,"remove-hpd-failure"))hpd_error=-ETIMEDOUT;
     if(!strcmp(name,"invalid-cache-repeat")){c.state_valid=false;release_error=-EIO;}

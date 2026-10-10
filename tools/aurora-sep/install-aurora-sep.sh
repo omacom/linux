@@ -15,6 +15,10 @@
 #   ... | bash -s -- --m3-gpu              J613: detect the supported GPU profile and persist it
 #   ... | bash -s -- --m3-profile=j613-25g83   J613 already on exact25G83: select the matched
 #                                              experimental native OpenGL profile (no migration)
+#   ... | bash -s -- --m3-profile=j615-25g83   J615 on exact25G83: the same profile, EXPERIMENTAL
+#                                              and untested on a J615 (a release must list it)
+#   ... | bash -s -- --archive-esp-history  Archive old unreferenced EFI history before installing
+#   ... | bash -s -- --esp-history          Read-only EFI history inventory
 #   ... | bash -s -- --desktop-fixes  Optional matched stable desktop fixes; unsupported versions are preserved.
 #   ... | bash -s -- --no-m3-mesa     M3 Pro: leave out the M3 Pro's Mesa (installed by default)
 #
@@ -584,11 +588,20 @@ M3_GPU_EXPERIMENT=0
 M3_GPU_PERSISTENT=0
 M3_GPU_AUTO=0
 M3_GPU_EXPLICIT_PROFILE=0
+ESP_ARCHIVE_HISTORY=0
 M3_GPU_PROFILE=legacy
 M3_STACK_ID=""
 M3_PERSISTENT_BOARDS="j613"
+# J615 uses the shared 25G83 ABI with its own board identity and stage1 list.
+# Release capability and explicit owner intent are both required for activation.
+M3_NATIVE25_BOARDS="j613"
+M3_25_J615=0
 M3_STAGE1_25_VERSIONS=""
+M3_STAGE1_25_J615_VERSIONS=""
 M3_MESA_NATIVE_MARKER=/opt/mesa-m3/25g83/share/mesa-m3/profile
+# The boards whose 25G83 sessions the installed Mesa's hook admits (mesa-m3 26.1.4.m3.2-4 on);
+# a J615 needs j615-experimental there, or its sessions stop at profile-mismatch.
+M3_MESA_NATIVE25_BOARDS=/opt/mesa-m3/share/mesa-m3/native25-boards
 M3_PROFILE_SELECTOR=j613-25g83-hal200
 M3_BOOT_PROFILE_HELPER=/usr/local/libexec/aurora-m3-boot-profile
 M3_GPU_PROFILE_FILE=/etc/mesa-m3/t8122-profile
@@ -857,7 +870,9 @@ m3_air_switches_off() {
 # The Air's switches before its owner's off switches.
 m3_air_switch_set() {
   if ((M3_GPU_PERSISTENT)); then
-    if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
+    if m3_25_j615; then
+      echo "chosen.asahi,t8122-dcp=1 chosen.asahi,t8122-gpu=1 chosen.asahi,j615-25g83-experimental=1"
+    elif [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
       echo "chosen.asahi,t8122-dcp=1 chosen.asahi,t8122-gpu=1"
     else
       echo "chosen.asahi,t8122-dcp=1 chosen.asahi,t8122-gpu=1 chosen.asahi,t8122-gpu-power-standin=1 chosen.asahi,t8122-gpu-fuse-leakage=1"
@@ -926,6 +941,7 @@ m1n1_version() {
 
 # What the handoff does on this Mac, for messages.
 m3_handoff_name() {
+  if ((M3_GPU_PERSISTENT)) && m3_25_j615; then echo "experimental J615 (untested) $M3_GPU_PROFILE GPU/display handoff"; return; fi
   if ((M3_GPU_PERSISTENT)); then echo "experimental J613 $M3_GPU_PROFILE GPU/display handoff"; return; fi
   if ! is_m3_air; then
     echo "M3 Pro display and GPU handoff"
@@ -982,6 +998,8 @@ m3_clean_stage1_14_qualified() {
 m3_stage1_problem() {
   local stage1 allowed=$M3_STAGE1_VERSIONS
   [[ $M3_GPU_PROFILE != j613-25g83 ]] || allowed=$M3_STAGE1_25_VERSIONS
+  # The J613-only 25 stage 1 refuses a J615; a J615 has its own list.
+  ! m3_25_j615 || allowed=$M3_STAGE1_25_J615_VERSIONS
   stage1=$({ tr -d '\0' <"$DT/chosen/asahi,m1n1-stage1-version"; } 2>/dev/null) || stage1=""
   if [[ -z $stage1 ]]; then
     echo "its m1n1 reports no stage 1 version"
@@ -1117,6 +1135,10 @@ m1n1_pkg_has_handoff() {
     for s in apple,j613-25g83-profile apple,j613-25g83-mapping-handoff apple,j613-25g83-gpu-handoff; do
       ((rc == 0)) && ! grep -qaxF "$s" "$bin" && rc=1
     done
+    # A J615 hands over only behind its own experimental switch, which this m1n1 must know.
+    if m3_25_j615; then
+      ((rc == 0)) && ! grep -qaxF asahi,j615-25g83-experimental "$bin" && rc=1
+    fi
   fi
   rm -f "$bin"
   return "$rc"
@@ -1268,6 +1290,8 @@ m3_plan() {
     saved=$(cat "$STATE/m3-gpu-persistent")
     if [[ $saved == legacy || $saved == j613-25g83 ]]; then
       M3_GPU_PERSISTENT=1; M3_GPU_PROFILE=$saved; M3_TRY=1
+      # Only --m3-profile=j615-25g83 records 25G83 on a J615; this release must still list it.
+      if [[ $saved == j613-25g83 && $(this_board) == j615 ]]; then M3_25_J615=1; fi
     fi
   fi
   local board problem failed variant again="run this again" air=0 kept=0
@@ -1357,6 +1381,7 @@ m3_plan() {
     return 0
   fi
   if ((M3_GPU_PERSISTENT)) && [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
+    m3_25_board_choice
     [[ -z $(m3_25_boot_problem) ]] || die "$(m3_25_boot_problem). Firmware migration is separate from a Linux package update."
   fi
   problem=$(m3_stub_problem)
@@ -1396,7 +1421,12 @@ m3_plan() {
     say "M3 ($board): this Mac has m1n1's display and GPU handoff from an earlier install; keeping it"
   fi
   if ((M3_GPU_PERSISTENT)); then
-    say "J613: installing matched experimental GPU profile $M3_GPU_PROFILE; current OS firmware is retained"
+    if m3_25_j615; then
+      say "J615: installing matched experimental GPU profile $M3_GPU_PROFILE; current OS firmware is retained"
+      m3_25_j615_warning
+    else
+      say "J613: installing matched experimental GPU profile $M3_GPU_PROFILE; current OS firmware is retained"
+    fi
   elif ((air)); then
     if m3_air_default; then
       say "M3 MacBook Air ($board, macOS $M3_STUB_VERSION stub): installing m1n1 with the $(m3_handoff_name)"
@@ -1567,6 +1597,7 @@ m3_gpu_notice() {
     say "Experimental GPU profile $M3_GPU_PROFILE is selected for subsequent boots with the matched kernel, Mesa and bootloader. The retained previous entry uses asahi.t8122_start=0 and mesa_m3=off."
     say "Reboot, log into your desktop, then run: aurora-m3-gpu-check"
     [[ $M3_GPU_PROFILE != j613-25g83 ]] || say "25G83 native OpenGL is experimental; Vulkan hardware support is unavailable."
+    if m3_25_j615; then m3_25_j615_warning; fi
     return 0
   fi
   if ((M3_GPU_EXPERIMENT)); then
@@ -4008,6 +4039,10 @@ install_all() {
   local -a entries candidate_archives=()
   release_source
   require_supported_soc
+  if ((ESP_ARCHIVE_HISTORY)); then
+    ((!READ_ONLY)) || die "--archive-esp-history changes the EFI partition and cannot be combined with --read-only"
+    esp_history_run archive
+  fi
   neo_gpu_plan
   version_notice
   sep_write_notice
@@ -6431,7 +6466,7 @@ fingerprint.
       reboot and normal desktop login, run:
         aurora-m3-gpu-check
       It checks actual Apple GPU OpenGL/Vulkan readback, not just packages.
-      Native25 remains J613-only. On a J613 already booted from its own exact26.6.2/25G83 volume group,
+      Native25 is qualified on J613. On a J613 already booted from its own exact26.6.2/25G83 volume group,
       with the source-qualified stage1 named by the matched installer:
         bash install-aurora-sep.sh --m3-profile=j613-25g83
       This selects native experimental OpenGL under /opt/mesa-m3/25g83;
@@ -6439,6 +6474,16 @@ fingerprint.
       /etc/mesa-m3/t8122-profile=j613-25g83-hal200. Firmware and loaded
       GPU identity checks must pass. Linux14 cannot select this profile;
       neither command migrates stage1 or macOS firmware.
+      J615 on 26.6.2 is EXPERIMENTAL and has not been booted on a J615.
+      It needs a J615 booted from its own 26.6.2 volume group with the
+      J615-capable stage1 v1.6.1-m3air25.stage1, and a matched installer
+      whose release lists j615 for 25G83. Then:
+        bash install-aurora-sep.sh --m3-profile=j615-25g83
+      It is the same 25G83 profile plus m1n1's
+      chosen.asahi,j615-25g83-experimental=1 switch; --m3-gpu and
+      --m3-profile=j613-25g83 never select it on a J615. Any identity
+      mismatch leaves the GPU off on the boot framebuffer. Send
+      aurora-m3-gpu-check --details and --m3-report output either way.
       A refusal leaves activation unchanged. If installation fails,
       use 'Aurora previous (GPU off)' in Limine, or the retained previous
       kernel in GRUB. Quote the failure and keep the boot report.
@@ -6557,7 +6602,10 @@ m3_gpu_auto_profile() {
   case $compat in
     14.8.3) M3_GPU_PROFILE=legacy ;;
     26.6.2)
-      [[ $(this_board) == j613 ]] || die "Native 25G83 OpenGL supports J613 only; J615 requires its supported current14 GPU firmware."
+      # --m3-gpu never selects the untested J615 25G83 path by itself.
+      [[ $(this_board) == j613 ]] || die "--m3-gpu selects native 25G83 OpenGL on a J613 only. On a J615 it is experimental:
+    with a release that lists J615 for 25G83, choose it explicitly with --m3-profile=j615-25g83.
+    Nothing was installed."
       M3_GPU_PROFILE=j613-25g83 ;;
     absent)
       M3_GPU_PROFILE=legacy
@@ -6574,21 +6622,75 @@ m3_gpu_auto_profile() {
 m3_25_boot_problem() {
   local osfw
   osfw=$({ tr -d '\0' <"$DT/chosen/asahi,os-fw-version"; } 2>/dev/null) || osfw=""
+  if [[ $(this_board) == j615 ]]; then
+    # Experimental: both the release (M3_NATIVE25_BOARDS) and the owner (M3_25_J615) opt in.
+    if ((M3_25_J615 == 0)); then
+      echo "25G83 on a J615 is experimental and needs --m3-profile=j615-25g83"
+    elif [[ " $M3_NATIVE25_BOARDS " != *" j615 "* ]]; then
+      echo "experimental J615 25G83 needs a release that lists j615 for 25G83 (this one lists: $M3_NATIVE25_BOARDS)"
+    elif [[ $(this_soc) != t8122 || $osfw != 26.6.2 ]]; then
+      echo "experimental J615 25G83 requires a J615 booted from its own 26.6.2 volume group; this boot is $(this_board) / $osfw"
+    fi
+    return 0
+  fi
+  if ((M3_25_J615)); then
+    echo "--m3-profile=j615-25g83 is for a J615; this boot is $(this_board) (a J613 uses --m3-profile=j613-25g83)"
+    return 0
+  fi
   [[ $(this_board) == j613 && $(this_soc) == t8122 && $osfw == 26.6.2 ]] ||
     echo "25G83 requires a J613 booted from its own 26.6.2 volume group; this boot is $(this_board) / $osfw"
 }
 
+# The 25G83 firmware ABI profile on a J615: experimental, behind its own switch and stage 1 list.
+m3_25_j615() {
+  [[ $M3_GPU_PROFILE == j613-25g83 && $(this_board) == j615 ]]
+}
+
+# The installed Mesa's session hook admits a J615 on the 25G83 profile (its experimental switch).
+m3_mesa_admits_j615() {
+  grep -qxF j615-experimental "$M3_MESA_NATIVE25_BOARDS" 2>/dev/null
+}
+
+# The board and the 25G83 option must agree before any firmware check.
+m3_25_board_choice() {
+  if ((M3_25_J615)) && [[ $(this_board) != j615 ]]; then
+    die "--m3-profile=j615-25g83 is for the 15-inch M3 MacBook Air (J615), and this Mac is $(this_board).
+    On a J613 use --m3-profile=j613-25g83. Nothing was installed."
+  fi
+  if ((M3_25_J615 == 0)) && [[ $(this_board) == j615 ]]; then
+    die "--m3-profile=j613-25g83 does not select 25G83 on a J615. J615 support is experimental and
+    untested: with a release that lists J615 for 25G83, choose --m3-profile=j615-25g83. Nothing was installed."
+  fi
+  return 0
+}
+
+m3_25_j615_warning() {
+  warn "J615 native OpenGL on macOS 26.6.2 (25G83) is EXPERIMENTAL and has not been qualified on a J615.
+    Only the explicit J615 profile selects this path. Firmware, board and per-Mac resource checks
+    remain required. Vulkan hardware support is unavailable for this profile.
+    'Aurora previous (GPU off)' stays in the boot menu. Speakers are unchanged by this profile.
+    Please send aurora-m3-gpu-check --details and --m3-report output, working or not."
+}
+
 m3_persistent_preflight() {
-  [[ ($(this_board) == j613 || $(this_board) == j615) && " $M3_PERSISTENT_BOARDS " == *" $(this_board) "* && $(this_soc) == t8122 ]] || die "persistent GPU activation requires a matched bundle supporting this M3 MacBook Air"
+  local boards=$M3_PERSISTENT_BOARDS s required="chosen.asahi,t8122-gpu=1 chosen.asahi,t8122-dcp=1"
+  # A J615's legacy profile is pinned to its own kernel and m1n1 pair; its 25G83 profile is a
+  # separate release capability, so it is checked against M3_NATIVE25_BOARDS alone.
+  if m3_25_j615; then
+    boards=$M3_NATIVE25_BOARDS
+    required+=" chosen.asahi,j615-25g83-experimental=1"
+  fi
+  [[ ($(this_board) == j613 || $(this_board) == j615) && " $boards " == *" $(this_board) "* && $(this_soc) == t8122 ]] || die "persistent GPU activation requires a matched bundle supporting this M3 MacBook Air"
   [[ $M3_STACK_ID =~ ^[0-9a-f]{64}$ ]] || die "persistent GPU requires an installer assembled from an exact matched stack manifest"
   ((M3_PRO_MESA)) || die "persistent GPU activation requires matching Mesa"
   [[ $M3_MODE == handoff ]] || die "persistent GPU requires a validated bootloader handoff"
   if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
+    m3_25_board_choice
     [[ -z $(m3_25_boot_problem) ]] || die "$(m3_25_boot_problem). Firmware migration is separate from a Linux package update."
   elif [[ $M3_GPU_PROFILE != legacy ]]; then
     die "unknown M3 GPU profile"
   fi
-  for s in chosen.asahi,t8122-gpu=1 chosen.asahi,t8122-dcp=1; do
+  for s in $required; do
     ! m3_air_switch_off "$s" || die "persistent GPU conflicts with an explicit owner switch-off: $s"
   done
   m3_esp_space_check
@@ -6599,6 +6701,199 @@ m3_persistent_preflight() {
 # linux-aurora UKI. Asahi ESPs are 500 MB and often hold snapshot UKIs too; refuse
 # before anything changes rather than fail mid-transaction with ENOSPC. GRUB keeps its
 # kernels in /boot, which boot_space checks.
+esp_history_builtin() {
+  cat <<'ESP_HISTORY_PY'
+#!/usr/bin/env python3
+"""Archive unreferenced EFI history while retaining boot and recovery entries."""
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import tempfile
+
+LIMIT = 32 * 1024 * 1024
+
+
+def regular(path):
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError(f'not a regular file: {path}')
+    return path
+
+
+def checked_tree(root):
+    root = root.absolute()
+    for path in (root, *root.parents):
+        if path.is_symlink():
+            raise ValueError(f'symlink in directory path: {path}')
+    if not root.is_dir():
+        raise ValueError(f'directory missing: {root}')
+    files = []
+    for directory, dirs, names in os.walk(root):
+        for name in dirs + names:
+            path = Path(directory) / name
+            if path.is_symlink():
+                raise ValueError(f'symlink in boot metadata: {path}')
+        files.extend(Path(directory) / name for name in names)
+        if len(files) > 20000:
+            raise ValueError('too many boot metadata files')
+    return files
+
+
+def digest(path):
+    with regular(path).open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def references(esp, state):
+    refs = ''
+    total = 0
+    for path in checked_tree(esp) + (checked_tree(state) if state.exists() else []):
+        if path.suffix.lower() not in ('.conf', '.cfg', '.json', '.var', '.env') and path.name not in ('BOOTAA64.EFI', 'm1n1-good', 'm1n1-failed'):
+            continue
+        total += regular(path).stat().st_size
+        if total > LIMIT:
+            raise ValueError('boot metadata exceeds read limit')
+        data = path.read_bytes()
+        refs += '\n' + data.decode('utf-8', errors='ignore').lower()
+        refs += '\n' + data.decode('utf-16-le', errors='ignore').lower()
+    if not any((esp / p).is_file() for p in ('EFI/BOOT/limine.conf', 'boot/limine/limine.conf', 'boot/limine.conf', 'limine/limine.conf', 'limine.conf')):
+        raise ValueError('Limine configuration missing; history cannot be classified')
+    return refs
+
+
+def inventory(esp, state):
+    esp, state = esp.absolute(), state.absolute()
+    refs = references(esp, state)
+    groups = [[], []]
+    for path in checked_tree(esp):
+        relative = path.relative_to(esp)
+        if len(relative.parts) == 2 and relative.parts[0] == 'm1n1' and re.fullmatch(r'boot\.bin\.before-[A-Za-z0-9._+-]+', relative.name):
+            groups[0].append(path)
+        elif 'limine_history' in relative.parts[:-1] and re.fullmatch(r'[A-Za-z0-9._+-]+\.efi', relative.name, re.I):
+            groups[1].append(path)
+    records = []
+    for group in groups:
+        newest = set(sorted(group, key=lambda p: (regular(p).stat().st_mtime_ns, p.name), reverse=True)[:2])
+        for path in sorted(group):
+            reason = 'referenced' if path.name.lower() in refs else ('recent' if path in newest else '')
+            records.append({'file':str(path.relative_to(esp)), 'bytes':regular(path).stat().st_size,
+                            'sha256':digest(path), 'protected':reason})
+    return records
+
+
+@contextlib.contextmanager
+def lock(paths):
+    fds = []
+    try:
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            fds.append(fd)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError('nonregular boot lock')
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def archive(esp, state, destination, lock_paths=None):
+    esp, state, destination = esp.absolute(), state.absolute(), destination.absolute()
+    destination.mkdir(parents=True, exist_ok=True)
+    checked_tree(destination)
+    if destination.resolve().is_relative_to(esp.resolve()) or os.stat(destination).st_dev == os.stat(esp).st_dev:
+        raise ValueError('archive must be on a different filesystem from the EFI partition')
+    with lock(lock_paths or [Path('/run/lock/boot-partition.lock'), Path('/tmp/limine-global.lock')]):
+        planned = inventory(esp, state)
+        moved = []
+        for item in planned:
+            if item['protected']:
+                continue
+            source = esp / item['file']
+            target = destination / (item['sha256'] + '.bin')
+            if target.exists():
+                if digest(target) != item['sha256']:
+                    raise ValueError('archive hash collision or damaged archive')
+            else:
+                fd, name = tempfile.mkstemp(prefix='.esp-history-', dir=destination)
+                try:
+                    with os.fdopen(fd, 'wb') as stream, regular(source).open('rb') as incoming:
+                        while chunk := incoming.read(1024 * 1024):
+                            stream.write(chunk)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if digest(Path(name)) != item['sha256']:
+                        raise ValueError('history file changed during copy')
+                    os.replace(name, target)
+                finally:
+                    if os.path.exists(name):
+                        os.unlink(name)
+            # A verified pre-existing archive may still have dirty data pages.
+            with regular(target).open('rb') as stream:
+                os.fsync(stream.fileno())
+            path_key = hashlib.sha256(item['file'].encode()).hexdigest()[:16]
+            receipt = destination / (item['sha256'] + '-' + path_key + '.receipt')
+            entry = {'original':item['file'], 'sha256':item['sha256'], 'bytes':item['bytes'], 'archive':target.name}
+            # Persist restore information before removing the FAT copy.
+            fd, name = tempfile.mkstemp(prefix='.esp-receipt-', dir=destination)
+            try:
+                with os.fdopen(fd, 'w') as stream:
+                    json.dump(entry, stream, sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+                os.replace(name, receipt)
+            finally:
+                if os.path.exists(name):os.unlink(name)
+            directory = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+            try:os.fsync(directory)
+            finally:os.close(directory)
+            # Re-read references and contents immediately before unlinking.
+            current = next((x for x in inventory(esp, state) if x['file'] == item['file']), None)
+            if current is None or current['protected'] or current['sha256'] != item['sha256']:
+                raise ValueError('boot state changed during archive; original retained')
+            source.unlink()
+            directory = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:os.fsync(directory)
+            finally:os.close(directory)
+            moved.append(entry)
+        return moved
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=('report', 'archive'))
+    parser.add_argument('--esp', type=Path, required=True)
+    parser.add_argument('--state', type=Path, default=Path('/var/lib/aurora-sep'))
+    parser.add_argument('--archive', type=Path, default=Path('/var/lib/aurora-sep/esp-history'))
+    args = parser.parse_args()
+    try:
+        if args.action == 'report':
+            result = inventory(args.esp, args.state)
+        else:
+            result = archive(args.esp, args.state, args.archive)
+        print(json.dumps(result, indent=2))
+    except (OSError, ValueError) as error:
+        parser.exit(1, f'EFI history: {error}\n')
+
+
+if __name__ == '__main__':
+    main()
+ESP_HISTORY_PY
+}
+
+esp_history_run() {
+  local target code
+  [[ $(boot_chain) == limine ]] || die "EFI history archiving is available only with Limine"
+  target=$(esp_bootbin) || die "could not find the mounted FAT boot partition"
+  code=$(esp_history_builtin)
+  $sudo python3 -c "$code" "$1" --esp "${target%/m1n1/boot.bin}" --state "$STATE" \
+    --archive "$STATE/esp-history" || die "EFI history was retained where archive checks failed; retry after checking the error"
+}
+
 m3_esp_space_check() {
   local target esp uki=0 bootbin need free
   target=$(esp_bootbin) || die "could not find the mounted FAT boot partition. Nothing was installed."
@@ -6616,7 +6911,8 @@ m3_esp_space_check() {
   [[ $free =~ ^[0-9]+$ ]] || die "could not read the free space on $esp. Nothing was installed."
   ((free >= need)) || die "the EFI partition ($esp) has ${free} MB free and the persistent GPU route needs
     about ${need} MB (a kept boot.bin, the retained GPU-off kernel and the new one). Free space there
-    first (old snapshot UKIs, limine_history). Nothing was installed."
+    first, or rerun this command with --archive-esp-history to archive unreferenced old history
+    outside the EFI partition. Active entries and recent recovery backups are retained. Nothing was installed."
 }
 
 m3_install_cleanup() {
@@ -6711,6 +7007,8 @@ m3_install_packages() {
     if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
       [[ $(cat "$M3_MESA_NATIVE_MARKER" 2>/dev/null) == j613-25g83-gl-only ]] ||
         die "matched Mesa native profile marker is missing; activation was not published"
+      ! m3_25_j615 || m3_mesa_admits_j615 ||
+        die "matched Mesa does not admit the J615 to the 25G83 profile ($M3_MESA_NATIVE25_BOARDS); activation was not published"
     fi
     m3_persistent_cmdline "$chain"
     if [[ $chain == grub ]]; then
@@ -7207,6 +7505,8 @@ m3_persistent_select() {
   if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
     [[ $(cat "$M3_MESA_NATIVE_MARKER" 2>/dev/null) == j613-25g83-gl-only ]] ||
       die "matched Mesa native profile marker is missing; experimental intent remains unchanged"
+    ! m3_25_j615 || m3_mesa_admits_j615 ||
+      die "matched Mesa does not admit the J615 to the 25G83 profile ($M3_MESA_NATIVE25_BOARDS); experimental intent remains unchanged"
   fi
   $sudo install -d -m 0755 "$dir"
   if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
@@ -7407,11 +7707,19 @@ def verify(root, env, uid, run=subprocess.run):
     if not os.access(device, os.R_OK | os.W_OK):
         reject('The GPU render node is not accessible.', 'Log out and log in again so render-group membership takes effect.')
     if native:
-        if (soc != 't8122' or b'apple,j613' not in compatible or
+        # The J615 runs the same 25G83 firmware ABI only behind m1n1's experimental switch.
+        try:
+            j615_opt_in = (root / 'proc/device-tree/chosen/asahi,j615-25g83-experimental').read_bytes() == b'1\0'
+        except OSError:
+            j615_opt_in = False
+        j613 = b'apple,j613' in compatible
+        j615 = b'apple,j615' in compatible
+        board = j613 != j615 and (j613 or j615_opt_in)
+        if (soc != 't8122' or not board or
                 (of_node / 'apple,firmware-compat').read_bytes() != bytes.fromhex('0000001a0000000600000002') or
                 (of_node / 'apple,j613-25g83-gpu-handoff').read_bytes() != bytes.fromhex('00000001') or
                 (root / prefix.lstrip('/') / 'share/mesa-m3/profile').read_text().rstrip('\n') != 'j613-25g83-gl-only'):
-            reject('Native OpenGL requires the exact J613 25G83 handoff.')
+            reject('Native OpenGL requires the exact 25G83 handoff on a J613, or J615 with the experimental opt-in.')
     elif (of_node / 'apple,j613-25g83-gpu-handoff').exists():
         reject('The native HAL200 handoff cannot use legacy Mesa.')
     abi = run([str(root / 'opt/mesa-m3/libexec/mesa-m3-abi-check'), profile, str(device)],
@@ -8013,18 +8321,24 @@ if [[ ${AURORA_SEP_SOURCE_ONLY:-} == 1 ]]; then return 0; fi
 args=()
 for a in "$@"; do
   case $a in
+    --archive-esp-history) ESP_ARCHIVE_HISTORY=1 ;;
     --neo-gpu) NEO_GPU=1 ;;
     --m3-handoff) M3_TRY=1 ;;
     --m3-gpu-experiment) M3_GPU_EXPERIMENT=1 ;;
     --m3-gpu) M3_GPU_AUTO=1; M3_GPU_PERSISTENT=1; M3_TRY=1 ;;
     --m3-gpu-persistent) M3_GPU_EXPLICIT_PROFILE=1; M3_GPU_PERSISTENT=1; M3_TRY=1 ;;
-    --m3-profile=j613-25g83) M3_GPU_EXPLICIT_PROFILE=1; M3_GPU_PROFILE=j613-25g83; M3_GPU_PERSISTENT=1; M3_TRY=1 ;;
+    --m3-profile=j613-25g83) M3_GPU_EXPLICIT_PROFILE=1; M3_GPU_PROFILE=j613-25g83; M3_GPU_PERSISTENT=1; M3_TRY=1; M3_25_J615=0 ;;
+    # The same 25G83 firmware ABI profile, admitted on a J615 as an experiment.
+    --m3-profile=j615-25g83) M3_GPU_EXPLICIT_PROFILE=1; M3_GPU_PROFILE=j613-25g83; M3_GPU_PERSISTENT=1; M3_TRY=1; M3_25_J615=1 ;;
     --no-m3-mesa) M3_PRO_MESA=0 ;;
     --desktop-fixes) DESKTOP_FIXES=1 ;;
     *) args+=("$a") ;;
   esac
 done
 set -- "${args[@]}"
+if ((ESP_ARCHIVE_HISTORY)) && [[ -n ${1:-} ]]; then
+  die "--archive-esp-history goes with an install; use --esp-history for a read-only inventory"
+fi
 if ((NEO_GPU)) && [[ -n ${1:-} && $1 != --read-only ]]; then
   die "--neo-gpu goes with an install, not with $1"
 fi
@@ -8054,9 +8368,10 @@ case ${1:-} in
   --read-only) READ_ONLY=1; install_all ;;
   --uninstall) uninstall_all ;;
   --reset-touchid) shift; reset_touchid "$@" ;;
+  --esp-history) esp_history_run report ;;
   --m3-report) m3_report ;;
   --m3-power-survey) m3_power_survey ;;
   --m3-gpu-check) shift; m3_gpu_check_run "$@" ;;
   --agent-prompt) release_source >&2; prompt_notice; agent_prompt ;;
-  *) die "unknown option $1 (--read-only, --uninstall, --reset-touchid, --agent-prompt, --m3-report, --m3-power-survey, --neo-gpu, --m3-handoff, --m3-gpu, --m3-gpu-check, --m3-gpu-experiment, --m3-gpu-persistent, --m3-profile=j613-25g83, --no-m3-mesa or --desktop-fixes)" ;;
+  *) die "unknown option $1 (--read-only, --uninstall, --reset-touchid, --agent-prompt, --m3-report, --m3-power-survey, --neo-gpu, --m3-handoff, --m3-gpu, --m3-gpu-check, --m3-gpu-experiment, --m3-gpu-persistent, --m3-profile=j613-25g83, --m3-profile=j615-25g83, --no-m3-mesa, --archive-esp-history, --esp-history or --desktop-fixes)" ;;
 esac

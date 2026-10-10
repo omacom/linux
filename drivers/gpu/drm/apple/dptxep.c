@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 /* Copyright 2022 Sven Peter <sven@svenpeter.dev> */
 
+#include <linux/unaligned.h>
 #include <linux/bitfield.h>
 #include <linux/completion.h>
 #include <linux/module.h>
@@ -79,6 +80,19 @@ struct dptxport_apcall_drive_settings {
 struct dptxport_apcall_set_tiled {
 	__le32 retcode;
 };
+
+/*
+ * SetTiledDisplayHints payload, as DCP sends it for an LG UltraFine 5K
+ * (offsets in bytes): tile location (column, row) at 0x08/0x0c, tiles
+ * across and down at 0x30/0x34, the whole display's size at 0x38/0x3c.
+ */
+#define DPTX_TILE_HINT_LOC_X	0x08
+#define DPTX_TILE_HINT_LOC_Y	0x0c
+#define DPTX_TILE_HINT_TILES_H	0x30
+#define DPTX_TILE_HINT_TILES_V	0x34
+#define DPTX_TILE_HINT_WIDTH	0x38
+#define DPTX_TILE_HINT_HEIGHT	0x3c
+#define DPTX_TILE_HINT_MIN_SIZE	0x40
 
 /*
  * Ported from aurora-silicon/linux#8: a Thunderbolt DP tunnel uses the same
@@ -578,7 +592,7 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 		 */
 		if (dptx->atcphy && service->ep->dcp->dptx_tunnel) {
 			dcp_tunnel_set_rate(service->ep->dcp, dptx->atcphy,
-					    link_rate);
+					    dptx->unit, link_rate);
 		} else if (dptx->atcphy) {
 			/* No clocked crossbar output across a PHY rate change. */
 			dcp_direct_crossbar_link(service->ep->dcp, false);
@@ -635,13 +649,41 @@ dptxport_call_get_supports_downspread(struct apple_epic_service *service,
 	return 0;
 }
 
-static int dptxport_call_set_tiled_display_hint(void *reply_,
-						 size_t reply_size)
+static int dptxport_call_set_tiled_display_hint(struct apple_epic_service *service,
+						 const void *data, size_t data_size,
+						 void *reply_, size_t reply_size)
 {
 	struct dptxport_apcall_set_tiled *reply = reply_;
+	struct dptx_port *dptx = service->cookie;
+	const u8 *hint = data;
 
 	if (reply_size < sizeof(*reply))
 		return -EINVAL;
+
+	if (dptx)
+		smp_store_release(&dptx->tile_hint, false);
+	if (dptx && data_size >= DPTX_TILE_HINT_MIN_SIZE) {
+		u32 h = get_unaligned_le32(hint + DPTX_TILE_HINT_TILES_H);
+		u32 v = get_unaligned_le32(hint + DPTX_TILE_HINT_TILES_V);
+		u32 x = get_unaligned_le32(hint + DPTX_TILE_HINT_LOC_X);
+		u32 y = get_unaligned_le32(hint + DPTX_TILE_HINT_LOC_Y);
+
+		dptx->tiles_h = min(h, 255U);
+		dptx->tiles_v = min(v, 255U);
+		dptx->tile_x = min(x, 255U);
+		dptx->tile_y = min(y, 255U);
+		/* Only the two horizontal tiles carried by these two ports fit. */
+		smp_store_release(&dptx->tile_hint,
+				  h == 2 && v == 1 && x == dptx->unit && y == 0 &&
+				  get_unaligned_le32(hint + DPTX_TILE_HINT_WIDTH) &&
+				  get_unaligned_le32(hint + DPTX_TILE_HINT_HEIGHT));
+		if (h > 1 || v > 1)
+			dev_info(service->ep->dcp->dev,
+				 "DPTXPort: port %u carries tile (%u,%u) of a %ux%u tiled %ux%u display\n",
+				 dptx->unit, x, y, h, v,
+				 get_unaligned_le32(hint + DPTX_TILE_HINT_WIDTH),
+				 get_unaligned_le32(hint + DPTX_TILE_HINT_HEIGHT));
+	}
 
 	reply->retcode = cpu_to_le32(1);
 	return 0;
@@ -666,7 +708,7 @@ dptxport_call_activate(struct apple_epic_service *service,
 	if (dptx->atcphy && !dcp->phy_managed_by_typec)
 		phy_set_mode_ext(dptx->atcphy, PHY_MODE_DP, dcp->index);
 	if (dcp->dptx_tunnel)
-		dcp_tunnel_dpin_activate(dcp, true);
+		dcp_tunnel_dpin_activate(dcp, dptx->unit, true);
 
 	memcpy(reply, data, min(reply_size, data_size));
 	if (reply_size >= 4)
@@ -685,7 +727,7 @@ dptxport_call_deactivate(struct apple_epic_service *service,
 
 	dev_info(dcp->dev, "DPTXPort: DEACTIVATE\n");
 	if (dcp->dptx_tunnel)
-		dcp_tunnel_dpin_activate(dcp, false);
+		dcp_tunnel_dpin_activate(dcp, dptx->unit, false);
 	else
 		dcp_direct_crossbar_link(dcp, false);
 	if (dptx->atcphy && !dcp->phy_managed_by_typec)
@@ -719,7 +761,7 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		 * first.
 		 */
 		if (service->ep->dcp->dptx_tunnel && dptx->link_rate)
-			dcp_tunnel_crossbar_down(service->ep->dcp);
+			dcp_tunnel_crossbar_down(service->ep->dcp, dptx->unit);
 		else if (dptx->link_rate)
 			dcp_direct_crossbar_link(service->ep->dcp, false);
 		return dptxport_call_will_change_link_config(service);
@@ -727,7 +769,7 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		int ret = dptxport_call_did_change_link_config(service);
 
 		if (!ret && service->ep->dcp->dptx_tunnel && dptx->link_rate)
-			dcp_tunnel_crossbar_up(service->ep->dcp);
+			dcp_tunnel_crossbar_up(service->ep->dcp, dptx->unit);
 		else if (!ret && dptx->link_rate)
 			dcp_direct_crossbar_link(service->ep->dcp, true);
 		if (!ret)
@@ -776,7 +818,9 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		return 0;
 	case DPTX_APCALL_SET_TILED_DISPLAY_HINTS:
 		memcpy(reply, data, min(reply_size, data_size));
-		return dptxport_call_set_tiled_display_hint(reply, reply_size);
+		return dptxport_call_set_tiled_display_hint(service, data,
+							    data_size, reply,
+							    reply_size);
 	case DPTX_APCALL_GET_DRIVE_SETTINGS:
 		return dptxport_call_get_drive_settings(service, data, data_size,
 							reply, reply_size);
