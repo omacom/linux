@@ -16,6 +16,7 @@ typedef uint32_t u32; typedef uint64_t u64; typedef uint8_t u8;
 #define JOIN(a,b) JOIN_(a,b)
 #define guard(x) __attribute__((unused)) void *JOIN(_guard_,__LINE__) =
 #define scoped_guard(x,p) for (bool once=true; once; once=false)
+#define lockdep_assert_not_held(x) ((void)0)
 #define lockdep_assert_held(x) ((void)0)
 #define dev_warn(...) ((void)0)
 #define dev_info(...) ((void)0)
@@ -112,7 +113,8 @@ struct apple_dcp {void *dev; bool external,external_native,external_link_ready;
     int fixed_connector_type,connector_type,fixed_mux_index;
     struct mux_control *xbar;bool fixed_route_selected;
     struct {void *phy;int dptx_phy;} typec_routes[1];};
-struct apple_dcp_typec_port {bool applied_valid,hpd,dp_wanted,dp_hpd;
+struct dcp_fabric_port {int unused;};
+struct apple_dcp_typec_port {struct dcp_fabric_port core;bool applied_valid,hpd,dp_wanted,dp_hpd;
     void *applied_alt; int applied_mode; u32 applied_status,applied_conf;
     struct apple_dcp_typec_route *owner,*secondary_owner,*preferred_route,*target;struct apple_connector *connector,*secondary_connector;
     struct apple_dcp *split_dcp;unsigned long tile_hint_deadline;struct {int count;} routes; int link; void *connector_np;};
@@ -170,7 +172,7 @@ static void reinit_completion(int *c){}
 static void disconnected_hpd_event(struct apple_connector *c){if(c)c->connected=false;}
 static void av_service_disconnect(struct apple_dcp *d){}
 static void cancel_delayed_work(struct delayed_work *w){}
-static void cancel_delayed_work_sync(struct delayed_work *w){}
+static void cancel_delayed_work_sync(struct delayed_work *w){binding_drains++;}
 static struct apple_dcp_typec_route *typec_mux_get_drvdata(struct typec_mux_dev *m){return m->data;}
 static bool dcp_typec_keep_order(void){return keep_order;}
 static struct apple_dcp_typec_route *dcp_typec_rebalance_locked(void *a,int b){rebalance_calls++;return NULL;}
@@ -198,7 +200,7 @@ static struct apple_dcp_typec_route *dcp_typec_free_route(struct apple_dcp_typec
 static int dcp_dptx_recover_irq(struct apple_dcp *d){return 0;}
 static void dcp_retrain_oob(struct apple_connector *c){}
 static void typec_mux_unregister(struct typec_mux_dev *m){unregisters++;}
-static void dcp_tb_binding_drain(struct apple_dcp *d){binding_drains++;}
+static void dcp_tb_binding_drain(struct apple_dcp *);
 static void list_del(int *l){}
 static void atomic_dec(int *p){(*p)--;}
 static bool list_empty(void *l){return true;}
@@ -251,6 +253,9 @@ static void dcp_tunnel_prepare(struct apple_dcp_typec_route *r,struct mux_contro
 static u64 dcp_modes_transfer_begin(struct apple_dcp *d){return 1;}
 
 
+struct dcp_fabric_drain_ops {void(*reserve_revoke)(void*);void(*invalidate)(void*);void(*unlock)(void*);void(*drain)(void*);void(*lock)(void*);};
+static const struct dcp_fabric_drain_ops dcp_tb_drain_ops;
+static int dcp_tb_dispatch_request(void *,const struct dcp_fabric_port *);
 static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *);
 static int dcp_tb_split_teardown_locked(struct apple_dcp_typec_port *,bool);
 static int dcp_tb_split_join_locked(struct apple_dcp_typec_port *,struct apple_dcp_typec_route *,struct mux_control *,u64,int(*)(void *,bool),void *);
@@ -295,7 +300,37 @@ static int follow_attach_adapter(void *ctx,unsigned i,bool restore){
 static void follow_publish_adapter(void *ctx,unsigned i,bool restore){publish_calls++;}
 static void follow_lost_adapter(void *ctx,unsigned i){lost_calls++;}
 
-static int tile_active(void *binding,bool active){return 0;}
+/* DRAIN_TABLE */
+struct apple_dpin_ctx {int lock;void *regs;struct {bool alive;} state;struct {int unused;} tokens;struct {void *dev,*connector_np;} *acio;unsigned idx;};
+struct device_node;
+struct apple_dpin_binding {struct apple_dpin_ctx *ctx;u64 generation;int (*tunnel)(struct device_node *,unsigned,u64,bool,int(*)(void *,bool),void *);};
+struct apple_dpin_provider_ops {bool(*get)(void*);bool(*held)(void*);int(*call)(void*,bool);void(*put)(void*);void *ctx;};
+static struct apple_dcp_typec_port *provider_port;
+static bool provider_split,provider_attach_error,provider_unrelated;
+static int tile_active(void *binding,bool active){assert(binding);return 0;}
+static int dcp_tb_dispatch_request(void *data,const struct dcp_fabric_port *found){
+ struct dcp_tb_attach_context *req=data;struct apple_dcp_typec_port *p=container_of(found,struct apple_dcp_typec_port,core);
+ if(provider_unrelated)return -ESTALE;
+ if(provider_split)return dcp_tb_split_locked(p,req);
+ return dcp_tb_release_locked(p,req->dpin);
+}
+static bool apple_dpin_token_access(void *tokens,u64 generation){return false;}
+static int apple_dpin_set_active(void *acio,void *regs,unsigned idx,bool active){return 0;}
+static int apple_dcp_tb_dp_tunnel(struct device_node *np,unsigned dpin,u64 generation,bool active,int(*set_active)(void *,bool),void *binding){
+ struct dcp_tb_attach_context req={.dpin=dpin,.active=active,.generation=generation,.set_active=set_active,.binding=binding};
+ return dcp_tb_dispatch(&req,&provider_port->core);
+}
+static void apple_dpin_token_revoke(void *tokens,u64 generation){}
+static int apple_dpin_dcp_set_active(void *,bool);
+/* PROVIDER_FUNCTIONS */
+static int apple_dpin_connect(struct apple_dpin_ctx *c,struct apple_dpin_binding *b,bool active){
+ struct apple_dpin_provider_ops ops={apple_dpin_provider_get,apple_dpin_provider_held,apple_dpin_provider_invoke,apple_dpin_provider_put,b};
+ return apple_dpin_provider_call(active,&ops);
+}
+#define kfree(p) free(p)
+/* RELEASE_BINDING */
+#undef kfree
+
 static void put32(u8 *b,unsigned offset,u32 value){for(unsigned i=0;i<4;i++)b[offset+i]=value>>(8*i);}
 int main(int argc,char **argv)
 {
@@ -323,8 +358,40 @@ int main(int argc,char **argv)
         route.tunnel=true;route.tunnel_generation=d.tb_generation=7;
         d.dptxport[0].tile_hint=true;d.dptxport[0].tiles_h=2;d.dptxport[0].tiles_v=1;
         route.dpin[1]=&xbar;
-        if(!strncmp(name,"tile-parent-connect-",20)){
-            d.split.active=true;d.split.ready=true;
+        if(!strncmp(name,"tile-provider-",14)){
+            struct apple_dpin_ctx c={0};typeof(*c.acio) acio={0};c.acio=&acio;struct apple_dpin_binding *binding=calloc(1,sizeof(*binding));
+            binding->ctx=&c;binding->generation=7;binding->tunnel=apple_dcp_tb_dp_tunnel;provider_port=&p;
+            provider_split=strstr(name,"split")!=NULL;c.idx=provider_split;
+            provider_unrelated=strstr(name,"unrelated")!=NULL;
+            d.tb_dpin_set_active=apple_dpin_dcp_set_active;d.tb_dpin_ctx=binding;
+            struct apple_dpin_binding *other_binding=NULL;
+            if(provider_unrelated){binding->generation=8;other_binding=calloc(1,sizeof(*other_binding));d.tb_dpin_ctx=other_binding;}
+            if(provider_split){p.split_dcp=&d;d.split.active=true;d.split.ready=false;d.split.generation=7;d.split.set_active=apple_dpin_dcp_set_active;d.split.binding=provider_unrelated?other_binding:binding;d.split.ready=provider_unrelated;d.split.xbar=&xbar;d.dptxport[1].connected=true;}
+            release_error=-EIO;
+            if(strstr(name,"attach")){
+                d.split.active=false;d.split.ready=false;d.split.generation=0;d.split.binding=NULL;d.split.set_active=NULL;p.split_dcp=NULL;
+                connect_error=-EIO;d.dptxport[1].connected=true;
+                int ret=apple_dpin_connect(&c,binding,true);assert(ret);free(binding);
+            }else apple_dpin_release_binding(binding);
+            if(!provider_unrelated){
+                if(provider_split&&d.split.set_active)d.split.set_active(d.split.binding,false);
+                else if(!provider_split&&d.tb_dpin_set_active)((int(*)(void *,bool))d.tb_dpin_set_active)(d.tb_dpin_ctx,false);
+            }
+            if(provider_unrelated){assert(d.tb_dpin_ctx==other_binding&&d.tb_generation==7);if(provider_split)assert(d.split.binding==other_binding&&d.split.generation==7&&d.split.ready);free(other_binding);d.tb_dpin_ctx=NULL;}
+            else if(provider_split){assert(p.split_dcp==&d&&d.split.active&&!d.split.ready&&!d.split.binding&&!d.split.set_active&&!d.split.generation);}
+            else {assert(p.owner==&route&&route.selected&&d.tb_retiring&&!d.tb_dpin_ctx&&!d.tb_dpin_set_active&&!d.tb_generation&&!route.tunnel_generation&&binding_drains==2);}
+            if(!provider_unrelated){
+                struct dcp_tb_attach_context next={.dpin=provider_split,.active=true,.generation=8,.set_active=tile_active,.binding=&p};
+                if(provider_split){
+                    assert(dcp_tb_split_locked(&p,&next)==-EIO&&!d.split.binding&&!d.split.generation);
+                    release_error=connect_error=0;assert(!dcp_tb_split_locked(&p,&next)&&d.split.binding==&p&&d.split.ready&&d.split.generation==8);
+                }else {
+                    assert(dcp_tb_release_locked(&p,0)==-EIO&&p.owner==&route&&!d.tb_dpin_ctx);
+                    release_error=0;assert(!dcp_tb_release_locked(&p,0)&&!p.owner&&!route.selected);
+                }
+            }
+        }else if(!strncmp(name,"tile-parent-connect-",20)){
+            d.split.active=true;d.split.ready=true;d.split.generation=7;
             if(strstr(name,"failure"))connect_error=-EIO;
             int ret=dcp_dptx_connect(&d,0);
             assert(ret==connect_error&&connect_calls==2);
@@ -333,7 +400,7 @@ int main(int argc,char **argv)
             if(strstr(name,"failure"))release_error=-EIO;
             int ret=dcp_tb_release_locked(&p,0);
             if(hpd_error||release_error)assert(ret&&p.owner==&route&&route.selected&&!binding_drains&&!xbar_deselections);
-            else assert(!ret&&!p.owner&&!route.selected&&binding_drains==1);
+            else assert(!ret&&!p.owner&&!route.selected&&binding_drains==2);
         }else if(!strncmp(name,"tile-hint-",10)){
             u8 payload[64]={0};struct dptxport_apcall_set_tiled reply={0};
             struct apple_epic_service service={.cookie=&d.dptxport[0]};
@@ -346,6 +413,9 @@ int main(int argc,char **argv)
             int ret=dptxport_call_set_tiled_display_hint(&service,payload,!strcmp(name,"tile-hint-short")?63:64,&reply,sizeof(reply));
             assert(!ret&&reply.retcode==1);
             assert(d.dptxport[0].tile_hint==!strcmp(name,"tile-hint-valid"));
+        }else if(!strcmp(name,"tile-follow-save-retired")){
+            struct dcp_typec_follow_slot saved={0};p.split_dcp=&d;d.split.active=true;d.split.generation=0;
+            dcp_follow_save_split(&route,&saved);assert(!saved.split&&!saved.split_binding&&!saved.split_generation);
         }else if(!strncmp(name,"tile-follow-",12)){
             struct dcp_typec_follow_slot slot={.port=&p,.tunnel=true,.split=true,.dpin=0,.tunnel_generation=7,.split_generation=8,.split_set_active=tile_active};
             p.owner=NULL;d.active_typec_route=NULL;route.selected=false;
@@ -357,7 +427,7 @@ int main(int argc,char **argv)
             else if(release_error)assert(ret&&!p.owner&&!route.selected&&!d.split.active&&!p.split_dcp);
             else assert(!ret&&p.owner==&route&&route.selected&&p.split_dcp==&d&&d.split.active&&d.split.ready);
         }else if(!strcmp(name,"tile-rate-stop")||!strcmp(name,"tile-rate-error")){
-            d.split.active=true;d.split.xbar_up=true;d.split.xbar=&xbar;d.split.clock_ok=true;
+            d.split.active=true;d.split.generation=7;d.split.xbar_up=true;d.split.xbar=&xbar;d.split.clock_ok=true;
             if(strstr(name,"error"))clock_error=-EIO;
             int ret=dcp_tunnel_set_rate(&d,(struct phy *)&d,1,0);
             assert(ret==clock_error&&clock_calls==1&&clock_dpin==1&&!clock_rate&&!d.split.clock_ok);

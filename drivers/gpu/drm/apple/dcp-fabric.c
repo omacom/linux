@@ -1492,7 +1492,7 @@ static int dcp_tunnel_split_up_locked(struct apple_dcp *dcp)
 	int ret;
 
 	lockdep_assert_held(&dcp->tb_lock);
-	if (!dcp->split.active || !dcp->split.xbar)
+	if (!dcp->split.active || !dcp->split.generation || !dcp->split.xbar)
 		return -ENODEV;
 	if (!dcp->split.clock_ok) {
 		dev_warn(dcp->dev, "tiled: no DP tunnel pixel clock, dpin1 crossbar left down\n");
@@ -1648,7 +1648,7 @@ int dcp_tunnel_set_rate(struct apple_dcp *dcp, struct phy *phy, u32 unit,
 	if (unit) {
 		/* Each DP IN owns a reference, including on a shared clock. */
 		ret = 0;
-		if (!dcp->split.active) {
+		if (!dcp->split.active || !dcp->split.generation) {
 			ret = -ENODEV;
 		} else {
 			if (!link_rate && dcp->split.xbar_up)
@@ -1683,7 +1683,7 @@ int dcp_tunnel_dpin_activate(struct apple_dcp *dcp, u32 unit, bool active)
 	if (!dcp->dptx_tunnel)
 		return 0;
 	if (unit) {
-		if (!dcp->split.active || !dcp->split.set_active)
+		if (!dcp->split.active || !dcp->split.generation || !dcp->split.set_active)
 			return 0;
 		return dcp->split.set_active(dcp->split.binding, active);
 	}
@@ -1729,6 +1729,8 @@ static void dcp_tb_reserve_revoke(void *data)
 	WRITE_ONCE(dcp->tb_retiring, true);
 	scoped_guard(mutex, &dcp->tb_lock) {
 		dcp->tb_generation = 0;
+		if (dcp->active_typec_route && dcp->active_typec_route->tunnel)
+			dcp->active_typec_route->tunnel_generation = 0;
 		dcp->tb_dpin_set_active = NULL;
 		dcp->tb_dpin_ctx = NULL;
 	}
@@ -2077,6 +2079,12 @@ static int dcp_tb_split_locked(struct apple_dcp_typec_port *port,
 	int ret, release;
 
 	lockdep_assert_held(&dcp_typec_fabric_lock);
+	/* A retired provider leaves only hardware ownership to retry. */
+	if (port->split_dcp && !port->split_dcp->split.generation) {
+		ret = dcp_tb_split_teardown_locked(port, false);
+		if (ret || !req->active)
+			return ret;
+	}
 	if (port->split_dcp) {
 		dcp = port->split_dcp;
 		scoped_guard(mutex, &dcp->tb_lock)
@@ -2168,7 +2176,7 @@ static int dcp_tb_release_locked(struct apple_dcp_typec_port *port,
 	return ret;
 }
 
-static int dcp_tb_dispatch(void *data, const struct dcp_fabric_port *found)
+static int dcp_tb_dispatch_request(void *data, const struct dcp_fabric_port *found)
 {
 	struct dcp_tb_attach_context *ctx = data;
 	struct apple_dcp_typec_port *port =
@@ -2183,6 +2191,12 @@ static int dcp_tb_dispatch(void *data, const struct dcp_fabric_port *found)
 	if (dpin == 1 && (tiled_split || port->split_dcp)) {
 		ret = dcp_tb_split_locked(port, ctx);
 		if (ret != -EOPNOTSUPP)
+			return ret;
+	}
+	if (*slot && (*slot)->tunnel && (*slot)->tunnel_dpin == dpin &&
+	    !(*slot)->tunnel_generation && READ_ONCE((*slot)->dcp->tb_retiring)) {
+		ret = dcp_tb_release_locked(port, dpin);
+		if (ret || !ctx->active)
 			return ret;
 	}
 	if (*slot && (*slot)->tunnel && (*slot)->tunnel_dpin == dpin) {
@@ -2239,6 +2253,53 @@ static int dcp_tb_dispatch(void *data, const struct dcp_fabric_port *found)
 	/* A failed arriving stream releases its reserved plan to the others. */
 	if (ret && ret != -ESHUTDOWN && ctx->planned)
 		dcp_typec_rebalance_locked(NULL, 0);
+	return ret;
+}
+
+/* Failed attach and every detach return before the provider frees its binding. */
+static void dcp_tb_finish_request(struct apple_dcp_typec_port *port,
+				  const struct dcp_tb_attach_context *request)
+{
+	struct apple_dcp_typec_route *route = request->dpin ?
+		port->secondary_owner : port->owner;
+	struct apple_dcp *dcp;
+	bool matching;
+
+	if (request->dpin == 1 && port->split_dcp) {
+		dcp = port->split_dcp;
+		scoped_guard(mutex, &dcp->tb_lock) {
+			if (dcp->split.generation == request->generation &&
+			    (!request->active ||
+			     (dcp->split.binding == request->binding &&
+			      dcp->split.set_active == request->set_active))) {
+				dcp->split.set_active = NULL;
+				dcp->split.binding = NULL;
+				dcp->split.generation = 0;
+				dcp->split.ready = false;
+			}
+		}
+	}
+	if (!route || !route->tunnel)
+		return;
+	dcp = route->dcp;
+	scoped_guard(mutex, &dcp->tb_lock)
+		matching = dcp->tb_generation == request->generation &&
+			   (!request->active ||
+			    (dcp->tb_dpin_ctx == request->binding &&
+			     dcp->tb_dpin_set_active == request->set_active));
+	if (matching)
+		dcp_tb_binding_drain(dcp);
+}
+
+static int dcp_tb_dispatch(void *data, const struct dcp_fabric_port *found)
+{
+	struct dcp_tb_attach_context *request = data;
+	struct apple_dcp_typec_port *port =
+		container_of(found, struct apple_dcp_typec_port, core);
+	int ret = dcp_tb_dispatch_request(data, found);
+
+	if (ret || !request->active)
+		dcp_tb_finish_request(port, request);
 	return ret;
 }
 
@@ -2320,8 +2381,10 @@ static void dcp_follow_save_split(struct apple_dcp_typec_route *route,
 
 	if (route->port->split_dcp != dcp)
 		return;
-	slot->split = true;
 	scoped_guard(mutex, &dcp->tb_lock) {
+		if (!dcp->split.generation || !dcp->split.set_active)
+			return;
+		slot->split = true;
 		slot->split_generation = dcp->split.generation;
 		slot->split_set_active = dcp->split.set_active;
 		slot->split_binding = dcp->split.binding;
