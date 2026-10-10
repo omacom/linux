@@ -16,7 +16,7 @@ Check acceleration from the graphical session:
 
 The probe checks the renderer, OpenGL color/depth and indexed drawing, multiple render targets, and Vulkan compute results. A package build or shader test does not replace these checks on the Neo itself.
 
-Selection requires the installed `j700-g17p-hal200` marker, `/etc/mesa-neo/gpu-experiment`, and a T8140 render node whose queried parameters match G17P, USC3, HAL200, the synchronization features and virtual address range. Missing intent or a mismatch selects software rendering. Existing graphical sessions must restart after installation.
+Selection requires the installed `j700-g17p-hal200` marker, `/etc/mesa-neo/gpu-experiment`, and a T8140 render node whose queried parameters match G17P, USC3, HAL200, the synchronization features and virtual address range. A native graphical session also requires a connected display on the Neo display controller. A simpledrm-only desktop, missing intent or an ABI mismatch selects software rendering. Existing graphical sessions must restart after installation.
 
 To select software rendering:
 

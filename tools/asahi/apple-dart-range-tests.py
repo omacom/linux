@@ -42,7 +42,7 @@ struct io_pgtable { struct io_pgtable_cfg cfg; };
 struct apple_dart;
 struct apple_dart_stream_map { struct apple_dart *dart; unsigned long sidmap[1]; };
 struct apple_dart_hw { int (*invalidate_tlb)(struct apple_dart_stream_map *); };
-struct apple_dart { int num_streams, locked, version; void *dev; struct apple_dart_hw *hw; };
+struct apple_dart { int num_streams, locked, version, fw_mirror; void *dev; struct apple_dart_hw *hw; };
 struct apple_dart_atomic_stream_map { struct apple_dart *dart; unsigned long sidmap[1]; };
 struct apple_dart_domain {
  void *pgtbl_ops; struct apple_dart_atomic_stream_map streams[2]; int count;
@@ -53,12 +53,15 @@ static int powered, power_error, sync_error, range_error, syncs, ranges, fulls;
 static u64 seen_first, seen_last;
 static int pm_runtime_resume_and_get(void *dev) { if (power_error) return power_error; powered++; return 0; }
 static void pm_runtime_put(void *dev) { assert(powered>0); powered--; }
-static int apple_dart_hw_sync_locked(struct io_pgtable_cfg *cfg, struct apple_dart_stream_map *stream) {
- syncs++; return sync_error;
+static int apple_dart_hw_sync_locked(struct io_pgtable_cfg *cfg, struct apple_dart_stream_map *stream, bool defer_unknown) {
+ assert(defer_unknown); syncs++; return sync_error;
 }
 static int apple_dart_t8110_hw_tlb_command_range(struct apple_dart_stream_map *stream,
  int command, bool range, u64 first, u64 last) {
  assert(command==1 && range); ranges++; seen_first=first; seen_last=last; return range_error;
+}
+static int apple_dart_fw_invalidate(struct apple_dart_stream_map *stream,u64 first,u64 last) {
+ return apple_dart_t8110_hw_tlb_command_range(stream,1,true,first,last);
 }
 static int full(struct apple_dart_stream_map *stream) { fulls++; return 0; }
 '''
