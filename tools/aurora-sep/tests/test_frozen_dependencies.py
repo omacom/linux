@@ -78,6 +78,43 @@ class FrozenDependencies(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in (self.p/'work').glob('*.pkg.tar.gz')),[candidate.name])
         return result
 
+    def add_sync_record(self, name, raw):
+        original_db = self.db
+        def augmented():
+            original_db()
+            path = self.p/'db/sync/fixture.db'
+            with tarfile.open(path) as db:
+                records = [(entry, db.extractfile(entry).read() if entry.isfile() else None)
+                           for entry in db]
+            with tarfile.open(path, 'w') as db:
+                for entry, data in records:
+                    db.addfile(entry, io.BytesIO(data) if data is not None else None)
+                entry = tarfile.TarInfo(name); entry.size = len(raw)
+                db.addfile(entry, io.BytesIO(raw))
+        self.db = augmented
+
+    def test_all_zero_sync_record_does_not_block_missing_dependency(self):
+        self.pkg('fprintd')
+        self.add_sync_record('findnewest-0.3-4/desc', b'\0' * 1271)
+        receipt = self.call(self.pkg('aurora-touchid', local=True))
+        self.assertEqual([p['name'] for p in receipt['dependencies']], ['fprintd'])
+
+    def test_malformed_nonzero_sync_record_still_refused_with_location(self):
+        self.pkg('fprintd')
+        self.add_sync_record('broken-1-1/desc', b'\0bad')
+        result = self.call(self.pkg('aurora-touchid', local=True), okay=False)
+        self.assertIn('fixture.db:broken-1-1/desc', result.stderr)
+
+    def test_zero_sync_record_cannot_supply_missing_provider(self):
+        self.add_sync_record('fprintd-1-1/desc', b'\0' * 1271)
+        result = self.call(self.pkg('aurora-touchid', local=True), okay=False)
+        self.assertIn('No unique missing provider for fprintd', result.stderr)
+
+    def test_zero_local_record_still_refused(self):
+        self.installed('fprintd')
+        (self.p/'db/local/fprintd-1-1/desc').write_bytes(b'\0' * 1271)
+        self.call(self.pkg('aurora-touchid', local=True), okay=False)
+
     def test_missing_transitive_under_full_freeze(self):
         self.pkg('libgusb'); self.pkg('fprintd',depends=['libgusb']); self.pkg('touch-helper')
         candidate=self.pkg('aurora-touchid',depends=['touch-helper'],local=True)
@@ -241,3 +278,36 @@ class FrozenDependencies(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@unittest.skipUnless(shutil.which('sudo') and os.geteuid() != 0,
+                     'unprivileged sudo fixture required')
+class RootPrivateTransaction(unittest.TestCase):
+    def test_both_checks_accept_root_private_config_and_refuse_missing(self):
+        if subprocess.run(['sudo', '-n', 'true'], capture_output=True).returncode:
+            self.skipTest('passwordless sudo fixture required')
+        with tempfile.TemporaryDirectory(prefix='aurora-root-config-') as tmp:
+            outer = Path(tmp); outer.chmod(0o755)
+            private = outer/'private'; config = private/'transaction.conf'
+            subprocess.run(['sudo', '-n', 'python3', '-c',
+                'import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.mkdir(mode=0o700); (p/"transaction.conf").write_text("[options]\\nIgnorePkg = *\\n")',
+                str(private)], check=True)
+            try:
+                self.assertFalse(config.is_file())
+                checks = [line.strip() for line in INSTALLER.read_text().splitlines()
+                          if '|| die "missing admitted' in line and 'transaction' in line]
+                self.assertEqual(len(checks), 2)
+                for check in checks:
+                    script = 'sudo="sudo -n"; FROZEN_TRANSACTION_CONFIG=$1; die() { exit 23; }; '+check
+                    for path, code in ((config, 0), (private/'missing.conf', 23)):
+                        result = subprocess.run(['bash', '-c', script, 'fixture', str(path)],
+                                                capture_output=True, text=True)
+                        self.assertEqual(result.returncode, code, result.stderr)
+                    old = check.replace('$sudo test -f "$FROZEN_TRANSACTION_CONFIG"',
+                                        '[[ -f $FROZEN_TRANSACTION_CONFIG ]]')
+                    result = subprocess.run(['bash', '-c',
+                        'FROZEN_TRANSACTION_CONFIG=$1; die() { exit 23; }; '+old,
+                        'fixture', str(config)], capture_output=True)
+                    self.assertEqual(result.returncode, 23)
+            finally:
+                subprocess.run(['sudo', '-n', 'rm', '-rf', '--', str(private)], check=True)

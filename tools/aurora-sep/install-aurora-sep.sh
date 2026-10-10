@@ -3733,7 +3733,13 @@ def database(root, repositories):
         with tarfile.open(root / "sync" / (repo + ".db")) as db:
             for entry in db:
                 if entry.isfile() and entry.name.endswith("/desc"):
-                    pkg = metadata(db.extractfile(entry).read().decode())
+                    raw = db.extractfile(entry).read()
+                    if raw and not raw.strip(b"\0"):
+                        continue
+                    try:
+                        pkg = metadata(raw.decode())
+                    except (ValueError, UnicodeError) as error:
+                        raise ValueError(f"{repo}.db:{entry.name}: {error}") from error
                     pkg["repo"] = repo
                     available.append(pkg)
     return installed, available
@@ -3956,7 +3962,7 @@ import json, sys
 print(json.load(open(sys.argv[1]))['transaction_config'])
 FROZEN_CONFIG_PY
   )
-  [[ -f $FROZEN_TRANSACTION_CONFIG ]] || die "missing admitted package transaction configuration"
+  $sudo test -f "$FROZEN_TRANSACTION_CONFIG" || die "missing admitted package transaction configuration"
   python3 - "$work/dependency-result.json" >"$work/dependency-files" <<'FROZEN_FILES_PY'
 import json, sys
 plan = json.load(open(sys.argv[1]))
@@ -6692,7 +6698,7 @@ m3_install_packages() {
   # succeeded. The custom GPU-off entry was registered before this call.
   if ((M3_GPU_PERSISTENT)) && [[ $chain == limine ]]; then m3_persistent_cmdline "$chain" 0; fi
   if ((FROZEN_PACKAGES)); then
-    [[ -f $FROZEN_TRANSACTION_CONFIG ]] || die "missing admitted frozen package transaction"
+    $sudo test -f "$FROZEN_TRANSACTION_CONFIG" || die "missing admitted frozen package transaction"
     $sudo pacman -U --config "$FROZEN_TRANSACTION_CONFIG" --noconfirm --ask 4 "${FROZEN_TRANSACTION_FILES[@]}"
     if [[ -n $M3_PRO_MESA_PACKAGE && -f $work/$(m3_pro_mesa_file) ]]; then
       M3_PRO_MESA_RESULT=installed
