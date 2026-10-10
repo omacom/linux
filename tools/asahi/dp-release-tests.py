@@ -114,7 +114,7 @@ def main():
                         raise
                     body = function((ROOT / path).read_text(), name)
                     additions.append(name)
-                original_hashes[name] = hashlib.sha256(body.encode()).hexdigest()
+                original_hashes[name] = None if name in additions else hashlib.sha256(body.encode()).hexdigest()
                 if name == 'dcp_tb_finish_request' and args.ref and name in additions:
                     body = 'static void dcp_tb_finish_request(struct apple_dcp_typec_port *p, const struct dcp_tb_attach_context *r) {}\n'
                     additions.append('terminal_finish_absent_in_ref')
@@ -159,7 +159,7 @@ def main():
         for name, body in zip(provider_names, provider_bodies):
             hashes[name] = hashlib.sha256(body.encode()).hexdigest()
         hashes['apple_dpin_release_binding'] = hashlib.sha256(release.encode()).hexdigest()
-        unit = output / 'production.c' 
+        unit = output / 'production.c'
         unit.write_text(code)
         subprocess.run(['cc', '-std=gnu11', '-g', '-Wall', '-Wextra', '-Werror',
                         '-Wno-unused-parameter', '-Wno-unused-function',
