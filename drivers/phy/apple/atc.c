@@ -3408,10 +3408,14 @@ static const struct phy_ops apple_atc_dp_phy_ops = {
  * Called by appledrm when DCP sets the link rate of a DPTX that feeds
  * Thunderbolt DP IN adapter @dpin (rate is the DP link rate code, 0 = stop).
  */
-/* t600x (M1 Pro/Max) runs the t8103 tunnel clock sequence unchanged. */
+/*
+ * t600x (M1 Pro/Max) and t8112 (M2, whose ATC PHY is t8103-compatible) run
+ * the t8103 tunnel clock sequence unchanged.
+ */
 static bool apple_atc_tunnel_is_t8103_style(void)
 {
-	return of_machine_is_compatible("apple,t8103") || apple_atc_tunnel_is_t600x();
+	return of_machine_is_compatible("apple,t8103") ||
+	       of_machine_is_compatible("apple,t8112") || apple_atc_tunnel_is_t600x();
 }
 
 int apple_atc_dp_tunnel_rate(struct phy *phy, unsigned int dpin, u8 rate)
