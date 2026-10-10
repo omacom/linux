@@ -47,6 +47,41 @@ class Assembly(unittest.TestCase):
             self.manifest['legacy_gpu_boards']=bad
             with self.assertRaises(ValueError):self.assemble()
 
+    def standard_boot_files(self):
+        return {'.PKGINFO': b'pkgname = m1n1-aurora\npkgver = candidate-1\narch = aarch64\n',
+                'usr/lib/asahi-boot/m1n1.bin': self.binary,
+                'usr/share/m1n1-aurora/source': (mod.STANDARD_M1N1_SOURCE+'\n').encode(),
+                'usr/share/m1n1-aurora/build-config': b'release=1\nchainloading=0\nj613_esp_stage1=0\ntag=v1.6.1-omarchy.aurora17\n'}
+
+    def test_standard_boot_source_and_build_markers(self):
+        self.manifest['source_commits']['m1n1'] = mod.STANDARD_M1N1_SOURCE
+        files=self.standard_boot_files()
+        self.package('m1n1','m1n1-aurora',files)
+        self.assemble()
+        for field in ('source','build-config'):
+            key='usr/share/m1n1-aurora/'+field
+            for value in (None,b'',b'foreign\n'):
+                with self.subTest(field=field,value=value):
+                    changed=dict(files)
+                    if value is None:del changed[key]
+                    else:changed[key]=value
+                    self.package('m1n1','m1n1-aurora',changed)
+                    with self.assertRaisesRegex(ValueError,'standard m1n1'):self.assemble()
+        for old,new in ((b'release=1',b'release=0'),(b'chainloading=0',b'chainloading=1'),
+                        (b'j613_esp_stage1=0',b'j613_esp_stage1=1'),(b'aurora17',b'aurora16')):
+            changed=dict(files)
+            changed['usr/share/m1n1-aurora/build-config']=changed['usr/share/m1n1-aurora/build-config'].replace(old,new)
+            self.package('m1n1','m1n1-aurora',changed)
+            with self.assertRaisesRegex(ValueError,'configuration'):self.assemble()
+
+    def test_new_standard_boot_keeps_legacy_j615_admission(self):
+        self.manifest['legacy_gpu_boards']=['j613','j615']
+        self.manifest['source_commits'].update(kernel=mod.NEO_KERNELS[-1],m1n1=mod.STANDARD_M1N1_SOURCE)
+        self.package('m1n1','m1n1-aurora',self.standard_boot_files())
+        self.assertIn('M3_PERSISTENT_BOARDS="j613 j615"', self.assemble()[0])
+        self.manifest['source_commits']['m1n1']='e'*40
+        with self.assertRaisesRegex(ValueError,'m1n1 producer'):self.assemble()
+
     def neo_pair(self):
         self.manifest['source_commits']['kernel']=mod.NEO_KERNEL
         neo=dict(profile='j700-g17p-hal200', source_commits={'mesa':'c'*40,'m1n1':'d'*40}, packages={})
@@ -244,8 +279,8 @@ class Assembly(unittest.TestCase):
         self.assemble()
         with mock.patch.object(mod,'J615_NATIVE25_PAIR',None):
             with self.assertRaisesRegex(ValueError,'boot/kernel pair'):self.assemble()
-        for field,why in [('kernel','qualified J615 kernel'),('m1n1','qualified J615 m1n1 source'),
-                          ('m1n1_bin_sha256','qualified J615 m1n1 binary')]:
+        for field,why in [('kernel','matched J615 kernel'),('m1n1','matched J615 m1n1 source'),
+                          ('m1n1_bin_sha256','matched J615 m1n1 binary')]:
             with self.subTest(field=field):
                 pair=dict(mod.J615_NATIVE25_PAIR);pair[field]='e'*len(pair[field])
                 with mock.patch.object(mod,'J615_NATIVE25_PAIR',pair):

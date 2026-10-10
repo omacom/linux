@@ -18,6 +18,8 @@ NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa',
                '25b138b77409fcb49c2e4fbebee57d81bdea9bb3')
 # J615 native25 requires exact kernel, boot source and packaged binary bindings.
 J615_NATIVE25_PAIR = None
+STANDARD_M1N1_SOURCE = "da98807ec496813eac6119e9c16ae9444465304c"
+J615_LEGACY_M1N1_SOURCES = ("74ba6bea52d1f865d204bb3f8168705a148fd5c5", STANDARD_M1N1_SOURCE)
 
 def member(path, name):
     return subprocess.check_output(['bsdtar', '-xOf', str(path), name])
@@ -26,13 +28,22 @@ def optional_member(path, name):
     result = subprocess.run(['bsdtar', '-xOf', str(path), name], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     return result.stdout if result.returncode == 0 else None
 
+def check_standard_m1n1_source(source, package):
+    if source != STANDARD_M1N1_SOURCE:
+        return
+    if optional_member(package, 'usr/share/m1n1-aurora/source') != (source + '\n').encode():
+        raise ValueError('standard m1n1 source marker differs')
+    expected = b'release=1\nchainloading=0\nj613_esp_stage1=0\ntag=v1.6.1-omarchy.aurora17\n'
+    if optional_member(package, 'usr/share/m1n1-aurora/build-config') != expected:
+        raise ValueError('standard m1n1 build configuration differs')
+
 def check_j615_native25(sources, binary_sha, mesa):
     pair = J615_NATIVE25_PAIR
     if not isinstance(pair, dict) or set(pair) != {'kernel', 'm1n1', 'm1n1_bin_sha256'}:
         raise ValueError('J615 native25 requires the recorded J615 boot/kernel pair (J615_NATIVE25_PAIR)')
-    if sources['kernel'] != pair['kernel']: raise ValueError('J615 native25 requires the qualified J615 kernel')
-    if sources['m1n1'] != pair['m1n1']: raise ValueError('J615 native25 requires the qualified J615 m1n1 source')
-    if binary_sha != pair['m1n1_bin_sha256']: raise ValueError('J615 native25 requires the qualified J615 m1n1 binary')
+    if sources['kernel'] != pair['kernel']: raise ValueError('J615 native25 requires the matched J615 kernel')
+    if sources['m1n1'] != pair['m1n1']: raise ValueError('J615 native25 requires the matched J615 m1n1 source')
+    if binary_sha != pair['m1n1_bin_sha256']: raise ValueError('J615 native25 requires the matched J615 m1n1 binary')
     boards = optional_member(mesa, 'opt/mesa-m3/share/mesa-m3/native25-boards')
     if boards is None or b'j615-experimental' not in boards.splitlines() or b'j613' not in boards.splitlines():
         raise ValueError('Mesa does not declare the J615 25G83 session capability')
@@ -135,7 +146,7 @@ def assemble(template, manifest, directory):
         raise ValueError('legacy GPU boards must name supported Air boards once')
     if 'j615' in boards and sources['kernel'] not in ('a4d7ff4acdefcbce7daa7f57866413f21f05fb75', *NEO_KERNELS):
         raise ValueError('J615 legacy GPU requires the matched J615 kernel consumer')
-    if 'j615' in boards and sources['m1n1'] != '74ba6bea52d1f865d204bb3f8168705a148fd5c5':
+    if 'j615' in boards and sources['m1n1'] not in J615_LEGACY_M1N1_SOURCES:
         raise ValueError('J615 legacy GPU requires the matched J615 m1n1 producer')
     # 25G83 is one firmware ABI profile (j613-25g83); J615 opts in to it as an experiment.
     native25 = manifest.get('native25_boards', ['j613'])
@@ -157,6 +168,7 @@ def assemble(template, manifest, directory):
         if role in ('kernel','headers') and re.findall(r'^pkgver = (.+)$',metadata,re.M) != [manifest['version']]:
             raise ValueError('kernel package version and installer version differ')
         pins[role] = f'{path.name} {digest}'; resolved[role] = path
+    check_standard_m1n1_source(sources['m1n1'], resolved['m1n1'])
     binary = member(resolved['m1n1'],'usr/lib/asahi-boot/m1n1.bin')
     binary_sha = hashlib.sha256(binary).hexdigest()
     if binary_sha != manifest.get('m1n1_bin_sha256'): raise ValueError('unified m1n1 binary hash differs')
