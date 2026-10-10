@@ -69,6 +69,8 @@ enum {
 
 #define APPLE_RTKIT_OSLOG_TYPE GENMASK_ULL(63, 56)
 #define APPLE_RTKIT_OSLOG_BUFFER_REQUEST 1
+#define APPLE_RTKIT_OSLOG_LOG 2
+#define APPLE_RTKIT_OSLOG_LOG_RESERVED GENMASK_ULL(55, 32)
 #define APPLE_RTKIT_OSLOG_SIZE GENMASK_ULL(55, 36)
 #define APPLE_RTKIT_OSLOG_IOVA GENMASK_ULL(35, 0)
 
@@ -624,11 +626,30 @@ static void apple_rtkit_syslog_rx(struct apple_rtkit *rtk, u64 msg)
 static void apple_rtkit_oslog_rx(struct apple_rtkit *rtk, u64 msg)
 {
 	u8 type = FIELD_GET(APPLE_RTKIT_OSLOG_TYPE, msg);
+	int err;
 
 	switch (type) {
 	case APPLE_RTKIT_OSLOG_BUFFER_REQUEST:
 		apple_rtkit_common_rx_get_buffer(rtk, &rtk->oslog_buffer,
 						 APPLE_RTKIT_EP_OSLOG, msg);
+		break;
+	case APPLE_RTKIT_OSLOG_LOG:
+		/* Channel zero reports a cumulative 32-bit write counter. Even
+		 * though we discard these logs, acknowledge that exact counter:
+		 * AppleDCP waits for its log transport to drain before AP sleep.
+		 * This is not a buffer offset and may wrap. Other channels do not
+		 * have a buffer admitted by this endpoint implementation. An inherited
+		 * channel zero needs no buffer mapping to acknowledge its counter.
+		 */
+		if ((!rtk->oslog_buffer.size && !rtk->oslog_inherited) ||
+		    (msg & APPLE_RTKIT_OSLOG_LOG_RESERVED)) {
+			dev_warn(rtk->dev, "RTKit: invalid oslog notification: %llx\n", msg);
+			break;
+		}
+		err = apple_rtkit_send_message(rtk, APPLE_RTKIT_EP_OSLOG,
+					       msg, NULL, false);
+		if (err)
+			dev_err(rtk->dev, "RTKit: oslog acknowledgment failed: %d\n", err);
 		break;
 	default:
 		dev_warn(rtk->dev, "RTKit: Unknown oslog message: %llx\n",
@@ -816,6 +837,7 @@ static void apple_rtkit_mark_running(struct apple_rtkit *rtk)
 	rtk->ap_power_state = APPLE_RTKIT_PWR_STATE_ON;
 	rtk->syslog_inherited = true;
 	rtk->crashlog_inherited = true;
+	rtk->oslog_inherited = true;
 }
 
 static int apple_rtkit_claim_rx(struct apple_rtkit *rtk)
@@ -987,6 +1009,7 @@ int apple_rtkit_reinit(struct apple_rtkit *rtk)
 	rtk->syslog_msg_size = 0;
 	rtk->syslog_inherited = false;
 	rtk->crashlog_inherited = false;
+	rtk->oslog_inherited = false;
 
 	bitmap_zero(rtk->endpoints, APPLE_RTKIT_MAX_ENDPOINTS);
 	set_bit(APPLE_RTKIT_EP_MGMT, rtk->endpoints);

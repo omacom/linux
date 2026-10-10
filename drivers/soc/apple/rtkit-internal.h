@@ -65,6 +65,7 @@ struct apple_rtkit {
 	/* Session inherited from the bootloader: INIT geometry never observed. */
 	bool syslog_inherited;
 	bool crashlog_inherited;
+	bool oslog_inherited;
 
 	struct workqueue_struct *wq;
 };

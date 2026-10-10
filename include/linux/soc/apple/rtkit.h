@@ -122,7 +122,7 @@ struct apple_rtkit *apple_rtkit_init(struct device *dev, void *cookie,
 /*
  * Initialize an instance for a co-processor that the bootloader left running
  * and that cannot be reset. No HELLO/EPMAP handshake takes place: the system
- * endpoints are marked available and syslog records are acknowledged without
+ * endpoints are marked available and syslog/OSLog records are acknowledged without
  * being parsed. The caller must verify the device-specific running/ready
  * indicators before using the instance.
  */
