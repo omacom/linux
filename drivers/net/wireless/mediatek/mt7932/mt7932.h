@@ -111,6 +111,8 @@ struct mt7932 {
 	bool interface_registered, interface_up;
 	u32 reg_generation, reg_attempted;
 	struct mt7932_reg_snapshot reg_desired;
+	/* Applied package exclusions; protected by RTNL. */
+	DECLARE_BITMAP(policy_disabled, 17);
 	struct net_device *netdev;
 	struct wireless_dev wdev;
 	struct cfg80211_scan_request *scan_request;

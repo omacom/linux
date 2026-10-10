@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
+#include <linux/rtnetlink.h>
+
 #include "mt7932.h"
 
 static int mt_stock_config(struct mt7932 *m);
@@ -232,6 +234,42 @@ static int mt_startup_once(struct mt7932 *m)
 	return ret;
 }
 
+static struct ieee80211_channel *mt_channel(struct mt7932 *m, unsigned int i)
+{
+	return i < 13 ? &m->channels[i] :
+	       &m->channels5[i - 13];
+}
+
+static void mt_policy_disable(struct mt7932 *m, const struct mt7932_policy *policy,
+			      u32 generation)
+{
+	unsigned int i;
+
+	rtnl_lock();
+	/* cfg80211 recomputes the channel flags for a new country under RTNL
+	 * and only then calls the notifier, which starts a new generation.
+	 * Once that has happened this package belongs to an older request,
+	 * and applying it would disable channels on top of the new country's
+	 * flags until the next regulatory change. The newer generation runs
+	 * its own pass.
+	 */
+	if (generation != READ_ONCE(m->reg_generation)) {
+		rtnl_unlock();
+		return;
+	}
+	wiphy_lock(m->wiphy);
+	for (i = 0; i < 17; i++) {
+		struct ieee80211_channel *channel = mt_channel(m, i);
+		bool forbidden = !mt7932_policy_permits(policy, channel->hw_value);
+
+		__assign_bit(i, m->policy_disabled, forbidden);
+		if (forbidden)
+			channel->flags |= IEEE80211_CHAN_DISABLED;
+	}
+	wiphy_unlock(m->wiphy);
+	rtnl_unlock();
+}
+
 /* Retry only a completed file lookup that failed before any policy SET.
  * Consume the flag under the same lock as the worker publication, so repeated
  * userspace requests cannot continually invalidate an in-flight attempt.
@@ -310,6 +348,10 @@ static void mt_startup_work(struct work_struct *work)
 			if (ret)
 				dev_err_ratelimited(&m->pdev->dev, "local input %s has invalid policy: %d\n", path, ret);
 		}
+		if (!ret) {
+			mt7932_policy_filter(&reg, &policy);
+			mt_policy_disable(m, &policy, generation);
+		}
 		mutex_lock(&m->command_mutex);
 		if (READ_ONCE(m->stopping) || generation != READ_ONCE(m->reg_generation))
 			goto next;
@@ -377,7 +419,7 @@ static void mt_regulatory_notify(struct wiphy *wiphy, struct regulatory_request 
 	reg.domain[4] = 1; /* 2 GHz remains 20 MHz. */
 	reg.domain[5] = mt7932_domain_5g_bw();
 	for (i = 0; i < 17; i++) {
-		struct ieee80211_channel *channel = i < 13 ? &m->channels[i] : &m->channels5[i - 13];
+		struct ieee80211_channel *channel = mt_channel(m, i);
 		u32 flags = channel->flags;
 
 		reg.power[i] = channel->max_power;
@@ -411,10 +453,13 @@ static void mt_regulatory_notify(struct wiphy *wiphy, struct regulatory_request 
 	}
 	if (!memcmp(&reg, &m->reg_desired, sizeof(reg)) && !m->reg_pending) {
 		spin_unlock_irqrestore(&m->response_lock, irqflags);
+		for_each_set_bit(i, m->policy_disabled, 17)
+			mt_channel(m, i)->flags |= IEEE80211_CHAN_DISABLED;
 		return;
 	}
 	m->reg_desired = reg;
 	m->reg_generation++;
+	bitmap_zero(m->policy_disabled, 17);
 	WRITE_ONCE(m->reg_pending, true);
 	if (m->netdev) {
 		netif_stop_queue(m->netdev);
