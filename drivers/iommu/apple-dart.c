@@ -24,6 +24,7 @@
 #include <linux/iommu.h>
 #include <linux/iopoll.h>
 #include <linux/minmax.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/soc/apple/dart.h>
 #include <linux/of.h>
@@ -234,8 +235,6 @@ struct apple_dart_hw {
 struct apple_dart_fw_root {
 	u64 *entry;
 	u64 **leaf;
-	/* Linux root entry already verified against each firmware slot. */
-	u64 *accepted;
 };
 
 /*
@@ -277,6 +276,7 @@ struct apple_dart {
 	u32 power_retained : 1;
 	/* Locked roots may hold firmware slots that mirror Linux mappings. */
 	u32 fw_mirror : 1;
+	u32 fw_handoff : 1;
 	u32 tunnel_state_saved : 1;
 	u32 tunnel_state_restored : 1;
 	bool commands_gated;
@@ -528,6 +528,46 @@ static phys_addr_t apple_dart_pte_to_paddr(const struct apple_dart *dart,
 	return (pte & GENMASK_ULL(37, 10)) << 4;
 }
 
+/* Firmware table pages must remain outside Linux's page allocator. */
+static bool apple_dart_fw_handoff_enabled(const struct apple_dart *dart)
+{
+	struct device_node *np = dart->dev->of_node;
+	u32 handoff;
+
+	return dart->locked && of_device_is_compatible(np, "apple,t8140-dart") &&
+		of_property_count_u32_elems(np, "apple,firmware-root-handoff") == 1 &&
+		!of_property_read_u32(np, "apple,firmware-root-handoff", &handoff) &&
+		handoff == 1;
+}
+
+static bool apple_dart_fw_table_ram(const struct apple_dart *dart,
+				   phys_addr_t phys)
+{
+	unsigned long first, last, pfn;
+	phys_addr_t end;
+
+	if (dart->pgsize != SZ_16K || !IS_ALIGNED(phys, dart->pgsize) ||
+	    check_add_overflow(phys, (phys_addr_t)dart->pgsize - 1, &end) ||
+	    dart->oas >= 64 || end >= BIT_ULL(dart->oas))
+		return false;
+	first = PHYS_PFN(phys);
+	last = PHYS_PFN(end);
+	for (pfn = first; pfn <= last; pfn++)
+		if (!pfn_valid(pfn) || !PageReserved(pfn_to_page(pfn)))
+			return false;
+	return true;
+}
+
+static bool apple_dart_fw_table_decode(const struct apple_dart *dart,
+				      u64 pte, phys_addr_t *phys)
+{
+	if (!(pte & APPLE_DART_PTE_VALID) ||
+	    (pte & ~(GENMASK_ULL(37, 10) | APPLE_DART_PTE_VALID)))
+		return false;
+	*phys = apple_dart_pte_to_paddr(dart, pte);
+	return apple_dart_fw_table_ram(dart, *phys);
+}
+
 static bool apple_dart_fw_slot_owned(const struct apple_dart_fw_root *fw,
 				     const u64 *live, size_t i)
 {
@@ -595,8 +635,8 @@ static bool apple_dart_fw_slot_mirrors(const struct apple_dart *dart,
  * A locked root belongs to firmware. Publish only into vacant slots and
  * remember exactly what we installed, so teardown cannot erase firmware
  * mappings added after Linux attached. A slot firmware already holds is
- * never written; it is accepted once if it mirrors Linux's mappings, and
- * apple_dart_check_fw_map() checks later mappings into it page by page.
+ * never written; its descendants must still mirror Linux's mappings, and
+ * apple_dart_check_fw_map() rejects new mappings anywhere in that slot.
  */
 static int apple_dart_publish_root(const struct apple_dart *dart,
 				   u64 *live, u64 *owned, const u64 *ours,
@@ -615,8 +655,7 @@ static int apple_dart_publish_root(const struct apple_dart *dart,
 			continue;
 		if (previous || !apple_dart_fw_slot_owned(fw, live, i))
 			return -EBUSY;
-		if (next != fw->accepted[i] &&
-		    !apple_dart_fw_slot_mirrors(dart, fw, next, i, entries))
+		if (!apple_dart_fw_slot_mirrors(dart, fw, next, i, entries))
 			return -EBUSY;
 	}
 
@@ -628,7 +667,6 @@ static int apple_dart_publish_root(const struct apple_dart *dart,
 		if (next == previous)
 			continue;
 		if (!previous && apple_dart_fw_slot_owned(fw, live, i)) {
-			fw->accepted[i] = next;
 			continue;
 		}
 		if (cmpxchg(&live[i], previous, next) != previous)
@@ -665,7 +703,6 @@ static void apple_dart_free_fw_root(struct apple_dart *dart,
 		for (i = 0; i < dart->pgsize / sizeof(u64); i++)
 			if (fw->leaf[i])
 				memunmap(fw->leaf[i]);
-	kfree(fw->accepted);
 	kfree(fw->leaf);
 	kfree(fw->entry);
 	kfree(fw);
@@ -674,7 +711,7 @@ static void apple_dart_free_fw_root(struct apple_dart *dart,
 /*
  * Record the leaf tables behind the slots firmware holds in a three-level
  * T8110-format locked root, on DARTs whose loader re-exports firmware
- * translations (fw_mirror). Other roots are not snapshotted; their firmware
+ * translations (fw_handoff). Other roots are not snapshotted; their firmware
  * slots keep rejecting Linux mappings as before.
  */
 static struct apple_dart_fw_root *
@@ -684,7 +721,7 @@ apple_dart_snapshot_fw_root(struct apple_dart *dart, int sid, const u64 *live)
 	struct apple_dart_fw_root *fw;
 
 	/* Only the T8110-style table layout this walker decodes. */
-	if (!dart->fw_mirror || dart->hw->fmt != APPLE_DART2)
+	if (!dart->fw_handoff || dart->hw->fmt != APPLE_DART2)
 		return NULL;
 	if (dart->hw->tcr_4level &&
 	    (apple_dart_readl(dart, DART_TCR(dart, sid)) & dart->hw->tcr_4level))
@@ -692,24 +729,33 @@ apple_dart_snapshot_fw_root(struct apple_dart *dart, int sid, const u64 *live)
 
 	fw = kzalloc(sizeof(*fw), GFP_KERNEL);
 	if (!fw)
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	fw->entry = kcalloc(entries, sizeof(*fw->entry), GFP_KERNEL);
 	fw->leaf = kcalloc(entries, sizeof(*fw->leaf), GFP_KERNEL);
-	fw->accepted = kcalloc(entries, sizeof(*fw->accepted), GFP_KERNEL);
-	if (!fw->entry || !fw->leaf || !fw->accepted) {
+	if (!fw->entry || !fw->leaf) {
 		apple_dart_free_fw_root(dart, fw);
-		return NULL;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	for (i = 0; i < entries; i++) {
 		u64 pte = READ_ONCE(live[i]);
+		phys_addr_t phys;
 
 		if (!(pte & APPLE_DART_PTE_VALID))
 			continue;
-		fw->leaf[i] = memremap(apple_dart_pte_to_paddr(dart, pte),
-				       dart->pgsize, MEMREMAP_WB);
-		if (!fw->leaf[i])
-			continue;
+		if (!apple_dart_fw_table_decode(dart, pte, &phys)) {
+			apple_dart_free_fw_root(dart, fw);
+			return ERR_PTR(-EINVAL);
+		}
+		fw->leaf[i] = memremap(phys, dart->pgsize, MEMREMAP_WB);
+		if (!fw->leaf[i]) {
+			apple_dart_free_fw_root(dart, fw);
+			return ERR_PTR(-ENOMEM);
+		}
+		if (READ_ONCE(live[i]) != pte) {
+			apple_dart_free_fw_root(dart, fw);
+			return ERR_PTR(-EBUSY);
+		}
 		fw->entry[i] = pte;
 	}
 	return fw;
@@ -733,6 +779,10 @@ apple_dart_hw_map_locked_ttbr(struct apple_dart_stream_map *stream_map, u8 idx)
 
 		if (dart->locked_ttbr[sid][idx])
 			continue;
+		/* The matched firmware handoff exports three-level tables only. */
+		if (dart->fw_handoff && dart->hw->tcr_4level &&
+		    (apple_dart_readl(dart, DART_TCR(dart, sid)) & dart->hw->tcr_4level))
+			return -EINVAL;
 
 		ttbr = apple_dart_readl(dart, DART_TTBR(dart, sid, idx));
 
@@ -748,6 +798,9 @@ apple_dart_hw_map_locked_ttbr(struct apple_dart_stream_map *stream_map, u8 idx)
 			ttbr >>= dart->hw->ttbr_addr_field_shift;
 		phys = ((phys_addr_t) ttbr) << dart->hw->ttbr_shift;
 
+		if (dart->fw_handoff && !apple_dart_fw_table_ram(dart, phys))
+			return -EINVAL;
+
 		l1_tbl = devm_memremap(dart->dev, phys, dart->pgsize,
 				       MEMREMAP_WB);
 		if (IS_ERR(l1_tbl))
@@ -759,6 +812,11 @@ apple_dart_hw_map_locked_ttbr(struct apple_dart_stream_map *stream_map, u8 idx)
 			return -ENOMEM;
 		}
 		fw = apple_dart_snapshot_fw_root(dart, sid, l1_tbl);
+		if (IS_ERR(fw)) {
+			devm_kfree(dart->dev, owned);
+			devm_memunmap(dart->dev, l1_tbl);
+			return PTR_ERR(fw);
+		}
 		spin_lock_irqsave(&dart->lock, flags);
 		dart->locked_owned[sid][idx] = owned;
 		dart->locked_ttbr[sid][idx] = l1_tbl;
@@ -850,8 +908,7 @@ apple_dart_hw_sync_locked(struct io_pgtable_cfg *cfg,
 			 * before attachment, so replace the old root entries.
 			 * T8110 v2.2+ instead retains firmware-owned entries.
 			 */
-			if (!dart->fw_mirror &&
-			    (dart->hw->type != DART_T8110 || dart->version < 0x0202)) {
+			if (dart->hw->type != DART_T8110 || dart->version < 0x0202) {
 				size_t entry;
 
 				dma_wmb();
@@ -984,7 +1041,7 @@ static bool apple_dart_fw_slot_foreign(const u64 *live, const u64 *owned,
 }
 
 /*
- * On DARTs that keep firmware roots (T8140 and T8142), the hardware keeps
+ * On T8140 DARTs that keep firmware roots, the hardware keeps
  * using the translations behind the firmware-owned root slots, e.g. the
  * display controller scanning out the boot framebuffer while Linux attaches,
  * or the AOP firmware's own DMA on the AOP DART streams that Linux shares.
@@ -1012,7 +1069,6 @@ static int apple_dart_fw_invalidate(struct apple_dart_stream_map *stream_map,
 		return 0;
 
 	for_each_set_bit(sid, stream_map->sidmap, dart->num_streams) {
-		const struct apple_dart_fw_root *fw;
 		const u64 *live, *owned;
 		u64 base, span, start_dva, end_dva;
 		bool four_level;
@@ -1051,10 +1107,8 @@ static int apple_dart_fw_invalidate(struct apple_dart_stream_map *stream_map,
 		spin_lock_irqsave(&dart->lock, flags);
 		live = dart->locked_ttbr[sid][0];
 		owned = dart->locked_owned[sid][0];
-		fw = dart->locked_fw[sid][0];
 		for (i = first; live && i <= last; i++)
-			if (four_level ? apple_dart_fw_slot_foreign(live, owned, i) :
-					 apple_dart_fw_slot_owned(fw, live, i))
+			if (apple_dart_fw_slot_foreign(live, owned, i))
 				__set_bit(i, fw_slots);
 		spin_unlock_irqrestore(&dart->lock, flags);
 		if (!live)
@@ -1335,9 +1389,8 @@ static bool apple_dart_domain_uses_fw(struct apple_dart_domain *domain, int i,
 }
 
 /*
- * Hardware continues to use every firmware-owned slot. Accept a private
- * software mapping only when every stream using such a slot agrees on the
- * full-page translation and its protection/cache attributes.
+ * Hardware continues to use every firmware-owned slot. Its entire IOVA
+ * span is excluded from Linux allocation, including currently unmapped holes.
  */
 static int apple_dart_check_fw_map(struct apple_dart_domain *domain, u64 dva,
 				   phys_addr_t paddr, size_t size, int prot)
@@ -1348,41 +1401,34 @@ static int apple_dart_check_fw_map(struct apple_dart_domain *domain, u64 dva,
 	for_each_stream_map(i, domain, map) {
 		struct apple_dart *dart = map->dart;
 		u32 entries = dart->pgsize / sizeof(u64);
-		u32 pgshift = ilog2(dart->pgsize);
-		u32 bits = ilog2(entries);
+		u32 pgshift = ilog2(dart->pgsize), bits = ilog2(entries);
 		unsigned long flags;
 		size_t off;
 
-		if (!dart->fw_mirror)
+		if (!dart->fw_handoff)
 			continue;
-
 		spin_lock_irqsave(&dart->lock, flags);
 		for (off = 0; off < size; off += dart->pgsize) {
 			u64 addr = dva + off;
-			u64 leaf = (addr >> pgshift) & (entries - 1);
-			u64 slot = (addr >> (pgshift + bits)) & (entries - 1);
-			u64 idx = addr >> (pgshift + 2 * bits);
 
-			if (idx >= DART_MAX_TTBR)
-				continue;
 			for (sid = 0; sid < dart->num_streams; sid++) {
-				const struct apple_dart_fw_root *fw;
-				phys_addr_t phys;
-				u64 pte;
-				int fw_prot;
+				bool four;
+				u64 idx, slot;
+				const u64 *live, *owned;
 
 				if (!apple_dart_domain_uses_fw(domain, i, map, sid))
 					continue;
-				fw = dart->locked_fw[sid][idx];
-				if (!dart->locked_ttbr[sid][idx] ||
-				    !apple_dart_fw_slot_owned(fw,
-						dart->locked_ttbr[sid][idx], slot))
+				four = apple_dart_readl(dart, DART_TCR(dart, sid)) &
+					       dart->hw->tcr_4level;
+				idx = four ? 0 : addr >> (pgshift + 2 * bits);
+				slot = (addr >> (pgshift + (four ? 2 : 1) * bits)) &
+					(entries - 1);
+				if (idx >= DART_MAX_TTBR)
 					continue;
-				pte = READ_ONCE(fw->leaf[slot][leaf]);
-				if (!apple_dart_fw_leaf_decode(pte, addr,
-							       &phys, &fw_prot) ||
-				    !apple_dart_fw_mapping_matches(phys, fw_prot,
-							   paddr + off, prot)) {
+				live = dart->locked_ttbr[sid][idx];
+				owned = dart->locked_owned[sid][idx];
+				/* All pages of an inherited slot remain firmware's. */
+				if (live && apple_dart_fw_slot_foreign(live, owned, slot)) {
 					ret = -EBUSY;
 					goto unlock;
 				}
@@ -1410,7 +1456,7 @@ apple_dart_inherited_phys(struct apple_dart_domain *domain, dma_addr_t address)
 		size_t page = (address / dart->pgsize) % entries;
 		size_t slot = address / dart->pgsize / entries;
 
-		if (!dart->locked || !dart->fw_mirror || slot >= entries)
+		if (!dart->locked || !dart->fw_handoff || slot >= entries)
 			return 0;
 		spin_lock_irqsave(&dart->lock, flags);
 		for (sid = 0; sid < dart->num_streams; sid++) {
@@ -1680,7 +1726,7 @@ static int apple_dart_finalize_domain(struct apple_dart_domain *dart_domain,
 
 		/* Make inherited translations visible before core reservation setup. */
 		for_each_stream_map(i, cfg, stream) {
-			if (!stream->dart->locked || !stream->dart->fw_mirror)
+			if (!stream->dart->locked || !stream->dart->fw_handoff)
 				continue;
 			apple_dart_set_locked_window(dart_domain, stream);
 			for (index = 0; index < pgtbl_cfg.apple_dart_cfg.n_ttbrs; index++) {
@@ -2143,6 +2189,79 @@ static int apple_dart_def_domain_type(struct device *dev)
 #endif
 #define DOORBELL_ADDR	(CONFIG_PCIE_APPLE_MSI_DOORBELL_ADDR & PAGE_MASK)
 
+/* Convert an occupied root slot's device window back to allocator IOVA. */
+static bool apple_dart_fw_slot_range(const struct apple_dart *dart, u64 window,
+				    size_t slot, bool four, u64 *start, u64 *length)
+{
+	u32 bits = ilog2(dart->pgsize / sizeof(u64));
+	u32 shift = ilog2(dart->pgsize) + (four ? 2 : 1) * bits;
+	u32 width = four ? dart->ias : shift + bits;
+	u64 span, base, offset, end;
+
+	if (dart->ias >= 64 || shift >= dart->ias || width >= 64 ||
+	    slot >= dart->pgsize / sizeof(u64))
+		return false;
+	span = BIT_ULL(shift);
+	base = four ? 0 : window & ~(BIT_ULL(width) - 1);
+	if (check_mul_overflow((u64)slot, span, &offset) ||
+	    check_add_overflow(base, offset, start) ||
+	    check_add_overflow(*start, span - 1, &end) ||
+	    end >= BIT_ULL(dart->ias) || *start < dart->dma_offset)
+		return false;
+	*start -= dart->dma_offset;
+	*length = span;
+	return true;
+}
+
+static void apple_dart_get_fw_resv_regions(struct device *dev,
+					 struct list_head *head)
+{
+	struct apple_dart_master_cfg *cfg = dev_iommu_priv_get(dev);
+	struct apple_dart_stream_map *stream;
+	int i, sid, idx;
+
+	if (!cfg)
+		return;
+	for_each_stream_map(i, cfg, stream) {
+		struct apple_dart *dart = stream->dart;
+
+		if (!dart->fw_handoff)
+			continue;
+		for_each_set_bit(sid, stream->sidmap, dart->num_streams) {
+			bool four = apple_dart_readl(dart, DART_TCR(dart, sid)) &
+				    dart->hw->tcr_4level;
+
+			for (idx = 0; idx < dart->hw->ttbr_count; idx++) {
+				const u64 *live = dart->locked_ttbr[sid][idx];
+				const u64 *owned = dart->locked_owned[sid][idx];
+				size_t slot, entries = dart->pgsize / sizeof(u64);
+
+				for (slot = 0; live && slot < entries; slot++) {
+					struct iommu_resv_region *region;
+					u64 start, length;
+					u64 window = READ_ONCE(dart->locked_window[sid]);
+
+					if (!apple_dart_fw_slot_foreign(live, owned, slot))
+						continue;
+					if (!four && check_add_overflow(window,
+						((u64)idx << (ilog2(dart->pgsize) +
+						 2 * ilog2(entries))), &window))
+						continue;
+					if (!apple_dart_fw_slot_range(dart, window, slot,
+						four, &start, &length))
+						continue;
+					/* RESERVED excludes holes without asking the core to map them. */
+					region = iommu_alloc_resv_region(start, length, 0,
+						IOMMU_RESV_RESERVED, GFP_KERNEL);
+					if (!region)
+						return;
+					list_add_tail(&region->list, head);
+				}
+			}
+		}
+	}
+}
+
 static void apple_dart_get_resv_regions(struct device *dev,
 					struct list_head *head)
 {
@@ -2160,11 +2279,9 @@ static void apple_dart_get_resv_regions(struct device *dev,
 		list_add_tail(&region->list, head);
 	}
 
-	/* Keep translated regions so the core retains their software mappings
-	 * and the device's translated-domain requirement. Locked-root publication
-	 * validates them against every live firmware stream without replacing it.
-	 */
+	/* Keep the translated-domain requirement and inherited translations. */
 	iommu_dma_get_resv_regions(dev, head);
+	apple_dart_get_fw_resv_regions(dev, head);
 }
 
 static const struct iommu_ops apple_dart_iommu_ops = {
@@ -2718,10 +2835,10 @@ params_done:
 		dart->locked = false;
 	else
 		dart->locked = apple_dart_is_locked(dart);
-	/* These loaders re-export the firmware's own display translations. */
 	dart->fw_mirror = dart->locked &&
-		(of_device_is_compatible(pdev->dev.of_node, "apple,t8140-dart") ||
-		 of_device_is_compatible(pdev->dev.of_node, "apple,t8142-dart"));
+		of_device_is_compatible(dev->of_node, "apple,t8140-dart");
+	/* Reserved table-page lifetime requires the matched three-level loader. */
+	dart->fw_handoff = apple_dart_fw_handoff_enabled(dart);
 	if (!dart->locked) {
 		ret = apple_dart_hw_reset(dart);
 		if (ret)

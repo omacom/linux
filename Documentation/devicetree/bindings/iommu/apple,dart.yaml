@@ -78,6 +78,15 @@ properties:
       tables. This models host bridges which alias a low PCI bus aperture into
       a high DART translation window.
 
+  apple,firmware-root-handoff:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    const: 1
+    description: >
+      The bootloader has reserved the actual three-level locked root and leaf
+      table pages as normal RAM and completed the display coprocessor power
+      handoff. Linux retains occupied root slots and excludes their entire
+      IOVA spans from allocation. This does not assert immutable descendants.
+
   apple,tunable:
     $ref: /schemas/types.yaml#/definitions/uint32-matrix
     items:
