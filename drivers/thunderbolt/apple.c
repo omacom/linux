@@ -261,7 +261,7 @@ struct apple_dpin_binding {
 
 static bool dp_display = true;
 module_param(dp_display, bool, 0444);
-MODULE_PARM_DESC(dp_display, "Drive displays behind Thunderbolt DP tunnels on t8103, t600x and t6030 (default: true)");
+MODULE_PARM_DESC(dp_display, "Drive displays behind Thunderbolt DP tunnels on t8103, t8112, t600x and t6030 (default: true)");
 
 /*
  * The M1 Pro/Max ATC is the t8103 generation: same DP IN adapter registers,
@@ -269,6 +269,8 @@ MODULE_PARM_DESC(dp_display, "Drive displays behind Thunderbolt DP tunnels on t8
  */
 static const struct of_device_id apple_dpin_qualified_soc[] = {
 	{ .compatible = "apple,t8103" },
+	/* The M2 (t8112) ACIO, NHI and display crossbar are t8103-compatible. */
+	{ .compatible = "apple,t8112" },
 	{ .compatible = "apple,t6000" },
 	{ .compatible = "apple,t6001" },
 	{ .compatible = "apple,t6020" },
