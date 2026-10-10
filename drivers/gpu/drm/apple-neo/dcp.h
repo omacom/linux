@@ -100,9 +100,9 @@ int neo_avep_init(struct neo_apple_dcp *neo_dcp);
 
 
 int __init neo_dcp_register(void);
-void __exit neo_dcp_unregister(void);
+void neo_dcp_unregister(void);
 
 int __init neo_dcp_audio_register(void);
-void __exit neo_dcp_audio_unregister(void);
+void neo_dcp_audio_unregister(void);
 
 #endif
