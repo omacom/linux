@@ -369,6 +369,7 @@ struct apple_dcp {
 	 */
 	struct {
 		bool active;
+		bool ready; /* admitted second-stream setup */
 		struct mux_control *xbar;	/* the port's dpin1 crossbar control */
 		int mux_state;			/* dispextN, DPTX port 1 */
 		bool xbar_up;

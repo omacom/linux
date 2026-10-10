@@ -660,6 +660,8 @@ static int dptxport_call_set_tiled_display_hint(struct apple_epic_service *servi
 	if (reply_size < sizeof(*reply))
 		return -EINVAL;
 
+	if (dptx)
+		smp_store_release(&dptx->tile_hint, false);
 	if (dptx && data_size >= DPTX_TILE_HINT_MIN_SIZE) {
 		u32 h = get_unaligned_le32(hint + DPTX_TILE_HINT_TILES_H);
 		u32 v = get_unaligned_le32(hint + DPTX_TILE_HINT_TILES_V);
@@ -670,8 +672,12 @@ static int dptxport_call_set_tiled_display_hint(struct apple_epic_service *servi
 		dptx->tiles_v = min(v, 255U);
 		dptx->tile_x = min(x, 255U);
 		dptx->tile_y = min(y, 255U);
-		WRITE_ONCE(dptx->tile_hint, true);
-		if (h * v > 1)
+		/* Only the two horizontal tiles carried by these two ports fit. */
+		smp_store_release(&dptx->tile_hint,
+				  h == 2 && v == 1 && x == dptx->unit && y == 0 &&
+				  get_unaligned_le32(hint + DPTX_TILE_HINT_WIDTH) &&
+				  get_unaligned_le32(hint + DPTX_TILE_HINT_HEIGHT));
+		if (h > 1 || v > 1)
 			dev_info(service->ep->dcp->dev,
 				 "DPTXPort: port %u carries tile (%u,%u) of a %ux%u tiled %ux%u display\n",
 				 dptx->unit, x, y, h, v,
