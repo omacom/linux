@@ -3975,12 +3975,12 @@ static struct platform_driver apple_platform_driver = {
 	},
 };
 
-void __init neo_dcp_register(void)
+int __init neo_dcp_register(void)
 {
-	platform_driver_register(&apple_platform_driver);
+	return platform_driver_register(&apple_platform_driver);
 }
 
-void __exit neo_dcp_unregister(void)
+void neo_dcp_unregister(void)
 {
 	platform_driver_unregister(&apple_platform_driver);
 }

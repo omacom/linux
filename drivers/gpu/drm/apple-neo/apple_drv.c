@@ -945,16 +945,30 @@ static struct platform_driver apple_platform_driver = {
 
 static int __init appledrm_neo_register(void)
 {
-	if (drm_firmware_drivers_only())
+	int ret;
+
+	/* The generic audio compatible belongs to the legacy driver on other SoCs. */
+	if (!of_machine_is_compatible("apple,t8140") || drm_firmware_drivers_only())
 		return -ENODEV;
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_NEO_AUDIO)
-	neo_dcp_audio_register();
+	ret = neo_dcp_audio_register();
+	if (ret)
+		return ret;
 #endif
-	neo_dcp_register();
-	platform_driver_register(&apple_platform_driver);
+	ret = neo_dcp_register();
+	if (ret)
+		goto unregister_audio;
+	ret = platform_driver_register(&apple_platform_driver);
+	if (!ret)
+		return 0;
 
-	return 0;
+	neo_dcp_unregister();
+unregister_audio:
+#if IS_ENABLED(CONFIG_DRM_APPLE_NEO_AUDIO)
+	neo_dcp_audio_unregister();
+#endif
+	return ret;
 }
 
 static void __exit appledrm_neo_unregister(void)

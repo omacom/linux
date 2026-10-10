@@ -7,8 +7,8 @@ For the **13-inch and 15-inch M3 MacBook Air (J613/J615)** with the supported
 installs ([#35](https://github.com/iconidentify/aurora-linux/issues/35)), even
 after correcting PMP power admission. Installation and a working panel do
 not establish acceleration. Native25 remains a separate J613 GL-only route
-requiring its own exact firmware and matched stage1; migration instructions
-are pending.
+requiring its own exact firmware and matched stage1. The J613 native25
+profile supports experimental OpenGL; Vulkan is unavailable.
 
 1. Enable the experimental GPU profile:
 
@@ -37,7 +37,7 @@ same installer's `--m3-report` output.
 
 The matched installer keeps a GPU-off fallback. `--m3-gpu-experiment`
 only installs one-shot tools and is unnecessary for this persistent route.
-The command and installed checker are available in **Aurora 2026.10.09**;
+The command and installed checker are available in **Aurora 2026.10.10.1**;
 12.6 supports Air 13 with `--m3-gpu-persistent` and its Mesa probe instead.
 
 | Mac | Route |
@@ -67,3 +67,24 @@ unavailable**. J615 native25 is unsupported. Native scratch shaders are
 refused; power calibration remains experimental. Legacy 14/Pro Vulkan
 stays separate. Firmware and calibration remain specific to each Mac;
 the installer migrates neither firmware nor stage 1.
+
+## J613 native25 update
+
+Aurora 2026.10.10.1 includes the GPU memory-region and register-window
+corrections, leaves MTP startup to Linux through U-Boot, and separates Neo
+component registration from the existing display driver. The native25 Mesa
+hook allows the display node to use the apple kmsro driver while its render
+node uses Asahi. No manual DTB edit, Neo initcall blacklist or Mesa loader
+override is part of this installation.
+
+On a J613 already using its own exact 26.6.2/25G83 volume group and matched
+stage 1, update with:
+
+```sh
+curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-profile=j613-25g83
+```
+
+Reboot, log in and run `aurora-m3-gpu-check`. The native25 profile reports
+OpenGL readback and Vulkan unavailable. Keyboard/trackpad recovery, suspend,
+night light and extended stability still require hardware verification on
+this update. J615 native25 remains a separate experimental development route.

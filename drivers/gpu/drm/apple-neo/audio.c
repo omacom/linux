@@ -795,7 +795,7 @@ static const struct of_device_id neo_dcpaud_of_match[] = {
 
 static struct platform_driver neo_dcpaud_driver = {
 	.driver = {
-		.name = "dcp-dp-audio",
+		.name = "dcp-dp-audio-neo",
 		.of_match_table	= neo_dcpaud_of_match,
 		.pm		= pm_ptr(&neo_dcpaud_pm_ops),
 	},
@@ -804,12 +804,12 @@ static struct platform_driver neo_dcpaud_driver = {
 	.shutdown	= neo_dcpaud_shutdown,
 };
 
-void __init neo_dcp_audio_register(void)
+int __init neo_dcp_audio_register(void)
 {
-        platform_driver_register(&neo_dcpaud_driver);
+	return platform_driver_register(&neo_dcpaud_driver);
 }
 
-void __exit neo_dcp_audio_unregister(void)
+void neo_dcp_audio_unregister(void)
 {
         platform_driver_unregister(&neo_dcpaud_driver);
 }

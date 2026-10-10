@@ -3585,8 +3585,11 @@ package_database_check() {
   while IFS= read -r row; do
     [[ -n $row ]] || continue
     name=${row%% *}
-    # Only the release's own pinned packages are replaced by these candidates.
-    if [[ $row == *" [ignored]" && " $PINNED " == *" $name "* ]]; then continue; fi
+    # The release replaces its pins; Mac image packages keep their deliberate hold.
+    if [[ $row == *" [ignored]" ]]; then
+      if [[ " $PINNED " == *" $name "* ]]; then continue; fi
+      case $name in omarchy|omarchy-mac|omarchy-mac-boot|omarchy-settings) continue ;; esac
+    fi
     unheld+=("$name")
   done <<<"$pending"
   ((${#unheld[@]} == 0)) || die "this Mac has ${#unheld[@]} package upgrade(s) pending (pacman -Qu; first: ${unheld[*]:0:8}).
