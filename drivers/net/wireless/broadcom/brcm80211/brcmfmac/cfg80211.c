@@ -3217,8 +3217,47 @@ done:
 	return err;
 }
 
+static bool brcmf_bss_info_version_supported(u32 version)
+{
+	return (version >= BRCMF_BSS_INFO_MIN_VERSION &&
+		version <= BRCMF_BSS_INFO_MAX_VERSION) ||
+		version == BRCMF_BSS_INFO_VERSION_116;
+}
+
+static bool brcmf_bss_info_valid(const struct brcmf_bss_info_le *bi,
+			       size_t available)
+{
+	u32 version, length, ie_length;
+	u16 ie_offset;
+	size_t fixed_size = offsetof(struct brcmf_bss_info_le, SNR);
+
+	/* All scan consumers use the common prefix through ie_length. */
+	if (available < fixed_size)
+		return false;
+
+	version = le32_to_cpu(bi->version);
+	if (!brcmf_bss_info_version_supported(version))
+		return false;
+
+	/* Version 116 has two five-byte EHT maps and an MLD address.
+	 * Its common prefix has the same offsets; the tail stays opaque.
+	 */
+	if (version == BRCMF_BSS_INFO_VERSION_116)
+		fixed_size = BRCMF_BSS_INFO_V116_FIXED_SIZE;
+
+	length = le32_to_cpu(bi->length);
+	ie_offset = le16_to_cpu(bi->ie_offset);
+	ie_length = le32_to_cpu(bi->ie_length);
+	return length >= fixed_size && length <= available &&
+		bi->SSID_len <= sizeof(bi->SSID) &&
+		le32_to_cpu(bi->rateset.count) <= sizeof(bi->rateset.rates) &&
+		ie_offset >= fixed_size && ie_offset <= length &&
+		ie_length <= length - ie_offset;
+}
+
 static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
-				   struct brcmf_bss_info_le *bi)
+				   struct brcmf_bss_info_le *bi,
+				   size_t available)
 {
 	struct wiphy *wiphy = cfg_to_wiphy(cfg);
 	struct brcmf_pub *drvr = cfg->pub;
@@ -3234,8 +3273,9 @@ static s32 brcmf_inform_single_bss(struct brcmf_cfg80211_info *cfg,
 	size_t notify_ielen;
 	struct cfg80211_inform_bss bss_data = {};
 
-	if (le32_to_cpu(bi->length) > WL_BSS_INFO_MAX) {
-		bphy_err(drvr, "Bss info is larger than buffer. Discarding\n");
+	if (!brcmf_bss_info_valid(bi, available) ||
+	    le32_to_cpu(bi->length) > WL_BSS_INFO_MAX) {
+		bphy_err(drvr, "Invalid Bss info record. Discarding\n");
 		return -EINVAL;
 	}
 
@@ -3318,20 +3358,30 @@ static s32 brcmf_inform_bss(struct brcmf_cfg80211_info *cfg)
 	struct brcmf_scan_results *bss_list;
 	struct brcmf_bss_info_le *bi = NULL;	/* must be initialized */
 	s32 err = 0;
-	int i;
+	u32 i;
+	size_t remaining;
 
 	bss_list = (struct brcmf_scan_results *)cfg->escan_info.escan_buf;
 	if (bss_list->count != 0 &&
-	    (bss_list->version < BRCMF_BSS_INFO_MIN_VERSION ||
-	    bss_list->version > BRCMF_BSS_INFO_MAX_VERSION)) {
+	    !brcmf_bss_info_version_supported(bss_list->version)) {
 		bphy_err(drvr, "BSS info version %d unsupported\n",
 			 bss_list->version);
 		return -EOPNOTSUPP;
 	}
+	if (bss_list->buflen < sizeof(*bss_list) ||
+	    bss_list->buflen > BRCMF_ESCAN_BUF_SIZE)
+		return -EINVAL;
+	remaining = bss_list->buflen - sizeof(*bss_list);
+	if (bss_list->count > remaining /
+	    offsetof(struct brcmf_bss_info_le, SNR))
+		return -EINVAL;
 	brcmf_dbg(SCAN, "scanned AP count (%d)\n", bss_list->count);
 	for (i = 0; i < bss_list->count; i++) {
 		bi = next_bss_le(bss_list, bi);
-		err = brcmf_inform_single_bss(cfg, bi);
+		if (!brcmf_bss_info_valid(bi, remaining))
+			return -EINVAL;
+		err = brcmf_inform_single_bss(cfg, bi, remaining);
+		remaining -= le32_to_cpu(bi->length);
 		if (err)
 			break;
 	}
@@ -3375,6 +3425,10 @@ static s32 brcmf_inform_ibss(struct brcmf_cfg80211_info *cfg,
 	}
 
 	bi = (struct brcmf_bss_info_le *)(buf + 4);
+	if (!brcmf_bss_info_valid(bi, WL_BSS_INFO_MAX - 4)) {
+		err = -EINVAL;
+		goto cleanup;
+	}
 
 	ch.chspec = le16_to_cpu(bi->chanspec);
 	cfg->d11inf.decchspec(&ch);
@@ -3448,7 +3502,7 @@ static s32 brcmf_update_bss_info(struct brcmf_cfg80211_info *cfg,
 		goto update_bss_info_out;
 	}
 	bi = (struct brcmf_bss_info_le *)(cfg->extra_buf + 4);
-	err = brcmf_inform_single_bss(cfg, bi);
+	err = brcmf_inform_single_bss(cfg, bi, WL_EXTRA_BUF_MAX - 4);
 
 update_bss_info_out:
 	brcmf_dbg(TRACE, "Exit");
@@ -3558,7 +3612,8 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 
 	if (status == BRCMF_E_STATUS_PARTIAL) {
 		brcmf_dbg(SCAN, "ESCAN Partial result\n");
-		if (e->datalen < sizeof(*escan_result_le)) {
+		if (e->datalen < WL_ESCAN_RESULTS_FIXED_SIZE +
+		    offsetof(struct brcmf_bss_info_le, SNR)) {
 			bphy_err(drvr, "invalid event data length\n");
 			goto exit;
 		}
@@ -3570,7 +3625,8 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 		escan_buflen = le32_to_cpu(escan_result_le->buflen);
 		if (escan_buflen > BRCMF_ESCAN_BUF_SIZE ||
 		    escan_buflen > e->datalen ||
-		    escan_buflen < sizeof(*escan_result_le)) {
+		    escan_buflen < WL_ESCAN_RESULTS_FIXED_SIZE +
+		    offsetof(struct brcmf_bss_info_le, SNR)) {
 			bphy_err(drvr, "Invalid escan buffer length: %d\n",
 				 escan_buflen);
 			goto exit;
@@ -3581,19 +3637,18 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 			goto exit;
 		}
 		bss_info_le = &escan_result_le->bss_info_le;
+		bi_length = escan_buflen - WL_ESCAN_RESULTS_FIXED_SIZE;
+		if (!brcmf_bss_info_valid(bss_info_le, bi_length) ||
+		    le32_to_cpu(bss_info_le->length) != bi_length) {
+			bphy_err(drvr, "Ignoring invalid bss_info record\n");
+			goto exit;
+		}
 
 		if (brcmf_p2p_scan_finding_common_channel(cfg, bss_info_le))
 			goto exit;
 
 		if (!cfg->int_escan_map && !cfg->scan_request) {
 			brcmf_dbg(SCAN, "result without cfg80211 request\n");
-			goto exit;
-		}
-
-		bi_length = le32_to_cpu(bss_info_le->length);
-		if (bi_length != escan_buflen -	WL_ESCAN_RESULTS_FIXED_SIZE) {
-			bphy_err(drvr, "Ignoring invalid bss_info length: %d\n",
-				 bi_length);
 			goto exit;
 		}
 
@@ -3608,7 +3663,9 @@ brcmf_cfg80211_escan_handler(struct brcmf_if *ifp,
 
 		list = (struct brcmf_scan_results *)
 				cfg->escan_info.escan_buf;
-		if (bi_length > BRCMF_ESCAN_BUF_SIZE - list->buflen) {
+		if (list->buflen < sizeof(*list) ||
+		    list->buflen > BRCMF_ESCAN_BUF_SIZE ||
+		    bi_length > BRCMF_ESCAN_BUF_SIZE - list->buflen) {
 			bphy_err(drvr, "Buffer is too small: ignoring\n");
 			goto exit;
 		}
@@ -6397,6 +6454,10 @@ brcmf_bss_roaming_done(struct brcmf_cfg80211_info *cfg,
 		goto done;
 
 	bi = (struct brcmf_bss_info_le *)(buf + 4);
+	if (!brcmf_bss_info_valid(bi, WL_BSS_INFO_MAX - 4)) {
+		err = -EINVAL;
+		goto done;
+	}
 	ch.chspec = le16_to_cpu(bi->chanspec);
 	cfg->d11inf.decchspec(&ch);
 
