@@ -61,7 +61,8 @@ pub(crate) fn allocation(index:usize)->Result<Allocation,Error> {
         RUNTIME_POINTERS=>(0xfffffc20406b7b4d,1203,false,Zero),
         HARDWARE_DATA=>(0xfffffc20406fb5fc,35332,false,Hardware),
         UNKNOWN_PAIR=>(0xfffffc2040747f00,256,false,Zero),
-        FWLOG_PAYLOAD=>(0xfffffc2040900000,fwlog::PAYLOAD_BYTES,false,Zero),
+        // Keep the log payload above the fixed render control/queue pages.
+        FWLOG_PAYLOAD=>(0xfffffc2040a40000,fwlog::PAYLOAD_BYTES,false,Zero),
         UNKNOWN_C0=>(0xfffffc2070003000,4096,true,Zero),
         UNKNOWN_C1=>(0xfffffc2070008000,16384,true,Zero),
         UNKNOWN_C3=>(0xfffffc2070010000,16384,true,Zero),

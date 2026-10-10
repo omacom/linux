@@ -24,6 +24,7 @@ def function(source, marker):
 PREFIX = r'''
 #![allow(dead_code, unused_variables)]
 mod m3_init_layout; mod m3_init_storage;
+mod m3_pass_layout; mod m3_shared_layout;
 use m3_init_layout as init; use m3_init_storage as storage;
 IMPORT_PAYLOAD
 type Result<T=()> = core::result::Result<T,i32>;
@@ -72,6 +73,24 @@ fn main(){
   let pstart=owner.address & !0x3fff;let pend=(owner.address+owner.size as u64+0x3fff)&!0x3fff;
   assert!(pend<=start || end<=pstart,"payload mapping aliases owner {i}");
  }
+ let pstart=owner.address & !0x3fff;
+ let pend=(owner.address+owner.size as u64+0x3fff)&!0x3fff;
+ for i in 0..m3_shared_layout::COUNT {
+  let a=m3_shared_layout::allocation(i).unwrap();
+  if a.space!=m3_pass_layout::Space::Firmware {continue;}
+  let start=a.address & !0x3fff;let end=(a.address+a.size as u64+0x3fff)&!0x3fff;
+  assert!(pend<=start || end<=pstart,"payload mapping aliases render owner {i}");
+ }
+ for clusters in [1,2] {for slot in 0..m3_pass_layout::SLOTS {for field in m3_pass_layout::FIELDS {
+  let a=m3_pass_layout::board_allocation(slot,field,clusters).unwrap();
+  if a.space!=m3_pass_layout::Space::Firmware {continue;}
+  let start=a.address & !0x3fff;let end=(a.address+a.size as u64+0x3fff)&!0x3fff;
+  assert!(pend<=start || end<=pstart,"payload mapping aliases render pass {slot} {field:?}");
+ }}}
+ let init_bm=0xfffffc2000628000u64..0xfffffc200062c000u64;
+ assert!(pend<=init_bm.start || init_bm.end<=pstart,"payload aliases InitBM");
+ assert!(pend<=storage::IOMAP_BASE,"payload enters fixed firmware MMIO arena");
+ assert!(pend<=0xfffffc2d00000000,"payload enters dynamic firmware arena");
  let region=|i|{let a=storage::allocation(i).unwrap();init::Region::new(a.address,a.size).unwrap()};
  let channel=init::Channel{state:region(0),ring:region(1)};
  let mut channels=[channel;17];for i in 0..17{channels[i]=init::Channel{state:region(i*2),ring:region(i*2+1)};}
@@ -114,12 +133,18 @@ def check(directory, ref=None, mutant=None):
     if mutant == 'stride':
         config = config.replace('init::fwlog::ENTRY_SIZE,init::fwlog::SLOTS', '0xd8,init::fwlog::SLOTS')
     if mutant == 'small':
-        storage = storage.replace('0xfffffc2040900000,fwlog::PAYLOAD_BYTES', '0xfffffc2040900000,16')
+        storage = storage.replace('fwlog::PAYLOAD_BYTES,false,Zero)', '16,false,Zero)')
     if mutant == 'alias':
-        storage = storage.replace('0xfffffc2040900000,fwlog::PAYLOAD_BYTES', '0xfffffc204078bff0,fwlog::PAYLOAD_BYTES')
+        import re
+        storage = re.sub(r'FWLOG_PAYLOAD=>\(0x[0-9a-f]+,', 'FWLOG_PAYLOAD=>(0xfffffc204078bff0,', storage)
+    if mutant == 'render-alias':
+        import re
+        storage = re.sub(r'FWLOG_PAYLOAD=>\(0x[0-9a-f]+,', 'FWLOG_PAYLOAD=>(0xfffffc2040900000,', storage)
     if mutant == 'index':
         layout = layout.replace('index >= SLOTS as u64', 'index > u64::MAX')
-    for name, content in [('m3_init_layout.rs', layout), ('m3_init_storage.rs', storage)]:
+    for name, content in [('m3_init_layout.rs', layout), ('m3_init_storage.rs', storage),
+                          ('m3_pass_layout.rs', source('m3_pass_layout.rs')),
+                          ('m3_shared_layout.rs', source('m3_shared_layout.rs'))]:
         (directory / name).write_text(content)
     raw = source('fw/channels.rs')
     wire = '\n'.join('#[derive(Debug,Copy,Clone,Default)]\n#[repr(C)]\n' + function(raw, 'pub(crate) struct ' + name + ' {') for name in ['RawFwLogMsg', 'RawFwLogPayloadMsg'])
@@ -136,6 +161,7 @@ def check(directory, ref=None, mutant=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--old-ref')
+    parser.add_argument('--regression-ref')
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='m3-fwlog-') as name:
         directory = Path(name)
@@ -147,7 +173,12 @@ def main():
             if not result.returncode or 'full firmware-log payload allocation' not in result.stderr:
                 raise SystemExit('original allocation did not fail the capacity control')
             print('PASS original allocation rejects full payload capacity')
-        for mutant in ['stride', 'small', 'alias', 'index']:
+        if args.regression_ref:
+            result = check(directory, ref=args.regression_ref)
+            if not result.returncode or 'payload mapping aliases render owner 29' not in result.stderr:
+                raise SystemExit('released payload did not collide with render buffer-manager counter')
+            print('PASS released payload refuses render buffer-manager page collision')
+        for mutant in ['stride', 'small', 'alias', 'render-alias', 'index']:
             result = check(directory, mutant=mutant)
             if not result.returncode: raise SystemExit('mutant accepted: ' + mutant)
             print('PASS rejected ' + mutant + ' mutant')
