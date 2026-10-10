@@ -119,6 +119,7 @@ struct dcp_fabric_follow_ops {
 	int (*prepare)(void *ctx, unsigned int slot);
 	int (*validate)(void *ctx, unsigned int slot);
 	int (*detach)(void *ctx, unsigned int slot, bool destination);
+	bool (*retained)(void *ctx, unsigned int slot, bool destination);
 	int (*attach)(void *ctx, unsigned int slot, bool restore);
 	void (*publish)(void *ctx, unsigned int slot, bool restore);
 	void (*lost)(void *ctx, unsigned int slot);

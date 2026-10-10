@@ -139,6 +139,7 @@ struct dcp_fabric_deactivate_ops {
 
 struct dcp_fabric_reclaim_ops {
 	int (*release)(void *ctx);
+	bool (*retained)(void *ctx);
 	void (*unplug)(void *ctx);
 	void (*connect_hdmi)(void *ctx);
 	int (*activate)(void *ctx, bool restore);
@@ -152,6 +153,8 @@ dcp_fabric_reclaim_execute(const struct dcp_fabric_reclaim_ops *ops, void *ctx)
 {
 	int ret = ops->release(ctx);
 
+	if (ret && ops->retained && ops->retained(ctx))
+		return ret;
 	ops->unplug(ctx);
 	if (!ret) {
 		ops->connect_hdmi(ctx);

@@ -372,7 +372,7 @@ EXPORT_SYMBOL_GPL(dcp_fabric_follow);
 int dcp_fabric_follow_execute(const struct dcp_fabric_follow_ops *ops,
 			      void *ctx, unsigned int count)
 {
-	unsigned int i, detached = 0, attached = 0;
+	unsigned int i, n, detached = 0, attached = 0;
 	int ret;
 
 	if (!count || count > 2)
@@ -406,9 +406,18 @@ int dcp_fabric_follow_execute(const struct dcp_fabric_follow_ops *ops,
 
 rollback:
 	/* Only a failed original restore makes a connector terminally lost. */
-	while (attached)
-		ops->detach(ctx, --attached, true);
-	for (i = 0; i < detached; i++) {
+	while (attached) {
+		i = --attached;
+		if (ops->detach(ctx, i, true) && ops->retained &&
+		    ops->retained(ctx, i, true))
+			ops->publish(ctx, i, false);
+	}
+	for (n = 0; n < detached; n++) {
+		i = ops->retained ? detached - n - 1 : n;
+		/* A rejected release leaves the selected route where it was. */
+		if (ops->retained &&
+		    (ops->retained(ctx, i, true) || ops->retained(ctx, i, false)))
+			continue;
 		if (ops->attach(ctx, i, true))
 			ops->lost(ctx, i);
 		else

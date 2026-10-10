@@ -731,7 +731,7 @@ void dcp_external_ready(struct apple_dcp *dcp)
 
 #define DCP_EXTERNAL_RETRIES	3
 
-static void dcp_dptx_release_locked(struct apple_dcp *dcp, u32 port);
+static int dcp_dptx_release_locked(struct apple_dcp *dcp, u32 port);
 
 /*
  * Bounded recovery for a native external pipe: re-apply the display mode,
@@ -843,9 +843,13 @@ void dcp_external_retry_work(struct work_struct *work)
 		if (dcp->dptxport[0].enabled && dcp->dptxport[0].connected) {
 			int ret = dptxport_set_hpd(dcp->dptxport[0].service, false);
 
-			if (ret)
+			if (ret) {
 				dev_warn(dcp->dev, "display retry: HPD deassert failed: %d\n", ret);
-			dcp_dptx_release_locked(dcp, 0);
+				return;
+			}
+			ret = dcp_dptx_release_locked(dcp, 0);
+			if (ret)
+				return;
 		}
 		dcp->typec_reconnect_tries = 0;
 	}
@@ -876,7 +880,9 @@ void dcp_external_sink_irq(struct apple_dcp *dcp)
 	}
 	dev_info(dcp->dev, "display sink IRQ_HPD not passed (%d): connecting the display anew\n",
 		 ret);
-	dcp_dptx_disconnect_oob(pdev, 0);
+	ret = dcp_dptx_disconnect_oob(pdev, 0);
+	if (ret)
+		return;
 	dcp_dptx_connect_oob(pdev, 0);
 }
 
@@ -1019,15 +1025,19 @@ static void disconnected_hpd_event(struct apple_connector *con)
 	}
 }
 
-static void dcp_dptx_release_locked(struct apple_dcp *dcp, u32 port)
+static int dcp_dptx_release_locked(struct apple_dcp *dcp, u32 port)
 {
+	int ret;
+
 	lockdep_assert_held(&dcp->hpd_mutex);
 	if (dcp->external) {
 		smp_store_release(&dcp->external_link_ready, false);
 		dcpext_scanout_invalidate(dcp);
 	}
 	if (dcp->dptxport[port].enabled && dcp->dptxport[port].connected) {
-		dptxport_release_display(dcp->dptxport[port].service);
+		ret = dptxport_release_display(dcp->dptxport[port].service);
+		if (ret)
+			return ret;
 		dcp->dptxport[port].connected = false;
 	}
 	/*
@@ -1037,18 +1047,21 @@ static void dcp_dptx_release_locked(struct apple_dcp *dcp, u32 port)
 	 */
 	if (dcp->external_native)
 		dcp_direct_crossbar_link(dcp, false);
+	return 0;
 }
 
 int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
 {
+	int ret;
+
 	/* Release the caller's RemotePort service, not the downstream DFP port. */
 	dev_info(dcp->dev, "%s(port=%d)\n", __func__, port);
 
 	mutex_lock(&dcp->hpd_mutex);
-	dcp_dptx_release_locked(dcp, port);
+	ret = dcp_dptx_release_locked(dcp, port);
 	mutex_unlock(&dcp->hpd_mutex);
 
-	return 0;
+	return ret;
 }
 
 int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
@@ -1162,7 +1175,7 @@ out_unlock:
  * attached, as a CRTC power-off does (see dcp_poweroff()): the firmware's
  * unplug for it is ignored, and dcp_poweron() connects the link again.
  */
-void dcp_dptx_park(struct apple_dcp *dcp)
+int dcp_dptx_park(struct apple_dcp *dcp)
 {
 	int ret;
 
@@ -1177,14 +1190,19 @@ void dcp_dptx_park(struct apple_dcp *dcp)
 		av_service_disconnect(dcp);
 	if (dcp->dptxport[0].enabled && dcp->dptxport[0].connected) {
 		ret = dptxport_set_hpd(dcp->dptxport[0].service, false);
-		if (ret)
+		if (ret) {
 			dev_warn(dcp->dev, "failed to deassert Type-C DPTX HPD: %d\n", ret);
-		dcp_dptx_disconnect(dcp, 0);
+			return ret;
+		}
+		return dcp_dptx_disconnect(dcp, 0);
 	}
+	return 0;
 }
 
 int dcp_dptx_disconnect_drained(struct apple_dcp *dcp, u32 port)
 {
+	int ret;
+
 	WRITE_ONCE(dcp->typec_crtc_off, false);
 	reinit_completion(&dcp->typec_iomfb_hpd_ready);
 
@@ -1193,8 +1211,11 @@ int dcp_dptx_disconnect_drained(struct apple_dcp *dcp, u32 port)
 	if (dcp->avep)
 		av_service_disconnect(dcp);
 
-	if (dcp->dptxport[port].enabled)
-		dptxport_set_hpd(dcp->dptxport[port].service, false);
+	if (dcp->dptxport[port].enabled) {
+		ret = dptxport_set_hpd(dcp->dptxport[port].service, false);
+		if (ret)
+			return ret;
+	}
 
 	return dcp_dptx_disconnect(dcp, port);
 }
