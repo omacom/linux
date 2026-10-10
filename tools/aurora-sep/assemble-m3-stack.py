@@ -15,10 +15,15 @@ HEX = re.compile(r'[0-9a-f]{64}')
 NEO_KERNEL = '77030de18bbbbf077777da5f821e9c15dd1e4c47'
 NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa',
                'e76133daffab1be549b47571691ab77ac7c28201',
-               '25b138b77409fcb49c2e4fbebee57d81bdea9bb3')
+               '25b138b77409fcb49c2e4fbebee57d81bdea9bb3',
+               '417c8e5e26319366cb5fff32d9887abfaa599e76')
 # J615 native25 requires exact kernel, boot source and packaged binary bindings.
-J615_NATIVE25_PAIR = None
-STANDARD_M1N1_SOURCE = "da98807ec496813eac6119e9c16ae9444465304c"
+J615_NATIVE25_PAIR = {
+    'kernel': '417c8e5e26319366cb5fff32d9887abfaa599e76',
+    'm1n1': '31501778e863feb5d2afe77be3a1edc588c98119',
+    'm1n1_bin_sha256': '88561de86ca41eb3cc94b0550674fe07c41a5b6ee5c45b8539c04e2443b0d9d7',
+}
+STANDARD_M1N1_SOURCE = "31501778e863feb5d2afe77be3a1edc588c98119"
 J615_LEGACY_M1N1_SOURCES = ("74ba6bea52d1f865d204bb3f8168705a148fd5c5", STANDARD_M1N1_SOURCE)
 
 def member(path, name):
