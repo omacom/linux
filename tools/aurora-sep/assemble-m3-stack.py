@@ -16,12 +16,19 @@ NEO_KERNEL = '77030de18bbbbf077777da5f821e9c15dd1e4c47'
 NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa',
                'e76133daffab1be549b47571691ab77ac7c28201',
                '25b138b77409fcb49c2e4fbebee57d81bdea9bb3',
-               '417c8e5e26319366cb5fff32d9887abfaa599e76')
+               '417c8e5e26319366cb5fff32d9887abfaa599e76',
+               '9b96a8f6a29ceb3f645ed75e220a71c10e7d8e1f')
 # J615 native25 requires exact kernel, boot source and packaged binary bindings.
 J615_NATIVE25_PAIR = {
-    'kernel': '417c8e5e26319366cb5fff32d9887abfaa599e76',
+    'kernel': '9b96a8f6a29ceb3f645ed75e220a71c10e7d8e1f',
     'm1n1': '31501778e863feb5d2afe77be3a1edc588c98119',
     'm1n1_bin_sha256': '88561de86ca41eb3cc94b0550674fe07c41a5b6ee5c45b8539c04e2443b0d9d7',
+}
+# Reserved firmware DART tables require the matched Neo ESP producer.
+NEO_FW_ROOT_PAIR = {
+    'kernel': '9b96a8f6a29ceb3f645ed75e220a71c10e7d8e1f',
+    'm1n1': 'a67a0420804e5096715d95b5f0fff4eed181557e',
+    'm1n1_bin_sha256': '3eaa76ca39454b4aa232efecba72ffb3770b30a3b1047320c8f50c8ef627056c',
 }
 STANDARD_M1N1_SOURCE = "31501778e863feb5d2afe77be3a1edc588c98119"
 J615_LEGACY_M1N1_SOURCES = ("74ba6bea52d1f865d204bb3f8168705a148fd5c5", STANDARD_M1N1_SOURCE)
@@ -54,6 +61,18 @@ def check_j615_native25(sources, binary_sha, mesa):
         raise ValueError('Mesa does not declare the J615 25G83 session capability')
     if b'asahi,j615-25g83-experimental' not in member(mesa, 'opt/mesa-m3/libexec/mesa-m3-session-env'):
         raise ValueError('Mesa session hook lacks the J615 25G83 admission')
+
+def check_neo_firmware_tables(kernel, sources, binary_sha):
+    pair = NEO_FW_ROOT_PAIR
+    if kernel != pair['kernel']:
+        return
+    if not re.fullmatch(r'[0-9a-f]{40}', pair.get('m1n1') or ''):
+        raise ValueError('Neo firmware tables require a recorded boot source')
+    if sources['m1n1'] != pair['m1n1']:
+        raise ValueError('Neo firmware tables require the matched boot source')
+    if binary_sha != pair['m1n1_bin_sha256']:
+        raise ValueError('Neo firmware tables require the matched boot binary')
+
 
 def desktop_data(manifest, directory):
     data = manifest.get('desktop_fixes')
@@ -108,6 +127,7 @@ def neo_data(manifest, directory):
     digest = hashlib.sha256(boot).hexdigest()
     if digest != neo.get('m1n1_bin_sha256'):
         raise ValueError('Neo bootloader hash differs')
+    check_neo_firmware_tables(manifest['source_commits']['kernel'], sources, digest)
     pins['NEO_M1N1_BIN_SHA'] = digest
     if member(paths['m1n1'], 'usr/share/m1n1-neo/source').strip().decode() != sources['m1n1']:
         raise ValueError('Neo bootloader source differs')

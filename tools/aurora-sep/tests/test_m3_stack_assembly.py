@@ -114,7 +114,9 @@ class Assembly(unittest.TestCase):
         self.assertIn('M1N1_PACKAGE="m1n1-aurora-',script)
         self.assertIn('NEO_M1N1_BIN_SHA="'+neo['m1n1_bin_sha256']+'"',script)
     def test_new_kernel_keeps_both_air_and_neo_pairs(self):
-        self.neo_pair()
+        neo=self.neo_pair()
+        pair=dict(kernel=mod.NEO_FW_ROOT_PAIR['kernel'],m1n1=neo['source_commits']['m1n1'],m1n1_bin_sha256=neo['m1n1_bin_sha256'])
+        patch=mock.patch.object(mod,'NEO_FW_ROOT_PAIR',pair);patch.start();self.addCleanup(patch.stop)
         self.manifest['legacy_gpu_boards']=['j613','j615']
         self.manifest['source_commits']['m1n1']='74ba6bea52d1f865d204bb3f8168705a148fd5c5'
         for kernel in mod.NEO_KERNELS:
@@ -123,6 +125,20 @@ class Assembly(unittest.TestCase):
                 self.assertIn('M3_PERSISTENT_BOARDS="j613 j615"',self.assemble()[0])
         self.manifest['source_commits']['kernel']='e'*40
         with self.assertRaisesRegex(ValueError,'kernel consumer'):self.assemble()
+
+    def test_new_neo_kernel_requires_reserved_table_producer(self):
+        neo=self.neo_pair()
+        self.manifest['source_commits']['kernel']=mod.NEO_FW_ROOT_PAIR['kernel']
+        pair=dict(kernel=mod.NEO_FW_ROOT_PAIR['kernel'],m1n1=neo['source_commits']['m1n1'],m1n1_bin_sha256=neo['m1n1_bin_sha256'])
+        with mock.patch.object(mod,'NEO_FW_ROOT_PAIR',pair):
+            self.assertIn('NEO_M1N1_BIN_SHA="'+neo['m1n1_bin_sha256']+'"',self.assemble()[0])
+        for field,word in [('m1n1','source'),('m1n1_bin_sha256','binary')]:
+            changed=dict(pair);changed[field]='e'*len(pair[field])
+            with self.subTest(field=field), mock.patch.object(mod,'NEO_FW_ROOT_PAIR',changed):
+                with self.assertRaisesRegex(ValueError,'firmware tables.*'+word):self.assemble()
+        changed=dict(pair);changed['m1n1']=None
+        with mock.patch.object(mod,'NEO_FW_ROOT_PAIR',changed):
+            with self.assertRaisesRegex(ValueError,'recorded boot source'):self.assemble()
 
     def test_neo_helper_bytes_are_bound_after_valid_package_hash(self):
         neo=self.neo_pair()

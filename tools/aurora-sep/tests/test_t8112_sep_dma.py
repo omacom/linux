@@ -108,7 +108,7 @@ struct io_pgtable_cfg { struct { int n_levels; } apple_dart_cfg; };
 struct io_pgtable { struct io_pgtable_ops ops; struct io_pgtable_cfg cfg; };
 #define io_pgtable_ops_to_pgtable(ops) ((struct io_pgtable *)(ops))
 #define DART_TCR(dart, sid) ((dart)->hw->tcr + ((sid) << 2))
-/* T8112 has no inherited firmware roots. Reaching those dependencies is an error. */
+/* This T8112 SEP domain has no firmware handoff; firmware-only calls are errors. */
 #define spin_lock_irqsave(lock, flags) abort()
 #define spin_unlock_irqrestore(lock, flags) abort()
 #define READ_ONCE(x) (x)
