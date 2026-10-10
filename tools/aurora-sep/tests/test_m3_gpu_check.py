@@ -82,6 +82,16 @@ class Runtime(unittest.TestCase):
                 self.assertIn('J615 with the experimental opt-in', str(error.exception))
         self.put('proc/device-tree/chosen/asahi,j615-25g83-experimental', b'1\0')
         self.assertIn('Vulkan unavailable', self.verify()[0][1])
+    def test_native_dual_air_identity_never_runs_probe(self):
+        self.native()
+        self.put('proc/device-tree/compatible', b'apple,j613\0apple,j615\0apple,t8122\0')
+        for value in (b'0\0', b'1\0'):
+            with self.subTest(value=value):
+                self.put('proc/device-tree/chosen/asahi,j615-25g83-experimental', value)
+                self.calls=[]
+                with self.assertRaises(CHECK.CheckError):self.verify()
+                self.assertEqual(self.calls,[])
+
     def test_j615_opt_in_does_not_admit_other_boards(self):
         self.native('j504')
         self.put('proc/device-tree/chosen/asahi,j615-25g83-experimental', b'1\0')
