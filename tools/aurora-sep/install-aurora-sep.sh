@@ -17,6 +17,8 @@
 #                                              experimental native OpenGL profile (no migration)
 #   ... | bash -s -- --m3-profile=j615-25g83   J615 on exact25G83: the same profile, EXPERIMENTAL
 #                                              and untested on a J615 (a release must list it)
+#   ... | bash -s -- --archive-esp-history  Archive old unreferenced EFI history before installing
+#   ... | bash -s -- --esp-history          Read-only EFI history inventory
 #   ... | bash -s -- --desktop-fixes  Optional matched stable desktop fixes; unsupported versions are preserved.
 #   ... | bash -s -- --no-m3-mesa     M3 Pro: leave out the M3 Pro's Mesa (installed by default)
 #
@@ -586,6 +588,7 @@ M3_GPU_EXPERIMENT=0
 M3_GPU_PERSISTENT=0
 M3_GPU_AUTO=0
 M3_GPU_EXPLICIT_PROFILE=0
+ESP_ARCHIVE_HISTORY=0
 M3_GPU_PROFILE=legacy
 M3_STACK_ID=""
 M3_PERSISTENT_BOARDS="j613"
@@ -4036,6 +4039,10 @@ install_all() {
   local -a entries candidate_archives=()
   release_source
   require_supported_soc
+  if ((ESP_ARCHIVE_HISTORY)); then
+    ((!READ_ONLY)) || die "--archive-esp-history changes the EFI partition and cannot be combined with --read-only"
+    esp_history_run archive
+  fi
   neo_gpu_plan
   version_notice
   sep_write_notice
@@ -6694,6 +6701,199 @@ m3_persistent_preflight() {
 # linux-aurora UKI. Asahi ESPs are 500 MB and often hold snapshot UKIs too; refuse
 # before anything changes rather than fail mid-transaction with ENOSPC. GRUB keeps its
 # kernels in /boot, which boot_space checks.
+esp_history_builtin() {
+  cat <<'ESP_HISTORY_PY'
+#!/usr/bin/env python3
+"""Archive unreferenced EFI history while retaining boot and recovery entries."""
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import tempfile
+
+LIMIT = 32 * 1024 * 1024
+
+
+def regular(path):
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError(f'not a regular file: {path}')
+    return path
+
+
+def checked_tree(root):
+    root = root.absolute()
+    for path in (root, *root.parents):
+        if path.is_symlink():
+            raise ValueError(f'symlink in directory path: {path}')
+    if not root.is_dir():
+        raise ValueError(f'directory missing: {root}')
+    files = []
+    for directory, dirs, names in os.walk(root):
+        for name in dirs + names:
+            path = Path(directory) / name
+            if path.is_symlink():
+                raise ValueError(f'symlink in boot metadata: {path}')
+        files.extend(Path(directory) / name for name in names)
+        if len(files) > 20000:
+            raise ValueError('too many boot metadata files')
+    return files
+
+
+def digest(path):
+    with regular(path).open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def references(esp, state):
+    refs = ''
+    total = 0
+    for path in checked_tree(esp) + (checked_tree(state) if state.exists() else []):
+        if path.suffix.lower() not in ('.conf', '.cfg', '.json', '.var', '.env') and path.name not in ('BOOTAA64.EFI', 'm1n1-good', 'm1n1-failed'):
+            continue
+        total += regular(path).stat().st_size
+        if total > LIMIT:
+            raise ValueError('boot metadata exceeds read limit')
+        data = path.read_bytes()
+        refs += '\n' + data.decode('utf-8', errors='ignore').lower()
+        refs += '\n' + data.decode('utf-16-le', errors='ignore').lower()
+    if not any((esp / p).is_file() for p in ('EFI/BOOT/limine.conf', 'boot/limine/limine.conf', 'boot/limine.conf', 'limine/limine.conf', 'limine.conf')):
+        raise ValueError('Limine configuration missing; history cannot be classified')
+    return refs
+
+
+def inventory(esp, state):
+    esp, state = esp.absolute(), state.absolute()
+    refs = references(esp, state)
+    groups = [[], []]
+    for path in checked_tree(esp):
+        relative = path.relative_to(esp)
+        if len(relative.parts) == 2 and relative.parts[0] == 'm1n1' and re.fullmatch(r'boot\.bin\.before-[A-Za-z0-9._+-]+', relative.name):
+            groups[0].append(path)
+        elif 'limine_history' in relative.parts[:-1] and re.fullmatch(r'[A-Za-z0-9._+-]+\.efi', relative.name, re.I):
+            groups[1].append(path)
+    records = []
+    for group in groups:
+        newest = set(sorted(group, key=lambda p: (regular(p).stat().st_mtime_ns, p.name), reverse=True)[:2])
+        for path in sorted(group):
+            reason = 'referenced' if path.name.lower() in refs else ('recent' if path in newest else '')
+            records.append({'file':str(path.relative_to(esp)), 'bytes':regular(path).stat().st_size,
+                            'sha256':digest(path), 'protected':reason})
+    return records
+
+
+@contextlib.contextmanager
+def lock(paths):
+    fds = []
+    try:
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            fds.append(fd)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError('nonregular boot lock')
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def archive(esp, state, destination, lock_paths=None):
+    esp, state, destination = esp.absolute(), state.absolute(), destination.absolute()
+    destination.mkdir(parents=True, exist_ok=True)
+    checked_tree(destination)
+    if destination.resolve().is_relative_to(esp.resolve()) or os.stat(destination).st_dev == os.stat(esp).st_dev:
+        raise ValueError('archive must be on a different filesystem from the EFI partition')
+    with lock(lock_paths or [Path('/run/lock/boot-partition.lock'), Path('/tmp/limine-global.lock')]):
+        planned = inventory(esp, state)
+        moved = []
+        for item in planned:
+            if item['protected']:
+                continue
+            source = esp / item['file']
+            target = destination / (item['sha256'] + '.bin')
+            if target.exists():
+                if digest(target) != item['sha256']:
+                    raise ValueError('archive hash collision or damaged archive')
+            else:
+                fd, name = tempfile.mkstemp(prefix='.esp-history-', dir=destination)
+                try:
+                    with os.fdopen(fd, 'wb') as stream, regular(source).open('rb') as incoming:
+                        while chunk := incoming.read(1024 * 1024):
+                            stream.write(chunk)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if digest(Path(name)) != item['sha256']:
+                        raise ValueError('history file changed during copy')
+                    os.replace(name, target)
+                finally:
+                    if os.path.exists(name):
+                        os.unlink(name)
+            # A verified pre-existing archive may still have dirty data pages.
+            with regular(target).open('rb') as stream:
+                os.fsync(stream.fileno())
+            path_key = hashlib.sha256(item['file'].encode()).hexdigest()[:16]
+            receipt = destination / (item['sha256'] + '-' + path_key + '.receipt')
+            entry = {'original':item['file'], 'sha256':item['sha256'], 'bytes':item['bytes'], 'archive':target.name}
+            # Persist restore information before removing the FAT copy.
+            fd, name = tempfile.mkstemp(prefix='.esp-receipt-', dir=destination)
+            try:
+                with os.fdopen(fd, 'w') as stream:
+                    json.dump(entry, stream, sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+                os.replace(name, receipt)
+            finally:
+                if os.path.exists(name):os.unlink(name)
+            directory = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+            try:os.fsync(directory)
+            finally:os.close(directory)
+            # Re-read references and contents immediately before unlinking.
+            current = next((x for x in inventory(esp, state) if x['file'] == item['file']), None)
+            if current is None or current['protected'] or current['sha256'] != item['sha256']:
+                raise ValueError('boot state changed during archive; original retained')
+            source.unlink()
+            directory = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:os.fsync(directory)
+            finally:os.close(directory)
+            moved.append(entry)
+        return moved
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=('report', 'archive'))
+    parser.add_argument('--esp', type=Path, required=True)
+    parser.add_argument('--state', type=Path, default=Path('/var/lib/aurora-sep'))
+    parser.add_argument('--archive', type=Path, default=Path('/var/lib/aurora-sep/esp-history'))
+    args = parser.parse_args()
+    try:
+        if args.action == 'report':
+            result = inventory(args.esp, args.state)
+        else:
+            result = archive(args.esp, args.state, args.archive)
+        print(json.dumps(result, indent=2))
+    except (OSError, ValueError) as error:
+        parser.exit(1, f'EFI history: {error}\n')
+
+
+if __name__ == '__main__':
+    main()
+ESP_HISTORY_PY
+}
+
+esp_history_run() {
+  local target code
+  [[ $(boot_chain) == limine ]] || die "EFI history archiving is available only with Limine"
+  target=$(esp_bootbin) || die "could not find the mounted FAT boot partition"
+  code=$(esp_history_builtin)
+  $sudo python3 -c "$code" "$1" --esp "${target%/m1n1/boot.bin}" --state "$STATE" \
+    --archive "$STATE/esp-history" || die "EFI history was retained where archive checks failed; retry after checking the error"
+}
+
 m3_esp_space_check() {
   local target esp uki=0 bootbin need free
   target=$(esp_bootbin) || die "could not find the mounted FAT boot partition. Nothing was installed."
@@ -6711,7 +6911,8 @@ m3_esp_space_check() {
   [[ $free =~ ^[0-9]+$ ]] || die "could not read the free space on $esp. Nothing was installed."
   ((free >= need)) || die "the EFI partition ($esp) has ${free} MB free and the persistent GPU route needs
     about ${need} MB (a kept boot.bin, the retained GPU-off kernel and the new one). Free space there
-    first (old snapshot UKIs, limine_history). Nothing was installed."
+    first, or rerun this command with --archive-esp-history to archive unreferenced old history
+    outside the EFI partition. Active entries and recent recovery backups are retained. Nothing was installed."
 }
 
 m3_install_cleanup() {
@@ -8120,6 +8321,7 @@ if [[ ${AURORA_SEP_SOURCE_ONLY:-} == 1 ]]; then return 0; fi
 args=()
 for a in "$@"; do
   case $a in
+    --archive-esp-history) ESP_ARCHIVE_HISTORY=1 ;;
     --neo-gpu) NEO_GPU=1 ;;
     --m3-handoff) M3_TRY=1 ;;
     --m3-gpu-experiment) M3_GPU_EXPERIMENT=1 ;;
@@ -8134,6 +8336,9 @@ for a in "$@"; do
   esac
 done
 set -- "${args[@]}"
+if ((ESP_ARCHIVE_HISTORY)) && [[ -n ${1:-} ]]; then
+  die "--archive-esp-history goes with an install; use --esp-history for a read-only inventory"
+fi
 if ((NEO_GPU)) && [[ -n ${1:-} && $1 != --read-only ]]; then
   die "--neo-gpu goes with an install, not with $1"
 fi
@@ -8163,9 +8368,10 @@ case ${1:-} in
   --read-only) READ_ONLY=1; install_all ;;
   --uninstall) uninstall_all ;;
   --reset-touchid) shift; reset_touchid "$@" ;;
+  --esp-history) esp_history_run report ;;
   --m3-report) m3_report ;;
   --m3-power-survey) m3_power_survey ;;
   --m3-gpu-check) shift; m3_gpu_check_run "$@" ;;
   --agent-prompt) release_source >&2; prompt_notice; agent_prompt ;;
-  *) die "unknown option $1 (--read-only, --uninstall, --reset-touchid, --agent-prompt, --m3-report, --m3-power-survey, --neo-gpu, --m3-handoff, --m3-gpu, --m3-gpu-check, --m3-gpu-experiment, --m3-gpu-persistent, --m3-profile=j613-25g83, --m3-profile=j615-25g83, --no-m3-mesa or --desktop-fixes)" ;;
+  *) die "unknown option $1 (--read-only, --uninstall, --reset-touchid, --agent-prompt, --m3-report, --m3-power-survey, --neo-gpu, --m3-handoff, --m3-gpu, --m3-gpu-check, --m3-gpu-experiment, --m3-gpu-persistent, --m3-profile=j613-25g83, --m3-profile=j615-25g83, --no-m3-mesa, --archive-esp-history, --esp-history or --desktop-fixes)" ;;
 esac

@@ -5,6 +5,7 @@ import json
 import hashlib
 import os
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -127,6 +128,34 @@ class HistoryTest(unittest.TestCase):
                 self.archive()
         self.assertTrue(original.exists())
         self.assertFalse(list(self.destination.glob('*.receipt')))
+
+    def shell(self, body):
+        installer = SCRIPT.with_name('install-aurora-sep.sh')
+        return subprocess.run(['bash', '-c',
+            'export AURORA_SEP_SOURCE_ONLY=1; source "$1"; ' + body,
+            'test', str(installer)], capture_output=True, text=True)
+
+    def test_installer_embeds_exact_helper(self):
+        run = self.shell('esp_history_builtin')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout, SCRIPT.read_text())
+
+    def test_install_archives_only_when_requested_before_planning(self):
+        stubs = ('release_source(){ :; }; require_supported_soc(){ :; }; '
+                 'neo_gpu_plan(){ echo PLAN; exit 77; }; '
+                 'esp_history_run(){ echo "HISTORY:$1"; }; ')
+        for enabled in (0, 1):
+            run = self.shell(stubs + f'ESP_ARCHIVE_HISTORY={enabled}; install_all')
+            self.assertEqual(run.returncode, 77, run.stderr)
+            self.assertEqual(run.stdout.splitlines(),
+                             (['HISTORY:archive'] if enabled else []) + ['PLAN'])
+
+    def test_read_only_install_does_not_archive(self):
+        run = self.shell('release_source(){ :; }; require_supported_soc(){ :; }; '
+                         'esp_history_run(){ echo ARCHIVE; }; '
+                         'ESP_ARCHIVE_HISTORY=1; READ_ONLY=1; install_all')
+        self.assertNotEqual(run.returncode, 0)
+        self.assertNotIn('ARCHIVE', run.stdout)
 
 
 if __name__ == '__main__':
