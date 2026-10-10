@@ -548,4 +548,3 @@ m3_install_packages
         self.assertNotIn('asahi.t8122_start=1', (self.etc/'default/limine').read_text())
         self.assertFalse((self.etc/'intent').exists())
         self.assertFalse((self.etc/'profile').exists())
-
