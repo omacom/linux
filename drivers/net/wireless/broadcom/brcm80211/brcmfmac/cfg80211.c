@@ -6305,80 +6305,96 @@ static s32 brcmf_get_assoc_ies(struct brcmf_cfg80211_info *cfg,
 			       struct brcmf_if *ifp)
 {
 	struct brcmf_pub *drvr = cfg->pub;
-	struct brcmf_cfg80211_assoc_ielen_le *assoc_info;
+	struct brcmf_cfg80211_assoc_ielen_le assoc_info = {};
 	struct brcmf_cfg80211_connect_info *conn_info = cfg_to_conn(cfg);
 	struct brcmf_cfg80211_edcf_acparam edcf_acparam_info[EDCF_AC_COUNT];
-	u32 req_len;
-	u32 resp_len;
-	s32 err = 0;
+	u8 *buffer = NULL, *req_ie = NULL, *resp_ie = NULL;
+	u32 req_len, resp_len, received;
+	s32 err;
 
 	brcmf_clear_assoc_ies(cfg);
-
-	err = brcmf_fil_iovar_data_get(ifp, "assoc_info",
-				       cfg->extra_buf, WL_ASSOC_INFO_MAX);
+	err = brcmf_fil_iovar_data_get_len(ifp, "assoc_info", &assoc_info,
+					   sizeof(assoc_info), &received);
 	if (err) {
 		bphy_err(drvr, "could not get assoc info (%d)\n", err);
 		return err;
 	}
-	assoc_info =
-		(struct brcmf_cfg80211_assoc_ielen_le *)cfg->extra_buf;
-	req_len = le32_to_cpu(assoc_info->req_len);
-	resp_len = le32_to_cpu(assoc_info->resp_len);
+	if (received < sizeof(assoc_info))
+		return -EBADMSG;
+	req_len = le32_to_cpu(assoc_info.req_len);
+	resp_len = le32_to_cpu(assoc_info.resp_len);
 	if (req_len > WL_EXTRA_BUF_MAX || resp_len > WL_EXTRA_BUF_MAX) {
 		bphy_err(drvr, "invalid lengths in assoc info: req %u resp %u\n",
 			 req_len, resp_len);
 		return -EINVAL;
 	}
+	if (req_len || resp_len) {
+		buffer = kzalloc(WL_EXTRA_BUF_MAX, GFP_KERNEL);
+		if (!buffer)
+			return -ENOMEM;
+	}
 	if (req_len) {
-		err = brcmf_fil_iovar_data_get(ifp, "assoc_req_ies",
-					       cfg->extra_buf,
-					       WL_ASSOC_INFO_MAX);
+		err = brcmf_fil_iovar_data_get_len(ifp, "assoc_req_ies", buffer,
+						   max_t(u32, req_len, WL_ASSOC_INFO_MAX),
+						   &received);
 		if (err) {
 			bphy_err(drvr, "could not get assoc req (%d)\n", err);
-			return err;
+			goto done;
 		}
-		conn_info->req_ie_len = req_len;
-		conn_info->req_ie =
-		    kmemdup(cfg->extra_buf, conn_info->req_ie_len,
-			    GFP_KERNEL);
-		if (!conn_info->req_ie)
-			conn_info->req_ie_len = 0;
-	} else {
-		conn_info->req_ie_len = 0;
-		conn_info->req_ie = NULL;
+		if (received < req_len) {
+			err = -EBADMSG;
+			goto done;
+		}
+		req_ie = kmemdup(buffer, req_len, GFP_KERNEL);
+		if (!req_ie) {
+			err = -ENOMEM;
+			goto done;
+		}
 	}
 	if (resp_len) {
-		err = brcmf_fil_iovar_data_get(ifp, "assoc_resp_ies",
-					       cfg->extra_buf,
-					       WL_ASSOC_INFO_MAX);
+		memset(buffer, 0, WL_EXTRA_BUF_MAX);
+		err = brcmf_fil_iovar_data_get_len(ifp, "assoc_resp_ies", buffer,
+						   max_t(u32, resp_len, WL_ASSOC_INFO_MAX),
+						   &received);
 		if (err) {
 			bphy_err(drvr, "could not get assoc resp (%d)\n", err);
-			return err;
+			goto done;
 		}
-		conn_info->resp_ie_len = resp_len;
-		conn_info->resp_ie =
-		    kmemdup(cfg->extra_buf, conn_info->resp_ie_len,
-			    GFP_KERNEL);
-		if (!conn_info->resp_ie)
-			conn_info->resp_ie_len = 0;
-
+		if (received < resp_len) {
+			err = -EBADMSG;
+			goto done;
+		}
+		resp_ie = kmemdup(buffer, resp_len, GFP_KERNEL);
+		if (!resp_ie) {
+			err = -ENOMEM;
+			goto done;
+		}
+	}
+	/* Publish both IE buffers only after both firmware replies succeed. */
+	conn_info->req_ie = req_ie;
+	conn_info->req_ie_len = req_len;
+	conn_info->resp_ie = resp_ie;
+	conn_info->resp_ie_len = resp_len;
+	req_ie = NULL;
+	resp_ie = NULL;
+	err = 0;
+	if (resp_len) {
 		err = brcmf_fil_iovar_data_get(ifp, "wme_ac_sta",
 					       edcf_acparam_info,
 					       sizeof(edcf_acparam_info));
 		if (err) {
 			brcmf_err("could not get wme_ac_sta (%d)\n", err);
-			return err;
+			goto done;
 		}
-
 		brcmf_wifi_prioritize_acparams(edcf_acparam_info,
 					       cfg->ac_priority);
-	} else {
-		conn_info->resp_ie_len = 0;
-		conn_info->resp_ie = NULL;
 	}
+done:
 	brcmf_dbg(CONN, "req len (%d) resp len (%d)\n",
 		  conn_info->req_ie_len, conn_info->resp_ie_len);
-
+	kfree(buffer);
+	kfree(req_ie);
+	kfree(resp_ie);
 	return err;
 }
 

@@ -528,8 +528,9 @@ static void brcmf_msgbuf_ioctl_resp_wake(struct brcmf_msgbuf *msgbuf)
 }
 
 
-static int brcmf_msgbuf_query_dcmd(struct brcmf_pub *drvr, int ifidx,
-				   uint cmd, void *buf, uint len, int *fwerr)
+static int brcmf_msgbuf_query_dcmd_len(struct brcmf_pub *drvr, int ifidx,
+				   uint cmd, void *buf, uint len, int *fwerr,
+				    u32 *ret_len)
 {
 	struct brcmf_msgbuf *msgbuf = (struct brcmf_msgbuf *)drvr->proto->pd;
 	struct sk_buff *skb = NULL;
@@ -538,6 +539,8 @@ static int brcmf_msgbuf_query_dcmd(struct brcmf_pub *drvr, int ifidx,
 
 	brcmf_dbg(MSGBUF, "ifidx=%d, cmd=%d, len=%d\n", ifidx, cmd, len);
 	*fwerr = 0;
+	if (ret_len)
+		*ret_len = 0;
 	msgbuf->ctl_completed = false;
 	err = brcmf_msgbuf_tx_ioctl(drvr, ifidx, cmd, buf, len);
 	if (err)
@@ -556,13 +559,27 @@ static int brcmf_msgbuf_query_dcmd(struct brcmf_pub *drvr, int ifidx,
 		if (!skb)
 			return -EBADF;
 
+		if (ret_len && msgbuf->ioctl_resp_ret_len > skb->len) {
+			brcmu_pkt_buf_free_skb(skb);
+			return -EBADMSG;
+		}
 		memcpy(buf, skb->data, (len < msgbuf->ioctl_resp_ret_len) ?
 				       len : msgbuf->ioctl_resp_ret_len);
 	}
 	brcmu_pkt_buf_free_skb(skb);
 
+	if (ret_len)
+		*ret_len = min_t(u32, len, msgbuf->ioctl_resp_ret_len);
 	*fwerr = msgbuf->ioctl_resp_status;
 	return 0;
+}
+
+
+static int brcmf_msgbuf_query_dcmd(struct brcmf_pub *drvr, int ifidx,
+				 uint cmd, void *buf, uint len, int *fwerr)
+{
+	return brcmf_msgbuf_query_dcmd_len(drvr, ifidx, cmd, buf, len,
+					 fwerr, NULL);
 }
 
 
@@ -1657,6 +1674,7 @@ int brcmf_proto_msgbuf_attach(struct brcmf_pub *drvr)
 
 	drvr->proto->hdrpull = brcmf_msgbuf_hdrpull;
 	drvr->proto->query_dcmd = brcmf_msgbuf_query_dcmd;
+	drvr->proto->query_dcmd_len = brcmf_msgbuf_query_dcmd_len;
 	drvr->proto->set_dcmd = brcmf_msgbuf_set_dcmd;
 	drvr->proto->tx_queue_data = brcmf_msgbuf_tx_queue_data;
 	drvr->proto->configure_addr_mode = brcmf_msgbuf_configure_addr_mode;
