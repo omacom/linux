@@ -37,6 +37,7 @@
 #include "xtlv.h"
 #include "ratespec.h"
 #include "interface_create.h"
+#include "scan_timeout.h"
 
 #define BRCMF_SCAN_IE_LEN_MAX		2048
 
@@ -84,7 +85,6 @@
 
 #define BRCMF_SCAN_CHANNEL_TIME		40
 #define BRCMF_SCAN_UNASSOC_TIME		40
-#define BRCMF_SCAN_PASSIVE_TIME		120
 
 #define BRCMF_ND_INFO_TIMEOUT		msecs_to_jiffies(2000)
 
@@ -1180,6 +1180,7 @@ brcmf_cfg80211_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
 	struct brcmf_pub *drvr = cfg->pub;
 	struct brcmf_cfg80211_vif *vif;
+	unsigned int timeout;
 	s32 err = 0;
 
 	brcmf_dbg(TRACE, "Enter\n");
@@ -1226,13 +1227,19 @@ brcmf_cfg80211_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
 	if (vif == cfg->p2p.bss_idx[P2PAPI_BSSCFG_DEVICE].vif)
 		vif = cfg->p2p.bss_idx[P2PAPI_BSSCFG_PRIMARY].vif;
 
+	/* P2P supplies its own dwell policy; retain its existing timeout. */
+	timeout = cfg->escan_info.run == brcmf_run_escan ?
+		brcmf_scan_timeout_ms(wiphy, request) : BRCMF_ESCAN_TIMER_INTERVAL_MS;
+	brcmf_dbg(SCAN, "scan timeout %u ms for %u channels\n",
+		  timeout, request->n_channels);
+
 	err = brcmf_do_escan(vif->ifp, request);
 	if (err)
 		goto scan_out;
 
 	/* Arm scan timeout timer */
 	mod_timer(&cfg->escan_timeout,
-		  jiffies + msecs_to_jiffies(BRCMF_ESCAN_TIMER_INTERVAL_MS));
+		  jiffies + msecs_to_jiffies(timeout));
 
 	return 0;
 
