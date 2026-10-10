@@ -119,9 +119,9 @@ class ReleaseGuardTest(unittest.TestCase):
         self.assertEqual(pending, [], "placeholders left in install-aurora-sep.sh")
 
     def test_packages_follow_version(self):
-        names = [f for f, _ in package_entries()]
-        self.assertIn(f"linux-aurora-$VERSION-aarch64.pkg.tar.zst", names)
-        self.assertIn(f"linux-aurora-headers-$VERSION-aarch64.pkg.tar.zst", names)
+        names = [f.replace("$VERSION", VERSION) for f, _ in package_entries()]
+        self.assertIn(f"linux-aurora-{VERSION}-aarch64.pkg.tar.zst", names)
+        self.assertIn(f"linux-aurora-headers-{VERSION}-aarch64.pkg.tar.zst", names)
         self.assertEqual(len([n for n in names if n.startswith("m1n1-")]), 1, names)
 
 
