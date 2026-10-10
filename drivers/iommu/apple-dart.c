@@ -755,7 +755,8 @@ apple_dart_hw_unmap_locked_ttbr(struct apple_dart_stream_map *stream_map, u8 idx
 
 static int
 apple_dart_hw_sync_locked(struct io_pgtable_cfg *cfg,
-			 struct apple_dart_stream_map *stream_map)
+			 struct apple_dart_stream_map *stream_map,
+			 bool defer_unknown)
 {
 	struct apple_dart *dart = stream_map->dart;
 	unsigned long flags;
@@ -763,6 +764,20 @@ apple_dart_hw_sync_locked(struct io_pgtable_cfg *cfg,
 
 	spin_lock_irqsave(&dart->lock, flags);
 	for_each_set_bit(sid, stream_map->sidmap, dart->num_streams) {
+		bool ready = true;
+
+		if (defer_unknown) {
+			for (idx = 0; idx < cfg->apple_dart_cfg.n_ttbrs; idx++) {
+				if (!dart->locked_ttbr[sid][idx] ||
+				    !dart->locked_owned[sid][idx]) {
+					ready = false;
+					break;
+				}
+			}
+			if (!ready)
+				continue;
+		}
+
 		for (idx = 0; idx < cfg->apple_dart_cfg.n_ttbrs; idx++) {
 			u64 *live = dart->locked_ttbr[sid][idx];
 			u64 *owned = dart->locked_owned[sid][idx];
@@ -1087,7 +1102,8 @@ static int apple_dart_domain_flush_tlb_range(struct apple_dart_domain *domain,
 				"failed to power DART for TLB synchronization: %d\n", ret);
 			return ret;
 		}
-		ret = stream.dart->locked ? apple_dart_hw_sync_locked(cfg, &stream) : 0;
+		ret = stream.dart->locked ?
+			apple_dart_hw_sync_locked(cfg, &stream, true) : 0;
 		if (ret)
 			dev_err_ratelimited(stream.dart->dev,
 				"failed to publish host page-table entries: %d\n", ret);
@@ -1317,7 +1333,7 @@ apple_dart_setup_translation_locked(struct apple_dart_domain *domain,
 		if (ret)
 			goto unmap;
 	}
-	ret = apple_dart_hw_sync_locked(cfg, stream_map);
+	ret = apple_dart_hw_sync_locked(cfg, stream_map, false);
 	if (!ret)
 		ret = stream_map->dart->hw->invalidate_tlb(stream_map);
 	if (!ret)
