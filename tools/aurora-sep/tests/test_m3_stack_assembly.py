@@ -172,3 +172,58 @@ class Assembly(unittest.TestCase):
     def test_wrong_delegated_selector_refuses(self):
         self.mesa_member('opt/mesa-m3/libexec/mesa-m3-session-env',b'profile=legacy\n')
         with self.assertRaisesRegex(ValueError,'selector'):self.assemble()
+    def test_native25_default_is_j613_and_otherwise_unchanged(self):
+        script,ident=self.assemble()
+        template=(ROOT/'install-aurora-sep.sh').read_text()
+        # Omitted, the two new fields keep the template's own values.
+        for line in ('M3_NATIVE25_BOARDS="j613"','M3_STAGE1_25_J615_VERSIONS=""'):
+            self.assertIn('\n'+line+'\n',template);self.assertIn('\n'+line+'\n',script)
+        self.manifest['native25_boards']=['j613'];self.manifest['stage1_25_j615_versions']=['ignored']
+        explicit,other=self.assemble()
+        self.assertEqual(explicit.replace(other,ident),script)
+    def kernel_files(self,dtbs):
+        files={'.PKGINFO':b'pkgname = linux-aurora\npkgver = candidate-1\narch = aarch64\n'}
+        files.update(dtbs)
+        self.package('kernel','linux-aurora',files)
+    def j615_release(self):
+        self.manifest['native25_boards']=['j613','j615']
+        self.manifest['stage1_25_j615_versions']=['v1.6.1-m3air25.stage1']
+        self.binary+=b'asahi,j615-25g83-experimental\0'
+        self.manifest['m1n1_bin_sha256']=hashlib.sha256(self.binary).hexdigest()
+        self.package('m1n1','m1n1-aurora',{'.PKGINFO':b'pkgname = m1n1-aurora\npkgver = candidate-1\narch = aarch64\n',
+                                           'usr/lib/asahi-boot/m1n1.bin':self.binary})
+        profile=b'apple,j613-25g83-profile\0apple,firmware-compat\0'
+        self.kernel_files({'usr/lib/modules/test/dtbs/apple/t8122-j613-25g83.dtb':profile,
+                          'usr/lib/modules/test/dtbs/apple/t8122-j615-25g83.dtb':b'apple,j615\0'+profile})
+    def test_j615_native25_release_is_filled_in(self):
+        self.j615_release()
+        script=self.assemble()[0]
+        self.assertIn('M3_NATIVE25_BOARDS="j613 j615"\n',script)
+        self.assertIn('M3_STAGE1_25_J615_VERSIONS="v1.6.1-m3air25.stage1"\n',script)
+        self.assertIn('M3_PERSISTENT_BOARDS="j613"\n',script)
+    def test_j615_native25_needs_dtb_switch_and_stage1(self):
+        for case,why in [('no dtb','one separate J61525'),('two dtbs','one separate J61525'),('no j615 compatible','J61525 DTB profile'),
+                         ('no profile marker','J61525 DTB profile'),('no switch','J615 25G83 switch'),
+                         ('no stage1','stage1_25_j615_versions'),('bad stage1','stage1_25_j615_versions')]:
+            with self.subTest(case=case):
+                self.setUp();self.j615_release()
+                profile=b'apple,j613-25g83-profile\0apple,firmware-compat\0'
+                j613={'usr/lib/modules/test/dtbs/apple/t8122-j613-25g83.dtb':profile}
+                if case=='no dtb':self.kernel_files(j613)
+                elif case=='two dtbs':self.kernel_files({**j613,'usr/lib/modules/test/dtbs/apple/t8122-j615-25g83.dtb':b'apple,j615\0'+profile,
+                                                        'usr/lib/modules/test/dtbs/t8122-j615-25g83.dtb':b'apple,j615\0'+profile})
+                elif case=='no j615 compatible':self.kernel_files({**j613,'usr/lib/modules/test/dtbs/apple/t8122-j615-25g83.dtb':profile})
+                elif case=='no profile marker':self.kernel_files({**j613,'usr/lib/modules/test/dtbs/apple/t8122-j615-25g83.dtb':b'apple,j615\0apple,firmware-compat\0'})
+                elif case=='no switch':
+                    self.binary=self.binary.replace(b'asahi,j615-25g83-experimental\0',b'')
+                    self.manifest['m1n1_bin_sha256']=hashlib.sha256(self.binary).hexdigest()
+                    self.package('m1n1','m1n1-aurora',{'.PKGINFO':b'pkgname = m1n1-aurora\npkgver = candidate-1\narch = aarch64\n',
+                                                       'usr/lib/asahi-boot/m1n1.bin':self.binary})
+                elif case=='no stage1':self.manifest['stage1_25_j615_versions']=[]
+                else:self.manifest['stage1_25_j615_versions']=['v1.6.1 m3air25']
+                with self.assertRaisesRegex(ValueError,why):self.assemble()
+    def test_native25_board_list_is_checked(self):
+        for bad in [['j615'],['j613','j613'],['j613','j504'],[],'j613 j615']:
+            with self.subTest(bad=bad):
+                self.manifest['native25_boards']=bad
+                with self.assertRaisesRegex(ValueError,'native25'):self.assemble()

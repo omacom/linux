@@ -118,6 +118,11 @@ def assemble(template, manifest, directory):
         raise ValueError('J615 legacy GPU requires the matched J615 kernel consumer')
     if 'j615' in boards and sources['m1n1'] != '74ba6bea52d1f865d204bb3f8168705a148fd5c5':
         raise ValueError('J615 legacy GPU requires the matched J615 m1n1 producer')
+    # 25G83 is one firmware ABI profile (j613-25g83); J615 opts in to it as an experiment.
+    native25 = manifest.get('native25_boards', ['j613'])
+    if (not isinstance(native25, list) or 'j613' not in native25 or len(set(native25)) != len(native25) or
+            any(b not in ('j613', 'j615') for b in native25)):
+        raise ValueError('native25 boards must name supported Air boards once, including j613')
     packages = manifest['packages']
     if set(packages) != set(ROLES): raise ValueError('manifest must name every matched and auxiliary package')
     pins = {}; resolved = {}
@@ -138,6 +143,8 @@ def assemble(template, manifest, directory):
     if binary_sha != manifest.get('m1n1_bin_sha256'): raise ValueError('unified m1n1 binary hash differs')
     for marker in (b'apple,j613-25g83-mapping-handoff', b'apple,j613-25g83-gpu-handoff'):
         if marker not in binary: raise ValueError('unified m1n1 lacks required handoff')
+    if 'j615' in native25 and b'asahi,j615-25g83-experimental' not in binary:
+        raise ValueError('unified m1n1 lacks the experimental J615 25G83 switch')
     native = member(resolved['mesa'],'opt/mesa-m3/25g83/share/mesa-m3/profile')
     if native != b'j613-25g83-gl-only\n': raise ValueError('native Mesa marker differs')
     hook = member(resolved['mesa'],'usr/share/uwsm/env.d/50-mesa-m3')
@@ -153,16 +160,27 @@ def assemble(template, manifest, directory):
     dt = member(resolved['kernel'],dtbs[0])
     for marker in (b'apple,j613-25g83-profile\0', b'apple,firmware-compat\0'):
         if marker not in dt: raise ValueError('J61325 DTB profile is missing')
-    for field in ('stage1_25_versions',):
+    if 'j615' in native25:
+        dt_path = re.compile(r'usr/lib/modules/[^/]+/dtbs/(?:apple/)?t8122-j615-25g83\.dtb')
+        dtbs = [p for p in listing if dt_path.fullmatch(p)]
+        if len(dtbs) != 1: raise ValueError('kernel must supply exactly one separate J61525 DTB')
+        dt = member(resolved['kernel'],dtbs[0])
+        for marker in (b'apple,j613-25g83-profile\0', b'apple,firmware-compat\0', b'apple,j615\0'):
+            if marker not in dt: raise ValueError('J61525 DTB profile is missing')
+    fields = ('stage1_25_versions','stage1_25_j615_versions') if 'j615' in native25 else ('stage1_25_versions',)
+    for field in fields:
         versions = manifest.get(field,[])
-        if not versions or any(not re.fullmatch(r'[A-Za-z0-9._+-]+',v) for v in versions):
-            raise ValueError('qualified source-built stage1 versions required for 25 profile')
+        if (not isinstance(versions, list) or not versions or
+                any(not isinstance(v, str) or not re.fullmatch(r'[A-Za-z0-9._+-]+',v) for v in versions)):
+            raise ValueError(f'qualified source-built stage1 versions required for 25 profile ({field})')
     neo_pins = neo_data(manifest, directory)
     stack_id = hashlib.sha256(json.dumps(manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     s = template
     substitutions = dict(VERSION=manifest['version'],TAG=manifest['tag'],M1N1_BIN_SHA=binary_sha,
                          DESKTOP_FIXES_DATA=desktop_data(manifest, directory),
                          M3_STACK_ID=stack_id, M3_PERSISTENT_BOARDS=' '.join(boards), M3_STAGE1_25_VERSIONS=' '.join(manifest['stage1_25_versions']),
+                         M3_NATIVE25_BOARDS=' '.join(native25),
+                         M3_STAGE1_25_J615_VERSIONS=' '.join(manifest['stage1_25_j615_versions']) if 'j615' in native25 else '',
                          M1N1_PACKAGE=pins['m1n1'],M3_PRO_MESA_PACKAGE=pins['mesa'])
     substitutions.update(neo_pins)
     for key,value in substitutions.items():
