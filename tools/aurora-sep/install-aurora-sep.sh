@@ -4060,7 +4060,7 @@ package_database_check() {
 }
 
 install_all() {
-  local entry file sha kernel chain
+  local entry file sha kernel chain rc
   local -a entries candidate_archives=()
   release_source
   require_supported_soc

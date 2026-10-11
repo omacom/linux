@@ -226,13 +226,18 @@ echo "update-m1n1 rebuilt" >>"$FAKE/log"
 """
 
 CURL = r"""#!/bin/bash
-out= url=
+out= url= writeout=
 while (($#)); do
-  case $1 in -o) out=$2; shift ;; http*) url=$1 ;; esac
+  case $1 in -o) out=$2; shift ;; -w) writeout=$2; shift ;; http*) url=$1 ;; esac
   shift
 done
 echo "curl $url" >>"$FAKE/log"
-cp "$FAKE_PKGS/$(basename "$url")" "$out"
+if cp "$FAKE_PKGS/$(basename "$url")" "$out"; then
+  [[ -z $writeout ]] || printf 200
+else
+  [[ -z $writeout ]] || printf 404
+  exit 22
+fi
 """
 
 
