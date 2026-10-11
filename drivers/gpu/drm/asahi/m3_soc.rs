@@ -436,14 +436,15 @@ pub(crate) static T8122: Soc = Soc {
     per_cluster_voltages: false,
 };
 
-/// T6031 (M3 Max, G15C): one die, four clusters of ten core slots. Groundwork only: not in
-/// [`SOCS`], so nothing reads it, and T6031 still fails closed in the probe (`driver.rs`).
+/// T6031 (M3 Max, G15C): one die, four clusters of ten core slots. Not in [`SOCS`]. The probe
+/// still refuses it unless `asahi.t6031_start=1` (`t6031_start`). An unarmed probe never reads
+/// this table. An armed probe does. `require_complete` still refuses it: `unported` is nonempty
+/// and the IO maps, HwDataB words and SGX setup stay `None` here. The armed start supplies those
+/// from `t6031_knobs`.
 ///
 /// The compatibles, the register windows, the mailbox and its interrupts are the J516C ADT's
 /// (`t6031-gpu.dtsi`). The power configuration and the operating points, with one voltage per
-/// cluster, would come from the boot loader. Every value the ADT does not give is `None`, and
-/// `unported` names what is missing, so `require_complete` would refuse this table as it is.
-/// The candidates for the missing values are listed in `t6031_knobs`.
+/// cluster, come from the boot loader.
 #[allow(dead_code)]
 pub(crate) static T6031: Soc = Soc {
     name: "T6031",
@@ -478,7 +479,7 @@ pub(crate) static T6031: Soc = Soc {
         counts_mask: 0x000f_ff00,
     },
     images: &[],
-    firmware: None,
+    firmware: Some(&crate::m3_firmware::T6031_LAYOUT),
     hwcfg: Some(&hw::t6031::CONFIG),
     io_mappings: None,
     iomaps: None,
@@ -491,7 +492,7 @@ pub(crate) static T6031: Soc = Soc {
         fragment_dependency: false,
     },
     power_from_boot_loader: true,
-    unported: &["the G15C values the device tree does not give (InitData version, IO mappings, HwDataB words, MTR masks): no start is written for this SoC"],
+    unported: &["the G15C InitData version, IO mappings, HwDataB words and MTR masks are not in this table: only asahi.t6031_start=1 supplies them"],
     // The performance state only, as on T8122.
     retire_mmio: 4,
     mtr_masks: None,
@@ -512,7 +513,7 @@ pub(crate) static T6031: Soc = Soc {
 ///   +0x1804, +0x1814 and +0x1860 and all-ones at +0x1848);
 /// - HwDataA +0x11e0: 30 (T6030: 40), a word of the shader-engine controller block;
 /// - HwDataA +0x1290: 125, and HwDataA +0x424c: 24000000, the 24 MHz reference clock.
-static T8122_HWDATA_WORDS: [(usize, u32); 17] = [
+pub(crate) static T8122_HWDATA_WORDS: [(usize, u32); 17] = [
     (0xa30, 0),
     (0xa34, 4),
     (0x17e0, 1),
@@ -534,11 +535,11 @@ static T8122_HWDATA_WORDS: [(usize, u32); 17] = [
 
 /// The T8122 Globals words that differ from the shared builder's: +0x9bc, the CDM backoff
 /// timeout (4) with the three bytes after it 0 (T6030: 1, 0, 0).
-static T8122_GLOBALS_WORDS: [(usize, u32); 1] = [(0x9bc, 4)];
+pub(crate) static T8122_GLOBALS_WORDS: [(usize, u32); 1] = [(0x9bc, 4)];
 
 /// The T8122 HwData object's firmware VA: 0x8a80 bytes before the end of the fixed allocation's
 /// last page.
-const T8122_HWDATA_ADDRESS: u64 = 0xffff_fc20_4070_4000 - 0x8a80;
+pub(crate) const T8122_HWDATA_ADDRESS: u64 = 0xffff_fc20_4070_4000 - 0x8a80;
 
 // The fixed HwData allocation (`m3_init_storage::allocation`): 0x8a04 bytes ending at the page
 // end 0xfffffc2040704000. The moved object stays inside the same pages, and HwDataA is 16-byte

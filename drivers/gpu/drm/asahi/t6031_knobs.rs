@@ -3,8 +3,8 @@
 
 //! Definitions for a T6031 (M3 Max, G15C) GPU start: the values of the G15C runtime
 //! configuration that the J516C device tree does not give, each with a default and the
-//! alternatives to try, and the firmware IO mappings they select. Data only: no kernel parameter
-//! reads them and nothing in the driver uses them yet. The host tests (tools/asahi) check them.
+//! alternatives to try, and the firmware IO mappings they select. The armed start
+//! (`asahi.t6031_start=1`, `t6031_start`) reads them. The host tests (tools/asahi) check them.
 //!
 //! The names are the parameter names a start would take (`asahi.t6031_<name>`). A value a
 //! definition does not accept is a refusal naming it, never a fall back to the default.
@@ -1070,5 +1070,48 @@ mod tests {
         ] {
             assert!(validate_identity(&compat, schema, result, version, masks).is_err(), "{version:#x} {masks:x?}");
         }
+    }
+
+    #[test]
+    fn default_iomaps_fit_the_runtime_window() {
+        use crate::m3_init_storage::{self as storage, IoMap};
+
+        fn packed(values: &Values) -> (Vec<IoMap>, Vec<usize>) {
+            let (mappings, count) = mappings(values);
+            let mut address = storage::IOMAP_BASE;
+            let mut out = Vec::with_capacity(count);
+            for &(slot, physical, total, _, _) in &mappings[..count] {
+                let offset = (physical & 0x3fff) as usize;
+                let size = (offset + total as usize + 0x3fff) & !0x3fff;
+                out.push(IoMap {
+                    slot,
+                    physical: physical & !0x3fff,
+                    size,
+                    address,
+                    offset,
+                });
+                address += size as u64 + 0x4000;
+            }
+            let slots = out.iter().map(|io| io.slot).collect();
+            (out, slots)
+        }
+
+        let (iomaps, slots) = packed(&resolve(&with(|_| {})).unwrap());
+        assert_eq!(slots, [0, 1, 2, 3, 9, 12, 18, 19, 20, 23, 26, 29]);
+        for absent in [7, 10, 11, 21, 24, 25, 28] {
+            assert!(!slots.contains(&absent), "slot {absent}");
+        }
+        storage::validate_iomaps(&iomaps).unwrap();
+        let sgx = iomaps.iter().find(|io| io.slot == 3).unwrap();
+        assert_eq!(sgx.physical, 0x4_0800_0000);
+        assert_eq!(sgx.offset, 0);
+        let clock = iomaps.iter().find(|io| io.slot == 29).unwrap();
+        assert_eq!(clock.physical + clock.offset as u64, 0x4_08e5_c000);
+        let one = iomaps.iter().find(|io| io.slot == 1).unwrap();
+        assert!(one.offset < one.size);
+
+        let (dropped, slots) = packed(&resolve(&with(|r| r.io_drop = u64::from(IO_DROP_ALLOWED))).unwrap());
+        assert_eq!(slots, [0, 3, 29]);
+        storage::validate_iomaps(&dropped).unwrap();
     }
 }
