@@ -229,7 +229,8 @@ out:
  * call goes out on the stream of @parent, the callback its caller handles.
  */
 static int link_submit(struct dcp_v14_link *link, const struct apple_dcp_link_rpc_header *rpc,
-		       u32 size, bool nested, u64 parent)
+		       u32 size, bool nested, u64 parent,
+		       dcp_v14_admit_fn admit, void *admit_cookie, bool *vetoed)
 {
 	struct apple_dcp_link_stream_layout layout;
 	u32 total, offset = 0, input_size, output_size;
@@ -271,6 +272,12 @@ static int link_submit(struct dcp_v14_link *link, const struct apple_dcp_link_rp
 		goto out;
 	if (offset + size > layout.capacity) {
 		ret = -EMSGSIZE;
+		goto out;
+	}
+	/* No callback can run or enter the queue between this check and send. */
+	if (admit && !admit(admit_cookie)) {
+		*vetoed = true;
+		ret = -EAGAIN;
 		goto out;
 	}
 	memcpy(link->rpc + layout.local_offset + offset, rpc, size);
@@ -402,9 +409,10 @@ int dcp_v14_link_pump(struct dcp_v14_link *link, unsigned long timeout,
  * Must not be called concurrently with itself or dcp_v14_link_pump(), except
  * from inside a callback handler.
  */
-int dcp_v14_link_call(struct dcp_v14_link *link, u32 tag, const void *input,
+int dcp_v14_link_call_guarded(struct dcp_v14_link *link, u32 tag, const void *input,
 		      u32 input_size, void *output, u32 output_size,
-		      u32 completion_id, dcp_v14_callback_fn callback, void *cookie)
+		      u32 completion_id, dcp_v14_callback_fn callback, void *cookie,
+		      dcp_v14_admit_fn admit, void *admit_cookie, bool *vetoed)
 {
 	struct apple_dcp_link_rpc_header *packet;
 	unsigned long deadline = jiffies + DCP_V14_CALL_TIMEOUT;
@@ -413,6 +421,7 @@ int dcp_v14_link_call(struct dcp_v14_link *link, u32 tag, const void *input,
 	bool nested, replied = false;
 	int ret;
 
+	*vetoed = false;
 	ret = apple_dcp_link_rpc_payload_size(input_size, output_size, &size);
 	if (ret || size > APPLE_DCP_LINK_STREAM_BUFFER_SIZE)
 		return -EMSGSIZE;
@@ -455,7 +464,7 @@ retry:
 		expected |= parent & APPLE_DCP_LINK_MSG_REMOTE;
 	}
 	mutex_unlock(&link->lock);
-	ret = link_submit(link, packet, size, nested, parent);
+	ret = link_submit(link, packet, size, nested, parent, admit, admit_cookie, vetoed);
 	/* A callback arrived between the drain and the submit. */
 	if (ret == -EBUSY && !nested && time_before(jiffies, deadline))
 		goto retry;
@@ -503,4 +512,14 @@ abandon:
 	link_fail(link);
 	mutex_unlock(&link->lock);
 	return ret;
+}
+
+int dcp_v14_link_call(struct dcp_v14_link *link, u32 tag, const void *input,
+		      u32 input_size, void *output, u32 output_size,
+		      u32 completion_id, dcp_v14_callback_fn callback, void *cookie)
+{
+	bool vetoed;
+
+	return dcp_v14_link_call_guarded(link, tag, input, input_size, output,
+		output_size, completion_id, callback, cookie, NULL, NULL, &vetoed);
 }

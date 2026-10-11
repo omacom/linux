@@ -213,6 +213,7 @@ struct apple_dcp_v14 {
 	u64 chunk_generation;
 	/* External: the parts of the display's description published now. */
 	unsigned int described;
+	u64 description_generation;
 	wait_queue_head_t described_wait;
 
 	/* Boot framebuffer and native panel timing (notch rows included). */
@@ -283,23 +284,32 @@ static void dcp_v14_stopped_work(struct work_struct *work)
 }
 
 /* Called with the lock held, or from a callback. */
-static int dcp_v14_call(struct apple_dcp_v14 *v14, u32 tag, const void *in, u32 in_size,
-			void *out, u32 out_size, u32 completion)
+static int dcp_v14_call_guarded(struct apple_dcp_v14 *v14, u32 tag, const void *in, u32 in_size,
+			void *out, u32 out_size, u32 completion,
+			dcp_v14_admit_fn admit, void *admit_cookie)
 {
+	bool vetoed;
 	int ret;
 
 	if (v14->failed)
 		return -EIO;
 	dev_dbg(v14->dev, "call %#x in %u out %u\n", tag, in_size, out_size);
-	ret = dcp_v14_link_call(&v14->link, tag, in, in_size, out, out_size, completion,
-				dcp_v14_callback, v14);
-	if (ret) {
+	ret = dcp_v14_link_call_guarded(&v14->link, tag, in, in_size, out, out_size, completion,
+				dcp_v14_callback, v14, admit, admit_cookie, &vetoed);
+	if (ret && !vetoed) {
 		v14->failed = true;
 		dev_err(v14->dev, "DCP call %#x failed: %d; recovery requires a reboot\n",
 			tag, ret);
 		dcp_v14_external_stopped(v14);
 	}
 	return ret;
+}
+
+static int dcp_v14_call(struct apple_dcp_v14 *v14, u32 tag, const void *in, u32 in_size,
+			void *out, u32 out_size, u32 completion)
+{
+	return dcp_v14_call_guarded(v14, tag, in, in_size, out, out_size,
+				    completion, NULL, NULL);
 }
 
 /* A call with an optional u32 input of 1 and an optional u32 result to check. */
@@ -662,6 +672,7 @@ static void dcp_v14_external_published(struct apple_dcp_v14 *v14, const char *ke
 			raw = &v14->raw[i];
 	if (!removed && !raw)
 		return;
+	v14->description_generation++;
 	/* The timings count once they parse; see below. */
 	if (removed)
 		v14->described &= ~part;
@@ -2410,6 +2421,31 @@ static int dcp_v14_ctm_locked(struct apple_dcp_v14 *v14,
 	return 0;
 }
 
+static bool dcp_v14_external_described(struct apple_dcp_v14 *v14);
+
+struct dcp_v14_swap_admission {
+	struct apple_dcp_v14 *v14;
+	u64 generation;
+};
+
+static bool dcp_v14_swap_admit(void *cookie)
+{
+	struct dcp_v14_swap_admission *admission = cookie;
+	struct apple_dcp_v14 *v14 = admission->v14;
+	struct apple_dcp *dcp = READ_ONCE(v14->dcp);
+	struct apple_connector *connector;
+
+	if (!v14->external)
+		return true;
+	if (!dcp || READ_ONCE(v14->failed) || !READ_ONCE(v14->powered) ||
+	    !READ_ONCE(v14->mode_live) ||
+	    admission->generation != v14->description_generation ||
+	    !dcp_v14_external_described(v14) || !READ_ONCE(dcp->mode_state.valid))
+		return false;
+	connector = READ_ONCE(dcp->connector);
+	return connector && READ_ONCE(connector->connected);
+}
+
 /*
  * Swap start, then the swap; returns once the firmware completed that swap.
  * @ctm_state, if set, carries the colour matrix to send first.
@@ -2418,6 +2454,7 @@ static int dcp_v14_swap(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
 			u32 width, u32 height, u32 dst_y,
 			const struct drm_crtc_state *ctm_state)
 {
+	struct dcp_v14_swap_admission admission = { .v14 = v14 };
 	__le32 start[4] = {}, started[2] = {}, result[3];
 	u8 *swap;
 	u32 id;
@@ -2431,12 +2468,14 @@ static int dcp_v14_swap(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
 		return -ENOMEM;
 
 	mutex_lock(&v14->lock);
+	admission.generation = v14->description_generation;
 	/*
 	 * A colour matrix the firmware refuses costs night light, not the
 	 * frame: present anyway, and stop sending it (ctm_disabled).
 	 */
 	dcp_v14_ctm_locked(v14, ctm_state);
-	ret = dcp_v14_call(v14, A(406), start, sizeof(start), started, sizeof(started), 0);
+	ret = dcp_v14_call_guarded(v14, A(406), start, sizeof(start), started, sizeof(started),
+				  0, dcp_v14_swap_admit, &admission);
 	if (!ret && le32_to_cpu(started[1]))
 		ret = -EIO;
 	id = le32_to_cpu(started[0]);
@@ -2445,8 +2484,8 @@ static int dcp_v14_swap(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
 	if (!ret) {
 		dcp_v14_encode_swap(swap, id, DCP_V14_BLACK, surface, iova, width, height,
 				    dst_y, DCP_V14_LAYER);
-		ret = dcp_v14_call(v14, A(407), swap, DCP_V14_SWAP_SIZE, result, sizeof(result),
-				   id);
+		ret = dcp_v14_call_guarded(v14, A(407), swap, DCP_V14_SWAP_SIZE, result, sizeof(result),
+				   id, dcp_v14_swap_admit, &admission);
 		/* The swap status sits at byte 5 of the reply. */
 		if (!ret && get_unaligned_le32((u8 *)result + 5))
 			ret = -EIO;
