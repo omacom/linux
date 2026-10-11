@@ -1,11 +1,25 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! Exact J613 firmware selection and calibrated performance-table construction.
+//! Exact 25G83 firmware selection (J613; J615 experimental) and calibrated
+//! performance-table construction.
 
 pub(crate) const COMPAT: [u32; 3] = [26, 6, 2];
 
-pub(crate) fn admit(j613: bool, t8122: bool, compat: &[u32], marker: u32, intent: u32) -> bool {
-    j613 && t8122 && compat == COMPAT && marker == 1 && intent == 1
+/// `board`: [`board_admitted`] for the running machine.
+pub(crate) fn admit(board: bool, t8122: bool, compat: &[u32], marker: u32, intent: u32) -> bool {
+    board && t8122 && compat == COMPAT && marker == 1 && intent == 1
+}
+
+/// Require exactly one Air board identity. J615 also needs its experimental
+/// opt-in, independently of the GPU intent and exact firmware profile.
+pub(crate) fn board_admitted(j613: bool, j615: bool, j615_optin: bool) -> bool {
+    (j613 && !j615) || (!j613 && j615 && j615_optin)
+}
+
+/// A /chosen switch from m1n1.conf: m1n1 writes `chosen.<name>=1` as the
+/// string "1" (two bytes); a big-endian u32 1 is accepted as well.
+pub(crate) fn chosen_switch_on(value: Option<&[u8]>) -> bool {
+    matches!(value, Some(b"1\0") | Some([0, 0, 0, 1]))
 }
 
 #[cfg(not(test))]
@@ -17,23 +31,36 @@ pub(crate) fn selected(pdev: &kernel::platform::Device<kernel::device::Core>) ->
     let root = kernel::of::root().ok_or(ENODEV)?;
     let names = root.get_property::<KVec<u8>>(c_str!("compatible"))?;
     let j613 = names.split(|b| *b == 0).any(|s| s == b"apple,j613");
+    let j615 = names.split(|b| *b == 0).any(|s| s == b"apple,j615");
     let t8122 = names.split(|b| *b == 0).any(|s| s == b"apple,t8122");
     // SAFETY: the static path is NUL terminated; a successful lookup owns one reference.
     let chosen = unsafe { bindings::of_find_node_opts_by_path(c_str!("/chosen").as_char_ptr(), core::ptr::null_mut()) };
     if chosen.is_null() { return Err(ENODEV); }
-    let mut length = 0;
-    // SAFETY: the owned reference keeps the property alive through the read below.
-    let raw = unsafe { bindings::of_get_property(chosen, c_str!("asahi,t8122-gpu").as_char_ptr(), &mut length) };
-    let intent = if !raw.is_null() && length == 4 {
-        // SAFETY: this property has exactly four bytes, checked above.
-        let bytes = unsafe { core::slice::from_raw_parts(raw.cast::<u8>(), 4) };
-        u32::from_be_bytes(bytes.try_into().map_err(|_| EINVAL)?)
-    } else { 0 };
+    let switch = |name: *const core::ffi::c_char| {
+        let mut length = 0;
+        // SAFETY: the owned reference keeps the property alive through the read below.
+        let raw = unsafe { bindings::of_get_property(chosen, name, &mut length) };
+        let value = if raw.is_null() || !(0..=4).contains(&length) { None } else {
+            // SAFETY: the property has `length` (at most four) bytes, checked above.
+            Some(unsafe { core::slice::from_raw_parts(raw.cast::<u8>(), length as usize) })
+        };
+        chosen_switch_on(value)
+    };
+    let intent = u32::from(switch(c_str!("asahi,t8122-gpu").as_char_ptr()));
+    let j615_optin = switch(c_str!("asahi,j615-25g83-experimental").as_char_ptr());
     // SAFETY: releases the reference returned by the lookup.
     unsafe { bindings::of_node_put(chosen) };
     let marker = node.get_property::<u32>(c_str!("apple,j613-25g83-gpu-handoff")).unwrap_or(0);
 
-    if !admit(j613, t8122, &compat, marker, intent) { return Err(ENODEV); }
+    if !admit(board_admitted(j613, j615, j615_optin), t8122, &compat, marker, intent) {
+        if j615 && !j615_optin {
+            dev_info!(pdev.as_ref(), "G16G: J615 25G83 GPU not admitted: no /chosen/asahi,j615-25g83-experimental = \"1\"\n");
+        }
+        return Err(ENODEV);
+    }
+    if j615 {
+        dev_warn!(pdev.as_ref(), "G16G: J615 25G83 GPU admitted EXPERIMENTALLY (J613 firmware profile, not qualified on a J615)\n");
+    }
     Ok(true)
 }
 
@@ -154,6 +181,24 @@ mod tests {
         assert!(!admit(true,true,&COMPAT,0,1));
         assert!(!admit(true,true,&COMPAT,1,0));
         assert!(!admit(true,true,&COMPAT,2,1));
+    }
+    #[test]
+    fn j615_needs_its_own_opt_in() {
+        assert!(board_admitted(true,false,false));
+        assert!(!board_admitted(false,true,false));
+        assert!(board_admitted(false,true,true));
+        assert!(!board_admitted(false,false,true));
+        assert!(!board_admitted(true,true,false));
+        assert!(!board_admitted(true,true,true));
+    }
+    #[test]
+    fn chosen_switch_accepts_m1n1_string_and_u32() {
+        assert!(chosen_switch_on(Some(b"1\0")));
+        assert!(chosen_switch_on(Some(&[0,0,0,1])));
+        for v in [&b""[..], b"1", b"0\0", b"11\0", &[0,0,0,2], &[1,0,0,0]] {
+            assert!(!chosen_switch_on(Some(v)), "{v:?}");
+        }
+        assert!(!chosen_switch_on(None));
     }
     #[test]
     fn uses_this_macs_voltage_sram_frequency_and_power() {

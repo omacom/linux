@@ -119,6 +119,8 @@ s32 brcmf_fil_iovar_data_set(struct brcmf_if *ifp, const char *name,
 			     const void *data, u32 len);
 s32 brcmf_fil_iovar_data_get(struct brcmf_if *ifp, const char *name, void *data,
 			     u32 len);
+s32 brcmf_fil_iovar_data_get_len(struct brcmf_if *ifp, const char *name,
+			       void *data, u32 len, u32 *ret_len);
 static inline
 s32 brcmf_fil_iovar_int_set(struct brcmf_if *ifp, const char *name, u32 data)
 {

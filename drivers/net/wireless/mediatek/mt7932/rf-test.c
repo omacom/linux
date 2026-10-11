@@ -298,7 +298,124 @@ static void mt_startup_band1_queue_drain_test(struct kunit *test)
 	m->cal_test_context = NULL;
 }
 
+static void mt_invalid_association_channel_wakes_both_test(struct kunit *test)
+{
+	struct mt7932 *m = test->priv;
+	u8 packet[72] = {};
+	struct mt7932_event event = { .packet = packet, .length = sizeof(packet) };
+	unsigned long flags;
+	unsigned int stage, invalid;
+
+	put_unaligned_le32(0x4d, packet + 40);
+	m->connect_channel = 11;
+	for (stage = 0; stage < 2; stage++) {
+		for (invalid = 0; invalid < 4; invalid++) {
+			memset(packet + 48, 0, 24);
+			put_unaligned_le32(1, packet + 60);
+			packet[65] = 11;
+			event.length = sizeof(packet);
+			switch (invalid) {
+			case 0:
+				/* A truncated channel event must end either wait. */
+				event.length = 67;
+				break;
+			case 1:
+				put_unaligned_le32(2, packet + 60);
+				break;
+			case 2:
+				packet[65] = 6;
+				break;
+			default:
+				packet[64] = 0xff;
+				break;
+			}
+			m->connect_error = 0;
+			reinit_completion(&m->assoc_start);
+			reinit_completion(&m->assoc_done);
+			if (stage) {
+				/* The worker has consumed its first association start. */
+				complete(&m->assoc_start);
+				KUNIT_ASSERT_TRUE(test, try_wait_for_completion(&m->assoc_start));
+			}
+			spin_lock_irqsave(&m->response_lock, flags);
+			mt_link_event(m, &event);
+			spin_unlock_irqrestore(&m->response_lock, flags);
+			KUNIT_EXPECT_EQ(test, m->connect_error, -EPROTO);
+			KUNIT_EXPECT_TRUE(test, completion_done(&m->assoc_start));
+			KUNIT_EXPECT_TRUE(test, completion_done(&m->assoc_done));
+			KUNIT_EXPECT_TRUE(test, m->peer_valid);
+			KUNIT_EXPECT_TRUE(test, mt_rf_allowed(m));
+		}
+	}
+}
+
+static void mt_valid_repeated_association_start_test(struct kunit *test)
+{
+	static const struct cfg80211_ops ops = {};
+	struct mt7932 *m = test->priv;
+	struct ieee80211_channel channel = {
+		.band = NL80211_BAND_2GHZ, .center_freq = 2462, .hw_value = 11,
+	};
+	struct ieee80211_supported_band band = {
+		.channels = &channel, .n_channels = 1, .ht_cap.ht_supported = true,
+	};
+	u8 packet[72] = {};
+	struct mt7932_event event = { .packet = packet, .length = sizeof(packet) };
+	struct wiphy *wiphy = wiphy_new(&ops, 0);
+	unsigned long flags;
+	unsigned int start;
+
+	KUNIT_ASSERT_NOT_NULL(test, wiphy);
+	wiphy->bands[NL80211_BAND_2GHZ] = &band;
+	m->wiphy = wiphy;
+	m->connect_channel = 11;
+	put_unaligned_le32(0x4d, packet + 40);
+	put_unaligned_le32(1, packet + 60);
+	packet[65] = 11;
+	for (start = 0; start < 2; start++) {
+		spin_lock_irqsave(&m->response_lock, flags);
+		mt_link_event(m, &event);
+		spin_unlock_irqrestore(&m->response_lock, flags);
+		KUNIT_EXPECT_EQ(test, m->connect_error, 0);
+		KUNIT_EXPECT_TRUE(test, try_wait_for_completion(&m->assoc_start));
+		KUNIT_EXPECT_FALSE(test, completion_done(&m->assoc_done));
+		KUNIT_EXPECT_EQ(test, m->connect_center, (u8)11);
+		KUNIT_EXPECT_TRUE(test, m->peer_valid);
+		KUNIT_EXPECT_TRUE(test, mt_rf_allowed(m));
+	}
+	m->wiphy = NULL;
+	wiphy_free(wiphy);
+}
+
+static void mt_late_association_channel_preserves_terminal_test(struct kunit *test)
+{
+	struct mt7932 *m = test->priv;
+	u8 packet[72] = {};
+	struct mt7932_event event = { .packet = packet, .length = sizeof(packet) };
+	unsigned long flags;
+	unsigned int terminal;
+
+	put_unaligned_le32(0x4d, packet + 40);
+	for (terminal = 0; terminal < 3; terminal++) {
+		m->connecting = terminal != 0;
+		m->disconnecting = terminal == 1;
+		m->connect_error = terminal == 2 ? -ECANCELED : 0;
+		reinit_completion(&m->assoc_start);
+		reinit_completion(&m->assoc_done);
+		spin_lock_irqsave(&m->response_lock, flags);
+		mt_link_event(m, &event);
+		spin_unlock_irqrestore(&m->response_lock, flags);
+		KUNIT_EXPECT_EQ(test, m->connect_error, terminal == 2 ? -ECANCELED : 0);
+		KUNIT_EXPECT_FALSE(test, completion_done(&m->assoc_start));
+		KUNIT_EXPECT_FALSE(test, completion_done(&m->assoc_done));
+		KUNIT_EXPECT_TRUE(test, m->peer_valid);
+	}
+}
+
 static struct kunit_case mt_rf_test_cases[] = {
+	KUNIT_CASE(mt_invalid_association_channel_wakes_both_test),
+	KUNIT_CASE(mt_valid_repeated_association_start_test),
+	KUNIT_CASE(mt_late_association_channel_preserves_terminal_test),
 	KUNIT_CASE(mt_startup_band1_queue_drain_test),
 	KUNIT_CASE(mt_missing_policy_admission_retry_test),
 	KUNIT_CASE(mt_cal_band_reply_completion_test),

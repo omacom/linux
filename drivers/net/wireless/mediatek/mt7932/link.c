@@ -191,8 +191,10 @@ void mt_link_event(struct mt7932 *m, const struct mt7932_event *event)
 		if (length >= 20)
 			dev_info(&m->pdev->dev, "ASSOC_START: band=%u width=%u channel=%u extension=%u\n",
 				 get_unaligned_le32(body + 12), body[16], body[17], body[19]);
-		if (!mt_channel_event(m, body, length))
+		if (!mt_channel_event(m, body, length)) {
 			m->connect_error = -EPROTO;
+			complete(&m->assoc_done);
+		}
 		complete(&m->assoc_start);
 		break;
 	case 0x40:
@@ -504,7 +506,10 @@ report:
 		spin_unlock_irqrestore(&m->response_lock, flags);
 		goto report;
 	}
-	response.status = ret ? WLAN_STATUS_UNSPECIFIED_FAILURE : WLAN_STATUS_SUCCESS;
+	/* No AP status was received on a timeout. Let cfg80211 report it as such. */
+	response.status = ret == -ETIMEDOUT ? -1 :
+		ret ? WLAN_STATUS_UNSPECIFIED_FAILURE : WLAN_STATUS_SUCCESS;
+	response.timeout_reason = NL80211_TIMEOUT_UNSPECIFIED;
 	response.links[0].bss = m->connect_bss;
 	response.links[0].bssid = m->connect_bssid;
 	if (m->assoc_request_seen) {

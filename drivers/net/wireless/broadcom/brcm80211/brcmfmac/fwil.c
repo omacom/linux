@@ -245,6 +245,44 @@ brcmf_fil_iovar_data_get(struct brcmf_if *ifp, const char *name, void *data,
 }
 BRCMF_EXPORT_SYMBOL_GPL(brcmf_fil_iovar_data_get);
 
+s32 brcmf_fil_iovar_data_get_len(struct brcmf_if *ifp, const char *name,
+			       void *data, u32 len, u32 *ret_len)
+{
+	struct brcmf_pub *drvr = ifp->drvr;
+	u32 buflen, received = 0;
+	s32 err, fwerr = 0;
+
+	*ret_len = 0;
+	mutex_lock(&drvr->proto_block);
+	if (drvr->bus_if->state != BRCMF_BUS_UP) {
+		err = -EIO;
+		goto done;
+	}
+	if (len > BRCMF_DCMD_MAXLEN) {
+		err = -EINVAL;
+		goto done;
+	}
+	memset(drvr->proto_buf, 0, sizeof(drvr->proto_buf));
+	buflen = brcmf_create_iovar(name, data, len, drvr->proto_buf,
+				  sizeof(drvr->proto_buf));
+	if (!buflen || buflen > BRCMF_DCMD_MAXLEN) {
+		err = -EINVAL;
+		goto done;
+	}
+	err = brcmf_proto_query_dcmd_len(drvr, ifp->ifidx, BRCMF_C_GET_VAR,
+				       drvr->proto_buf, buflen, &fwerr,
+				       &received);
+	if (!err && fwerr < 0)
+		err = -EBADE;
+	if (!err) {
+		*ret_len = min_t(u32, len, received);
+		memcpy(data, drvr->proto_buf, *ret_len);
+	}
+done:
+	mutex_unlock(&drvr->proto_block);
+	return err;
+}
+
 static u32
 brcmf_create_bsscfg(s32 bsscfgidx, const char *name, char *data, u32 datalen,
 		    char *buf, u32 buflen)

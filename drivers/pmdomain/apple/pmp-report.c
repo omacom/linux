@@ -941,6 +941,52 @@ out_put:
 }
 EXPORT_SYMBOL_GPL(apple_pmp_report_wait_ready);
 
+/* Select one available report entry for the requested PMP bit. */
+static struct device_node *apple_pmp_report_entry(struct device_node *report, u32 id)
+{
+	struct device_node *child, *entry = NULL;
+	u32 reg;
+
+	for_each_available_child_of_node(report, child) {
+		if (!of_device_is_compatible(child, "apple,t6000-pmp-v2-report-entry") ||
+		    of_property_count_u32_elems(child, "reg") != 1 ||
+		    of_property_read_u32(child, "reg", &reg) || reg != id)
+			continue;
+		if (entry) {
+			of_node_put(entry);
+			of_node_put(child);
+			return NULL;
+		}
+		entry = of_node_get(child);
+	}
+	return entry;
+}
+
+/* A current14 T8122 supplier starts through its own display report entry.
+ * The entry consumer pins startup/removal and verifies both READY and DISP ACK.
+ */
+static int apple_pmp_report_wait_t8122_14(struct device *supplier, unsigned int timeout_ms)
+{
+	struct device_node *report, *pmp, *entry;
+	int ret;
+
+	if (!of_machine_is_compatible("apple,t8122") ||
+	    !of_device_is_compatible(supplier->of_node, "apple,t8122-pmp-v2"))
+		return -ENODEV;
+	report = of_find_compatible_node(NULL, NULL, "apple,t8122-pmp-v2-report");
+	if (!report)
+		return -ENODEV;
+	pmp = of_parse_phandle(report, "apple,pmp", 0);
+	/* The display request entry: DISP is PMP request bit 7. */
+	entry = apple_pmp_report_entry(report, 7);
+	ret = pmp == supplier->of_node && entry ?
+		apple_pmp_report_wait_ready(entry, msecs_to_jiffies(timeout_ms)) : -ENODEV;
+	of_node_put(entry);
+	of_node_put(pmp);
+	of_node_put(report);
+	return ret;
+}
+
 /* The native 25G83 PMP starts through its supplier topology, after requests
  * are seeded. Its report is pinned against removal while readiness is read.
  */
@@ -952,6 +998,9 @@ int apple_pmp_report_wait_supplier_ready(struct device *supplier, unsigned int t
 	u64 status;
 	int ret;
 
+	/* A declared native report always takes the unchanged native25 path below. */
+	if (!np)
+		return apple_pmp_report_wait_t8122_14(supplier, timeout_ms);
 	if (!np || !of_device_is_compatible(np, "apple,j613-25g83-pmp-report")) {
 		of_node_put(np);
 		return -ENODEV;

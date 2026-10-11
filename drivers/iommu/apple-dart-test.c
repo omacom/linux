@@ -78,7 +78,7 @@ static void apple_dart_test_locked_handoff(struct kunit *test)
 	cfg.apple_dart_cfg.ttbr[0] = ours;
 
 	/* Legacy firmware mappings are rebuilt by the IOMMU core at handoff. */
-	KUNIT_EXPECT_EQ(test, apple_dart_hw_sync_locked(&cfg, &stream), 0);
+	KUNIT_EXPECT_EQ(test, apple_dart_hw_sync_locked(&cfg, &stream, false), 0);
 	KUNIT_EXPECT_MEMEQ(test, live, ours, sizeof(live));
 	KUNIT_EXPECT_MEMEQ(test, owned, ours, sizeof(owned));
 	apple_dart_retire_root(live, owned, ARRAY_SIZE(live));
@@ -89,7 +89,7 @@ static void apple_dart_test_locked_handoff(struct kunit *test)
 	dart->hw = &apple_dart_hw_t8110;
 	dart->version = 0x0200;
 	live[0] = 0x1001;
-	KUNIT_EXPECT_EQ(test, apple_dart_hw_sync_locked(&cfg, &stream), 0);
+	KUNIT_EXPECT_EQ(test, apple_dart_hw_sync_locked(&cfg, &stream, false), 0);
 	KUNIT_EXPECT_MEMEQ(test, live, ours, sizeof(live));
 }
 
@@ -116,13 +116,13 @@ static void apple_dart_test_firmware_roots(struct kunit *test)
 	cfg.apple_dart_cfg.n_ttbrs = 1;
 	cfg.apple_dart_cfg.ttbr[0] = ours;
 
-	KUNIT_ASSERT_EQ(test, apple_dart_hw_sync_locked(&cfg, &stream), 0);
+	KUNIT_ASSERT_EQ(test, apple_dart_hw_sync_locked(&cfg, &stream, false), 0);
 	KUNIT_EXPECT_EQ(test, live[0], 0x1001ULL);
 	KUNIT_EXPECT_EQ(test, live[1], 0x2001ULL);
 	ours[0] = 0x3001;
-	KUNIT_EXPECT_EQ(test, apple_dart_hw_sync_locked(&cfg, &stream), -EBUSY);
+	KUNIT_EXPECT_EQ(test, apple_dart_hw_sync_locked(&cfg, &stream, false), -EBUSY);
 	dart->version = 0x0203;
-	KUNIT_EXPECT_EQ(test, apple_dart_hw_sync_locked(&cfg, &stream), -EBUSY);
+	KUNIT_EXPECT_EQ(test, apple_dart_hw_sync_locked(&cfg, &stream, false), -EBUSY);
 	KUNIT_EXPECT_EQ(test, live[0], 0x1001ULL);
 	/* Teardown must preserve a root which firmware has since replaced. */
 	live[1] = 0x4001;

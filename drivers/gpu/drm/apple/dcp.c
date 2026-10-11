@@ -23,6 +23,7 @@
 #include <linux/of_platform.h>
 #include <linux/slab.h>
 #include <linux/soc/apple/rtkit.h>
+#include <linux/soc/apple/j613-display.h>
 #include <linux/string.h>
 #include <linux/usb/typec_altmode.h>
 #include <linux/usb/typec_dp.h>
@@ -58,6 +59,11 @@
 static bool show_notch;
 module_param(show_notch, bool, 0644);
 MODULE_PARM_DESC(show_notch, "Use the full display height and shows the notch");
+
+static bool t6030_show_notch;
+module_param(t6030_show_notch, bool, 0444);
+MODULE_PARM_DESC(t6030_show_notch,
+		 "M3 internal display (14.x and 26.6 IOMFB): use the full height and show the notch");
 
 bool hdmi_audio;
 module_param(hdmi_audio, bool, 0644);
@@ -491,6 +497,7 @@ static int dcp_dptx_connect_session(struct apple_dcp *dcp, u32 port,
 				    bool recovery)
 {
 	unsigned long timeout;
+	u8 dfp_port;
 	int ret = 0;
 
 	if (!dcp->phy) {
@@ -531,9 +538,12 @@ static int dcp_dptx_connect_session(struct apple_dcp *dcp, u32 port,
 		smp_store_release(&dcp->external_link_ready, false);
 
 	reinit_completion(&dcp->dptxport[port].linkcfg_completion);
+	WRITE_ONCE(dcp->dptxport[port].tile_hint, false);
 	dcp->dptxport[port].atcphy = dcp->phy;
+	/* a tiled display's second half comes in on the port's dpin1 */
+	dfp_port = port && READ_ONCE(dcp->split.active) ? 2 : dcp->dptx_dfp_port;
 	ret = dptxport_validate_connection(dcp->dptxport[port].service,
-					   dcp->dptx_dfp_port,
+					   dfp_port,
 					   dcp->dptx_phy, dcp->dptx_die);
 	if (ret) {
 		dev_err(dcp->dev,
@@ -547,7 +557,7 @@ static int dcp_dptx_connect_session(struct apple_dcp *dcp, u32 port,
 		goto out_unlock;
 	}
 	ret = dptxport_connect(dcp->dptxport[port].service,
-			       dcp->dptx_dfp_port,
+			       dfp_port,
 			       dcp->dptx_phy, dcp->dptx_die,
 		       dcp_is_typec_output(dcp));
 	if (ret) {
@@ -725,7 +735,7 @@ void dcp_external_ready(struct apple_dcp *dcp)
 
 #define DCP_EXTERNAL_RETRIES	3
 
-static void dcp_dptx_release_locked(struct apple_dcp *dcp, u32 port);
+static int dcp_dptx_release_locked(struct apple_dcp *dcp, u32 port);
 
 /*
  * Bounded recovery for a native external pipe: re-apply the display mode,
@@ -837,9 +847,13 @@ void dcp_external_retry_work(struct work_struct *work)
 		if (dcp->dptxport[0].enabled && dcp->dptxport[0].connected) {
 			int ret = dptxport_set_hpd(dcp->dptxport[0].service, false);
 
-			if (ret)
+			if (ret) {
 				dev_warn(dcp->dev, "display retry: HPD deassert failed: %d\n", ret);
-			dcp_dptx_release_locked(dcp, 0);
+				return;
+			}
+			ret = dcp_dptx_release_locked(dcp, 0);
+			if (ret)
+				return;
 		}
 		dcp->typec_reconnect_tries = 0;
 	}
@@ -870,17 +884,44 @@ void dcp_external_sink_irq(struct apple_dcp *dcp)
 	}
 	dev_info(dcp->dev, "display sink IRQ_HPD not passed (%d): connecting the display anew\n",
 		 ret);
-	dcp_dptx_disconnect_oob(pdev, 0);
+	ret = dcp_dptx_disconnect_oob(pdev, 0);
+	if (ret)
+		return;
 	dcp_dptx_connect_oob(pdev, 0);
+}
+
+/*
+ * tiled_split: DPTX port 1 carries the second half of a tiled display on
+ * this pipeline. Bring it back whenever port 0 (re)connects, as DCP pairs
+ * the tiles only while both ports are connected.
+ */
+static int dcp_dptx_connect_tile(struct apple_dcp *dcp)
+{
+	bool split;
+	int ret;
+
+	scoped_guard(mutex, &dcp->tb_lock)
+		split = dcp->split.active && dcp->split.ready &&
+			dcp->split.generation;
+	if (!split)
+		return 0;
+	ret = dcp_dptx_connect(dcp, 1);
+	if (ret)
+		dev_warn(dcp->dev, "tiled: DPTX port 1 reconnect failed: %d\n", ret);
+	return ret;
 }
 
 int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 {
 	struct dcp_fabric_session session;
+	int ret;
 
 	scoped_guard(mutex, &dcp->hpd_mutex)
 		session = dcp_session_locked(dcp);
-	return dcp_dptx_connect_session(dcp, port, session, !!session.cookie, false);
+	ret = dcp_dptx_connect_session(dcp, port, session, !!session.cookie, false);
+	if (!ret && !port)
+		ret = dcp_dptx_connect_tile(dcp);
+	return ret;
 }
 
 static bool dcp_edid_is_placeholder(const struct drm_edid *drm_edid)
@@ -975,6 +1016,8 @@ static void dcp_typec_reconnect_work(struct work_struct *work)
 			return;
 	}
 	ret = dcp_dptx_connect_session(dcp, 0, session, true, false);
+	if (!ret)
+		ret = dcp_dptx_connect_tile(dcp);
 	guard(mutex)(&dcp->hpd_mutex);
 	if (!dcp_session_valid_locked(dcp, session, true))
 		return;
@@ -1013,15 +1056,19 @@ static void disconnected_hpd_event(struct apple_connector *con)
 	}
 }
 
-static void dcp_dptx_release_locked(struct apple_dcp *dcp, u32 port)
+static int dcp_dptx_release_locked(struct apple_dcp *dcp, u32 port)
 {
+	int ret;
+
 	lockdep_assert_held(&dcp->hpd_mutex);
 	if (dcp->external) {
 		smp_store_release(&dcp->external_link_ready, false);
 		dcpext_scanout_invalidate(dcp);
 	}
 	if (dcp->dptxport[port].enabled && dcp->dptxport[port].connected) {
-		dptxport_release_display(dcp->dptxport[port].service);
+		ret = dptxport_release_display(dcp->dptxport[port].service);
+		if (ret)
+			return ret;
 		dcp->dptxport[port].connected = false;
 	}
 	/*
@@ -1031,18 +1078,23 @@ static void dcp_dptx_release_locked(struct apple_dcp *dcp, u32 port)
 	 */
 	if (dcp->external_native)
 		dcp_direct_crossbar_link(dcp, false);
+	return 0;
 }
 
 int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
 {
+	int ret;
+
 	/* Release the caller's RemotePort service, not the downstream DFP port. */
 	dev_info(dcp->dev, "%s(port=%d)\n", __func__, port);
 
 	mutex_lock(&dcp->hpd_mutex);
-	dcp_dptx_release_locked(dcp, port);
+	ret = dcp_dptx_release_locked(dcp, port);
+	if (!ret)
+		WRITE_ONCE(dcp->dptxport[port].tile_hint, false);
 	mutex_unlock(&dcp->hpd_mutex);
 
-	return 0;
+	return ret;
 }
 
 int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port)
@@ -1156,7 +1208,7 @@ out_unlock:
  * attached, as a CRTC power-off does (see dcp_poweroff()): the firmware's
  * unplug for it is ignored, and dcp_poweron() connects the link again.
  */
-void dcp_dptx_park(struct apple_dcp *dcp)
+int dcp_dptx_park(struct apple_dcp *dcp)
 {
 	int ret;
 
@@ -1169,16 +1221,30 @@ void dcp_dptx_park(struct apple_dcp *dcp)
 	cancel_delayed_work(&dcp->placeholder_edid_wq);
 	if (dcp->avep)
 		av_service_disconnect(dcp);
+	if (READ_ONCE(dcp->split.active) && dcp->dptxport[1].enabled &&
+	    dcp->dptxport[1].connected) {
+		ret = dptxport_set_hpd(dcp->dptxport[1].service, false);
+		if (ret)
+			return ret;
+		ret = dcp_dptx_disconnect(dcp, 1);
+		if (ret)
+			return ret;
+	}
 	if (dcp->dptxport[0].enabled && dcp->dptxport[0].connected) {
 		ret = dptxport_set_hpd(dcp->dptxport[0].service, false);
-		if (ret)
+		if (ret) {
 			dev_warn(dcp->dev, "failed to deassert Type-C DPTX HPD: %d\n", ret);
-		dcp_dptx_disconnect(dcp, 0);
+			return ret;
+		}
+		return dcp_dptx_disconnect(dcp, 0);
 	}
+	return 0;
 }
 
 int dcp_dptx_disconnect_drained(struct apple_dcp *dcp, u32 port)
 {
+	int ret;
+
 	WRITE_ONCE(dcp->typec_crtc_off, false);
 	reinit_completion(&dcp->typec_iomfb_hpd_ready);
 
@@ -1187,8 +1253,11 @@ int dcp_dptx_disconnect_drained(struct apple_dcp *dcp, u32 port)
 	if (dcp->avep)
 		av_service_disconnect(dcp);
 
-	if (dcp->dptxport[port].enabled)
-		dptxport_set_hpd(dcp->dptxport[port].service, false);
+	if (dcp->dptxport[port].enabled) {
+		ret = dptxport_set_hpd(dcp->dptxport[port].service, false);
+		if (ret)
+			return ret;
+	}
 
 	return dcp_dptx_disconnect(dcp, port);
 }
@@ -1546,6 +1615,12 @@ void dcp_poweroff(struct platform_device *pdev)
 			dcp_external_retry(dcp, ret ? "display link released with an HPD error" :
 					   "display link released with no display described",
 					   ret, 500);
+		/* and the second tile's, which dcp_poweron() brings back too */
+		if (READ_ONCE(dcp->split.active) && dcp->dptxport[1].enabled &&
+		    dcp->dptxport[1].connected) {
+			dptxport_set_hpd(dcp->dptxport[1].service, false);
+			dcp_dptx_disconnect(dcp, 1);
+		}
 	} else if (dcp->hdmi_hpd) {
 		bool connected = gpiod_get_value_cansleep(dcp->hdmi_hpd);
 		if (!connected) {
@@ -1814,13 +1889,13 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
 		return DCP_FIRMWARE_UNKNOWN;
 	}
 
-	/* J613 25G83 has a distinct callback table, never a v14 fallback. */
+	/* 25G83 (J613; J615 experimental) has a distinct callback table, never a v14 fallback. */
 	if (of_device_is_compatible(dev->of_node, "apple,t8122-dcp") &&
 	    of_property_present(dev->of_node, "apple,j613-25g83-profile")) {
 		const char *uuid;
 		u32 profile;
 
-		if (of_machine_is_compatible("apple,j613") &&
+		if (apple_t8122_25g83_board() &&
 		    !of_property_read_u32(dev->of_node, "apple,j613-25g83-profile", &profile) &&
 		    profile == 1 && !strcmp(compat_str, "26.6.2") &&
 		    !of_property_read_string(dev->of_node, "apple,firmware-uuid", &uuid) &&
@@ -1913,6 +1988,20 @@ static void dcp_enable_typec_work(struct apple_dcp *dcp)
 		dcp_queue_typec_reconnect(dcp, 0);
 }
 
+/*
+ * The M3 internal displays (14.x and 26.6 IOMFB) also accept
+ * appledrm.t6030_show_notch=1, the switch existing J613/T6030 installs pass,
+ * so the panel comes up at its full height (2560x1664 on the J613) instead
+ * of the module refusing an unknown parameter.
+ */
+static bool dcp_show_notch(struct apple_dcp *dcp)
+{
+	if (dcp->fw_compat != DCP_FIRMWARE_V_14_7 &&
+	    dcp->fw_compat != DCP_FIRMWARE_V_26_6)
+		return show_notch;
+	return show_notch || t6030_show_notch;
+}
+
 static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
 {
 	struct device_node *panel_np;
@@ -1936,7 +2025,7 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
 		dev_info(dev, "DCP index:%u dptx target phy: %u dptx die: %u\n",
 			 dcp->index, dcp->dptx_phy, dcp->dptx_die);
 
-	if (!show_notch)
+	if (!dcp_show_notch(dcp))
 		ret = of_property_read_u32(dev->of_node, "apple,notch-height",
 					   &dcp->notch_height);
 
@@ -2206,6 +2295,9 @@ static int dcp_native_routes_error(struct apple_dcp *dcp, int err)
 
 static int dcp_platform_probe(struct platform_device *pdev)
 {
+	if (of_machine_is_compatible("apple,t8140"))
+		return -ENODEV;
+
 	enum dcp_firmware_version fw_compat;
 	struct device *dev = &pdev->dev;
 	struct apple_dcp *dcp;

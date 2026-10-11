@@ -10,6 +10,7 @@ ccflags-y += \
 	-I $(src)/../include
 
 obj-$(CONFIG_BRCMFMAC) += brcmfmac.o
+obj-$(CONFIG_BRCMFMAC_KUNIT_TEST) += scan_timeout_test.o
 brcmfmac-objs += \
 		cfg80211.o \
 		chip.o \

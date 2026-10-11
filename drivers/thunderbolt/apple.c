@@ -261,7 +261,7 @@ struct apple_dpin_binding {
 
 static bool dp_display = true;
 module_param(dp_display, bool, 0444);
-MODULE_PARM_DESC(dp_display, "Drive displays behind Thunderbolt DP tunnels on t8103, t600x and t6030 (default: true)");
+MODULE_PARM_DESC(dp_display, "Drive displays behind Thunderbolt DP tunnels on t8103, t8112, t600x and t6030 (default: true)");
 
 /*
  * The M1 Pro/Max ATC is the t8103 generation: same DP IN adapter registers,
@@ -269,6 +269,8 @@ MODULE_PARM_DESC(dp_display, "Drive displays behind Thunderbolt DP tunnels on t8
  */
 static const struct of_device_id apple_dpin_qualified_soc[] = {
 	{ .compatible = "apple,t8103" },
+	/* The M2 (t8112) ACIO, NHI and display crossbar are t8103-compatible. */
+	{ .compatible = "apple,t8112" },
 	{ .compatible = "apple,t6000" },
 	{ .compatible = "apple,t6001" },
 	{ .compatible = "apple,t6020" },
@@ -631,7 +633,7 @@ static void apple_dpin_retry_fn(struct work_struct *work)
 
 /*
  * Only where both the display allocator and the connection manager can hold
- * a tunnel for a pipeline (M1-family hosts, see
+ * a tunnel for a pipeline (capacity-retry hosts, see
  * apple_nhi_dp_tunnel_awaits_display()) does a refused tunnel wait for one.
  */
 static void apple_dpin_work_fn(struct work_struct *work)
@@ -2070,8 +2072,8 @@ static void apple_nhi_remove(struct platform_device *pdev)
  * seconds.  Not while devices suspend and resume: stop asking before any of
  * them suspends, let an attempt in flight finish (a wait for appledrm to
  * load gives way, see apple_dpin_connect()), and ask again once all of them
- * have resumed. The tunnel keeps waiting meanwhile. New M1-family handoffs are
- * deferred until complete, including after an aborted suspend. Established
+ * have resumed. The tunnel keeps waiting meanwhile. Suspend-gated handoffs
+ * are deferred until complete, including after an aborted suspend. Established
  * handed callbacks and synchronous tunnel teardown remain permitted.
  */
 static void apple_dpin_pause_retries(struct apple_cio *acio)

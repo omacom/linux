@@ -362,6 +362,22 @@ struct apple_dcp {
 	bool tb_clock_ok;
 	/* tb_lock: the direct DP PHY crossbar output whose clocks run (T6030). */
 	struct mux_control *direct_xbar_up;
+	/*
+	 * Tiled display (LG UltraFine 5K): the second Thunderbolt DP IN of the
+	 * same port drives DPTX port 1 of this pipeline, so DCP sees both tiles
+	 * and presents one display. Under tb_lock like the fields above.
+	 */
+	struct {
+		bool active;
+		bool ready; /* admitted second-stream setup */
+		struct mux_control *xbar;	/* the port's dpin1 crossbar control */
+		int mux_state;			/* dispextN, DPTX port 1 */
+		bool xbar_up;
+		bool clock_ok;
+		u64 generation;			/* the Thunderbolt binding's */
+		int (*set_active)(void *binding, bool active);
+		void *binding;
+	} split;
 	/* CRTC powered off while the Type-C cable stays attached */
 	bool typec_crtc_off;
 	bool typec_follow_start;

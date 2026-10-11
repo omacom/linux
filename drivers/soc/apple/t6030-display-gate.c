@@ -63,6 +63,7 @@
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/sizes.h>
+#include <linux/soc/apple/j613-display.h>
 #include <linux/string.h>
 #include <linux/types.h>
 
@@ -201,6 +202,11 @@ static bool __init gate_pmp_value_wanted(const struct property *prop)
 }
 
 static bool gate_requested __initdata = true;
+
+bool __init apple_t6030_display_gate_enabled(void)
+{
+	return gate_requested;
+}
 
 /* Kept after a successful apply: the live tree now holds its properties. */
 static struct of_changeset gate_cs;
@@ -577,6 +583,27 @@ static int __init gate_pmp_copy_values(struct of_changeset *cs, struct device_no
 	return n;
 }
 
+static int __init gate_t8122_gpu_pmp_link(struct of_changeset *cs, struct device_node *pmp)
+{
+	struct device_node *gpu, *linked;
+	int ret = 0;
+
+	if (gate_soc != &gate_t8122)
+		return 0;
+	gpu = of_find_compatible_node(NULL, NULL, "apple,agx-t8122");
+	if (!gpu || !of_device_is_available(gpu))
+		goto out;
+	linked = of_parse_phandle(gpu, "apple,pmp", 0);
+	if (!pmp || !pmp->phandle || (linked && linked != pmp))
+		ret = -EINVAL;
+	else if (!linked)
+		ret = of_changeset_add_prop_u32(cs, gpu, "apple,pmp", pmp->phandle);
+	of_node_put(linked);
+out:
+	of_node_put(gpu);
+	return ret;
+}
+
 static int __init gate_pmp_apply(struct device_node *dcp, struct device_node **ps,
 				 struct device_node *aic)
 {
@@ -617,6 +644,9 @@ static int __init gate_pmp_apply(struct device_node *dcp, struct device_node **p
 	if (!ret)
 		ret = of_changeset_add_prop_u32(&gate_pmp_cs, dcp, "apple,pmp-report",
 						disp->phandle);
+	/* The current14 T8122 GPU needs an inner AGX vote from this Mac's PMP. */
+	if (!ret)
+		ret = gate_t8122_gpu_pmp_link(&gate_pmp_cs, pmp);
 	/* The DART and mailbox interrupt parent lives in the base tree. */
 	if (!ret)
 		ret = of_changeset_add_prop_u32(&gate_pmp_cs, dart, "interrupt-parent",
@@ -1237,6 +1267,16 @@ static int __init apple_t6030_display_gate(void)
 			gate_soc = gate_socs[i];
 	if (!gate_soc)
 		return 0;
+
+	/* The exact 25G83 tree (J613; J615 experimental) has its own firmware and PMP admission gate. */
+	if (of_machine_is_compatible("apple,j613") || of_machine_is_compatible("apple,j615")) {
+		struct device_node *dcp = of_find_node_by_path("/soc/dcp@28ec00000");
+		bool native = dcp && of_property_present(dcp, "apple,j613-25g83-profile");
+
+		of_node_put(dcp);
+		if (native)
+			return 0;
+	}
 
 	if (!gate_requested) {
 		gate_info("disabled on the command line, display stays on the boot framebuffer\n");

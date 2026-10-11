@@ -681,7 +681,8 @@ struct atcphy_hw {
  * @tunnel_saved: T602X PHY registers have been saved for tunnel teardown
  * @tunnel_saved_regs: Original values of the T602X tunnel clock registers
  * @tunnel_rate: DP link rate code the t8103 tunnel pixel clock is set up for
- * @tunnel_users: T602X DP IN adapters (BIT(dpin)) whose tunnel pixel clock runs
+ * @tunnel_users: DP IN adapters (BIT(dpin)) whose tunnel pixel clock runs; on
+ *	t8103 and t600x both share the one clock
  * @tunnel_dpin_rate: DP link rate code each T602X DP IN adapter's clock runs at
  * @dp_t8122: DisplayPort state of a T8122 generation PHY
  * @dp_t8122.aux: The AUX channel block is powered
@@ -2298,6 +2299,7 @@ static void atc_tunnel_stop_t8103(struct apple_atcphy *atcphy)
 	atcphy_auspll_apb_command(atcphy, 3);
 	atcphy->tunnel_clock_on = false;
 	atcphy->tunnel_rate = 0;
+	atcphy->tunnel_users = 0;
 	dev_dbg(atcphy->dev, "DP tunnel clock stopped\n");
 }
 
@@ -3150,6 +3152,7 @@ static void atcphy_restore_after_pd_off(struct apple_atcphy *atcphy)
 	atcphy->dp_t8122.rate = 0;
 	atcphy->tunnel_clock_on = false;
 	atcphy->tunnel_rate = 0;
+	atcphy->tunnel_users = 0;
 
 	if (!atcphy->dp_only) {
 		_atcphy_dwc3_reset_assert(atcphy);
@@ -3408,10 +3411,14 @@ static const struct phy_ops apple_atc_dp_phy_ops = {
  * Called by appledrm when DCP sets the link rate of a DPTX that feeds
  * Thunderbolt DP IN adapter @dpin (rate is the DP link rate code, 0 = stop).
  */
-/* t600x (M1 Pro/Max) runs the t8103 tunnel clock sequence unchanged. */
+/*
+ * t600x (M1 Pro/Max) and t8112 (M2, whose ATC PHY is t8103-compatible) run
+ * the t8103 tunnel clock sequence unchanged.
+ */
 static bool apple_atc_tunnel_is_t8103_style(void)
 {
-	return of_machine_is_compatible("apple,t8103") || apple_atc_tunnel_is_t600x();
+	return of_machine_is_compatible("apple,t8103") ||
+	       of_machine_is_compatible("apple,t8112") || apple_atc_tunnel_is_t600x();
 }
 
 int apple_atc_dp_tunnel_rate(struct phy *phy, unsigned int dpin, u8 rate)
@@ -3451,17 +3458,28 @@ int apple_atc_dp_tunnel_rate(struct phy *phy, unsigned int dpin, u8 rate)
 	}
 	guard(mutex)(&atcphy->lock);
 	if (!rate) {
-		if (apple_atc_tunnel_is_t8103_style())
-			atc_tunnel_stop_t8103(atcphy);
-		else
+		if (apple_atc_tunnel_is_t8103_style()) {
+			/*
+			 * One pixel clock feeds both DP IN adapters: a stream
+			 * that ends must not stop the other one's clock.
+			 */
+			atcphy->tunnel_users &= ~BIT(dpin);
+			if (!atcphy->tunnel_users)
+				atc_tunnel_stop_t8103(atcphy);
+		} else {
 			atc_tunnel_stop_t602x(atcphy, dpin);
+		}
 		return 0;
 	}
 	if (atcphy->mode != APPLE_ATCPHY_MODE_USB4 && atcphy->mode != APPLE_ATCPHY_MODE_TBT)
 		return -EBUSY;
-	ret = apple_atc_tunnel_is_t8103_style() ?
-		atc_tunnel_start_t8103(atcphy, rate) :
-		atc_tunnel_set_t602x(atcphy, dpin, rate);
+	if (apple_atc_tunnel_is_t8103_style()) {
+		ret = atc_tunnel_start_t8103(atcphy, rate);
+		if (!ret)
+			atcphy->tunnel_users |= BIT(dpin);
+	} else {
+		ret = atc_tunnel_set_t602x(atcphy, dpin, rate);
+	}
 	dev_dbg(atcphy->dev, "DP tunnel clock rate 0x%x: %d (TX_DP_CTRL0=%08x PCLK_STAT=%08x)\n",
 		rate, ret, readl(atcphy->regs.core + ACIOPHY_LANE_DP_CFG_BLK_TX_DP_CTRL0),
 		readl(atcphy->regs.core + ACIOPHY_DP_PCLK_STAT));

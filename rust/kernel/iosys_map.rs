@@ -541,7 +541,7 @@ pub mod tests {
         vec: KVec<T>,
     }
 
-    impl<T: AsBytes + FromBytes + Clone + PartialEq> VecIoSysMap<T> {
+    impl<T: AsBytes + FromBytes + Clone + PartialEq + core::fmt::Debug> VecIoSysMap<T> {
         pub fn new(src: &[T]) -> Result<Self> {
             let mut vec = KVec::<T>::new();
 

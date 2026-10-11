@@ -146,6 +146,10 @@ kernel::module_platform_driver! {
             default: 0,
             description: "25G83 firmware diagnostic trace bits (0 disabled)",
         },
+        g16_j615_setup_records: u32 {
+            default: 0,
+            description: "J615 25G83 (experimental): 1 accepts the 26.6.2 GPU image when only values iBoot writes into it differ from the J613's",
+        },
         g16_pstate: u32 {
             default: 2,
             description: "25G83 performance ceiling: default 2; explicit override bounded by calibrated OPP states",

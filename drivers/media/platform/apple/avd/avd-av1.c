@@ -197,8 +197,9 @@
 
 #define AVD_CDFS_SIZE	sizeof(struct avd_av1_cdfs)
 
+/* Imported planes can have an unaligned length; AVD aligns both tail addresses. */
 #define AVD_AV1_COLOR_OFFSET(dst, cl) \
-	((dst) - ALIGN(cl, AVD_ALIGN))
+	(ALIGN_DOWN((dst), AVD_ALIGN) - ALIGN(cl, AVD_ALIGN))
 #define AVD_AV1_CDFS_OFFSET(dst, cl) \
 	(AVD_AV1_COLOR_OFFSET(dst, cl) - ALIGN(AVD_CDFS_SIZE, AVD_ALIGN))
 
