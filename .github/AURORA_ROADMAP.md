@@ -38,6 +38,7 @@ The existing desktop lock-intent fix remains a [P0 shared-desktop handoff](https
 | P1 | investigation | kernel | [#27 Thunderbolt sink HPD loss: recover input switching without dock replug](https://github.com/omacom/linux-aurora/issues/27) |
 | P1 | needs-retest | kernel | [#28 M2 Max direct USB-C: recover wake hotplug without a missing-event assumption](https://github.com/omacom/linux-aurora/issues/28) |
 | P1 | blocked | desktop | [#29 Desktop handoff: upstream-compatible J293 SHM capture fix after resume](https://github.com/omacom/linux-aurora/issues/29) |
+| P1 | investigation | kernel | [#59 J516S s2idle: keyboard wake fails and lid resume can leave the panel dark](https://github.com/omacom/linux-aurora/issues/59) |
 | P2 | investigation | kernel | [#30 M3 Pro: add correctly described PCIe tunnel hosts for remaining Thunderbolt ports](https://github.com/omacom/linux-aurora/issues/30) |
 | P2 | investigation | kernel | [#31 J516S: 120 Hz mode produces approximately60 Hz page-flip completions](https://github.com/omacom/linux-aurora/issues/31) |
 | P2 | investigation | kernel | [#32 14.x M3 panels: implement real backlight control on J613 and J516S](https://github.com/omacom/linux-aurora/issues/32) |
@@ -56,6 +57,8 @@ The existing desktop lock-intent fix remains a [P0 shared-desktop handoff](https
 | P2 | needs-retest | kernel | [#45 Dual-stream 5K: qualify the integrated tile and rollback paths across supported boards](https://github.com/omacom/linux-aurora/issues/45) |
 | P2 | investigation | integration | [#46 Per-Mac provisioning: document and test stock-install firmware and calibration](https://github.com/omacom/linux-aurora/issues/46) |
 | P2 | investigation | installer | [#47 M3 Pro clean stage1: qualify explicit handoff admission on the supported stub](https://github.com/omacom/linux-aurora/issues/47) |
+| P2 | investigation | kernel | [#58 J516S night light: CTM remains empty and panel colors do not change](https://github.com/omacom/linux-aurora/issues/58) |
+| P2 | needs-retest | kernel | [#60 J516S Bluetooth: determine functional impact of post-resume command timeouts](https://github.com/omacom/linux-aurora/issues/60) |
 | P3 | needs-retest | kernel | [#48 Display audio: qualify HDMI/DP audio before changing its default](https://github.com/omacom/linux-aurora/issues/48) |
 | P3 | candidate | installer | [#49 SMC survey test: synchronize stale-sample fixture without changing load safety](https://github.com/omacom/linux-aurora/issues/49) |
 | P3 | blocked | kernel | [#50 J413/J415 hibernation: implement platform prerequisites before enabling images](https://github.com/omacom/linux-aurora/issues/50) |
@@ -90,6 +93,8 @@ The shared Thunderbolt clock fix, RX refill recovery, tile-following/rollback an
 | [#27 J314S dock-to-adapter recovery](https://github.com/iconidentify/aurora-linux/issues/27) | Original reporter has a passing retest; follow-ups remain in the active queue. |
 | [#20 J516S Bluetooth startup](https://github.com/iconidentify/aurora-linux/issues/20) | Original reporter has a passing retest; follow-ups remain in the active queue. |
 
+M3 Pro Touch ID remains unavailable where the kernel has no admitted SEP platform profile. The GPU/display roadmap does not imply that feature is enabled.
+
 ## Original open-thread destinations
 
 Historical numbers below belong to `iconidentify/aurora-linux`. A migrated thread is not a claim that the bug was fixed.
@@ -102,7 +107,7 @@ Historical numbers below belong to `iconidentify/aurora-linux`. A migrated threa
 | [#16](https://github.com/iconidentify/aurora-linux/issues/16) | [#42](https://github.com/omacom/linux-aurora/issues/42), [#45](https://github.com/omacom/linux-aurora/issues/45) |
 | [#18](https://github.com/iconidentify/aurora-linux/issues/18) | [#52](https://github.com/omacom/linux-aurora/issues/52) |
 | [#19](https://github.com/iconidentify/aurora-linux/issues/19) | [#51](https://github.com/omacom/linux-aurora/issues/51) |
-| [#20](https://github.com/iconidentify/aurora-linux/issues/20) | Original failure addressed; see separate capability/qualification tickets above |
+| [#20](https://github.com/iconidentify/aurora-linux/issues/20) | Original failure addressed; [#60](https://github.com/omacom/linux-aurora/issues/60) |
 | [#21](https://github.com/iconidentify/aurora-linux/issues/21) | [#33](https://github.com/omacom/linux-aurora/issues/33) |
 | [#24](https://github.com/iconidentify/aurora-linux/issues/24) | [#37](https://github.com/omacom/linux-aurora/issues/37) |
 | [#25](https://github.com/iconidentify/aurora-linux/issues/25) | [#42](https://github.com/omacom/linux-aurora/issues/42) |
@@ -131,7 +136,7 @@ Historical numbers below belong to `iconidentify/aurora-linux`. A migrated threa
 | [#82](https://github.com/iconidentify/aurora-linux/issues/82) | [#26](https://github.com/omacom/linux-aurora/issues/26) |
 | [#84](https://github.com/iconidentify/aurora-linux/issues/84) | Original failure addressed; [#44](https://github.com/omacom/linux-aurora/issues/44) |
 | [#86](https://github.com/iconidentify/aurora-linux/issues/86) | [#47](https://github.com/omacom/linux-aurora/issues/47) |
-| [#87](https://github.com/iconidentify/aurora-linux/issues/87) | [#31](https://github.com/omacom/linux-aurora/issues/31), [#32](https://github.com/omacom/linux-aurora/issues/32) |
+| [#87](https://github.com/iconidentify/aurora-linux/issues/87) | [#31](https://github.com/omacom/linux-aurora/issues/31), [#32](https://github.com/omacom/linux-aurora/issues/32), [#33](https://github.com/omacom/linux-aurora/issues/33), [#44](https://github.com/omacom/linux-aurora/issues/44), [#58](https://github.com/omacom/linux-aurora/issues/58), [#59](https://github.com/omacom/linux-aurora/issues/59), [#60](https://github.com/omacom/linux-aurora/issues/60) |
 | [#99](https://github.com/iconidentify/aurora-linux/issues/99) | [#50](https://github.com/omacom/linux-aurora/issues/50) |
 | [#103](https://github.com/iconidentify/aurora-linux/issues/103) | [#49](https://github.com/omacom/linux-aurora/issues/49) |
 | [#109](https://github.com/iconidentify/aurora-linux/issues/109) | [#26](https://github.com/omacom/linux-aurora/issues/26) |
