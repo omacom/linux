@@ -741,6 +741,7 @@ int ibootep_init(struct apple_dcp *dcp)
 	if (!of_machine_is_compatible("apple,t6030") &&
 	    !of_machine_is_compatible("apple,t6031") &&
 	    !of_machine_is_compatible("apple,t6032") &&
+	    !of_machine_is_compatible("apple,t6034") &&
 	    !of_machine_is_compatible("apple,t8122")) {
 		dcp->ibootep = afk_init(dcp, DISP0_ENDPOINT, ibootep_ops);
 		afk_start(dcp->ibootep);
