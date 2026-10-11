@@ -304,6 +304,26 @@ say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Downloads $1 to $2. A dropped connection (an HTTP/2 stream reset, a timeout, a cut transfer) is not a missing file:
+# curl --retry skips most of those, and it restarts from byte 0, so each try here is its own curl call that continues from
+# the bytes already on disk. Returns 0 on success (a 416 answer means the file was already complete; the checksum check
+# after the call still decides), 22 when the server answered with a client error (the file is not there), or curl's last
+# exit code after five network failures.
+fetch_release_file() {
+  local url=$1 out=$2 try rc=0 code
+  for try in 1 2 3 4 5; do
+    code=$(curl -fL --progress-bar -C - -o "$out" -w '%{http_code}' "$url") && return 0
+    rc=$?
+    [[ $rc == 22 && $code == 416 ]] && return 0
+    if [[ $rc == 22 && $code == 4* && $code != 408 && $code != 429 ]]; then return 22; fi
+    if (( try < 5 )); then
+      warn "the download of ${out##*/} was interrupted (curl exit $rc); trying again from where it stopped ($try of 4)"
+      sleep $((try * 2))
+    fi
+  done
+  return "$rc"
+}
+
 sudo=""
 if (( EUID != 0 )); then
   command -v sudo >/dev/null || die "run as root or install sudo"
@@ -4076,12 +4096,17 @@ install_all() {
   for entry in "${entries[@]}"; do
     read -r file sha <<<"$entry"
     say "Downloading $file"
-    if ! curl -fL --retry 3 --progress-bar -o "$work/$file" "$RELEASE_URL/$file"; then
+    fetch_release_file "$RELEASE_URL/$file" "$work/$file" && rc=0 || rc=$?
+    if ((rc != 0)); then
       [[ $RELEASE_URL == "$PUBLIC_RELEASE_URL" ]] ||
         die "could not download $file from the staging/mirror copy that
     AURORA_RELEASE_URL names (shown at the start). That copy is missing the file
     or can't be reached: check it, or unset AURORA_RELEASE_URL to install from
     the public release. Nothing was installed."
+      ((rc == 22)) ||
+        die "could not download $file from $TAG: the connection dropped (curl exit $rc)
+    on all five tries, which points at the network, not at the release or this Mac.
+    Nothing was installed. Run the same command again; it is safe to repeat."
       die "could not download $file from $TAG.
     The release is missing a file this script expects, which is a packaging
     mistake rather than anything wrong with this Mac. Nothing was installed.
