@@ -146,6 +146,7 @@ struct sk_buff *hci_read_local_oob_data_sync(struct hci_dev *hdev, bool ext,
 int hci_reset_sync(struct hci_dev *hdev);
 int hci_dev_open_sync(struct hci_dev *hdev);
 int hci_dev_close_sync(struct hci_dev *hdev);
+int hci_reset_dev_sync(struct hci_dev *hdev);
 
 int hci_powered_update_sync(struct hci_dev *hdev);
 int hci_set_powered_sync(struct hci_dev *hdev, u8 val);
