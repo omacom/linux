@@ -5,7 +5,7 @@ m1n1 keeps the ADT in a reserved-memory region with compatible "phram" and label
 phram module loaded, Linux shows that region as an MTD device named adt. This tool reads it
 through the read-only node /dev/mtdNro, or reads a regular file (tests, offline copies), and
 prints only:
-  - the nodes under ALLOWED_SUBTREES (GPU, display, PMP, power manager, CPU clusters), and
+  - the nodes under ALLOWED_SUBTREES (GPU, ANE, display, PMP, power manager, CPU clusters), and
   - the properties named in LIMITED_NODES of a few container nodes (/, /arm-io, /product).
 Every other node is left out. Inside the printed nodes it drops every property whose name
 contains one of DENIED_NAME_PARTS, and every property whose value contains the value of such a
@@ -64,6 +64,14 @@ ALLOWED_SUBTREES = (
     # stream ids.
     "/arm-io/dart-dcp*",
     "/arm-io/dart-disp*",
+    # Neural engine (ANE), matched by name so a chip this tool has not seen still prints it: the
+    # engine (ane, ane0, ane1: windows, interrupts, clock and power gates, iommu-parent, and any
+    # iop-*-nub or ascwrap child with its mailbox and segments), its DART (dart-ane*: stream ids,
+    # VM range) and the DART's address mapper (mapper-ane*). "ans" is the storage controller and
+    # is not matched.
+    "/arm-io/ane*",
+    "/arm-io/dart-ane*",
+    "/arm-io/mapper-ane*",
     # CPU clusters and cores: ids, cluster types, registers.
     "/cpus",
 )
