@@ -57,3 +57,5 @@ config DRM_APPLE_DISPLAY_KUNIT_TEST
 	  preferred mode selection. Exercise mode list replacement and EDID
 	  invalidation when a sink or display route changes. Check connector
 	  status updates before hotplug notifications and same-state retrains.
+	  Check which 14.x board record an internal display gets on which
+	  machine, and which DCP firmware image each record admits.

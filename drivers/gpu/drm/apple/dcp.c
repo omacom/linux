@@ -2788,6 +2788,11 @@ static const struct apple_dcp_hw_data apple_dcp_hw_t8122 = {
 	.num_dptx_ports = 2,
 };
 
+/* The internal panel only, through the 14.x IOMFB, as on T6030. */
+static const struct apple_dcp_hw_data apple_dcp_hw_t6031 = {
+	.num_dptx_ports = 1,
+};
+
 static const struct apple_dcp_hw_data apple_dcp_hw_t6030_dcpext = {
 	.num_dptx_ports = 1,
 };
@@ -2803,6 +2808,7 @@ static const struct of_device_id of_match[] = {
 	{ .compatible = "apple,t6030-dcp", .data = &apple_dcp_hw_t6030, },
 	{ .compatible = "apple,t6030-dcpext", .data = &apple_dcp_hw_t6030_dcpext, },
 	{ .compatible = "apple,t8122-dcp", .data = &apple_dcp_hw_t8122, },
+	{ .compatible = "apple,t6031-dcp", .data = &apple_dcp_hw_t6031, },
 	{ .compatible = "apple,dcp",       .data = &apple_dcp_hw_dcp,    },
 	{ .compatible = "apple,dcpext",    .data = &apple_dcp_hw_dcpext, },
 	{}

@@ -11,6 +11,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--old-source', type=Path)
 args = parser.parse_args()
 source = (root/'drivers/gpu/drm/apple/iomfb_v14_7.c').read_text()
+board_header = root/'drivers/gpu/drm/apple/iomfb_v14_7_board.h'
+board_types = board_header.read_text() if board_header.exists() else ''
 cases = [('current', source)]
 if args.old_source:
     cases.append(('old', args.old_source.read_text()))
@@ -33,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='dcp14-panels-') as directory:
     struct device_node {const char *compatible;};
     struct device {struct device_node *of_node;};
     static const char *machine;
-    static bool of_device_is_compatible(struct device_node *n,const char *c){return !strcmp(n->compatible,c);}
+    static bool of_device_is_compatible(const struct device_node *n,const char *c){return !strcmp(n->compatible,c);}
     static bool of_machine_is_compatible(const char*c){return !strcmp(machine,c);}
     static struct device_node fb={"simple-framebuffer"},dcp={"apple,t8122-dcp"};
     static u32 width,height,stride,notch,marker_value=1;
@@ -42,7 +44,7 @@ with tempfile.TemporaryDirectory(prefix='dcp14-panels-') as directory:
     #define dev_err_probe(d,e,...) (e)
     static struct device_node *of_find_compatible_node(void*a,void*b,const char*c){return &fb;}
     static int of_property_read_u32(struct device_node*n,const char*k,u32*v){
-     if(!strcmp(k,"apple,t8122-handoff"))*v=marker_value;
+     if(!strcmp(k,"apple,t8122-handoff")||!strcmp(k,"apple,t6031-handoff"))*v=marker_value;
      else if(!strcmp(k,"width"))*v=width;
      else if(!strcmp(k,"height"))*v=height;
      else if(!strcmp(k,"stride"))*v=stride;
@@ -53,10 +55,16 @@ with tempfile.TemporaryDirectory(prefix='dcp14-panels-') as directory:
     static void of_node_put(struct device_node*n){}
     '''
     for name,src in cases:
-     start=src.index('struct dcp_v14_board {');end=src.index('struct dcp_v14_property {')
-     records=src[start:end]
+     end=src.index('struct dcp_v14_property {')
+     if 'struct dcp_v14_board {' in src:
+      records=src[src.index('struct dcp_v14_board {'):end]
+     else:
+      # The record type is in iomfb_v14_7_board.h; the records stay in the driver.
+      records=board_types[board_types.index('struct dcp_v14_board {'):board_types.index('#endif')]
+      records+=src[src.index('static const struct dcp_v14_board dcp_v14_board_t6030 = {'):end]
      defines='\n'.join(l for l in src.splitlines() if l.startswith('#define DCP_V14_') and 'FIRMWARE_UUID' in l)+'\n'
-     sel=src[src.index('const struct dcp_v14_board *iomfb_v14_7_board('):src.index('const char *iomfb_v14_7_board_name(')]
+     sel_start='const struct dcp_v14_board *dcp_v14_board_select(' if 'const struct dcp_v14_board *dcp_v14_board_select(' in src else 'const struct dcp_v14_board *iomfb_v14_7_board('
+     sel=src[src.index(sel_start):src.index('const char *iomfb_v14_7_board_name(')]
      geo=src[src.index('static int dcp_v14_geometry('):src.index('/* An external processor\'s firmware:')]
      driver='''struct apple_dcp_v14 {struct device *dev;const struct dcp_v14_board *board;u32 fb_width,fb_height,stride,notch_rows,panel_width,panel_height;};\n'''
      probe=src[src.index('int iomfb_v14_7_probe('):]
@@ -90,7 +98,25 @@ with tempfile.TemporaryDirectory(prefix='dcp14-panels-') as directory:
      notch=64;height=1800;stride++;assert(dcp_v14_geometry(&v)==-EINVAL);stride--;
      width=2560;stride=width*4;assert(dcp_v14_geometry(&v)==-EINVAL);
      width=2880;stride=width*4;notch=101;assert(dcp_v14_geometry(&v)==-EINVAL);
-     puts("current J615/J613/T6030 admission + hidden/full notch, wrong geometry controls: PASS");
+     /* J516C (T6031): only the T6030 DCP image, the J516S panel. */
+     dcp.compatible="apple,t6031-dcp";machine="apple,j516c";
+     const struct dcp_v14_board*c=iomfb_v14_7_board(&dev);
+     assert(!IS_ERR(c)&&c&&!strcmp(c->name,"J516C")&&c->panel_width==3456&&c->panel_height==2234&&c->promotion);
+     assert(!strcmp(c->handoff,"apple,t6031-handoff")&&!c->ctm_set&&!c->ctm_get);
+     image_uuid="DDF38191-93B3-324A-BC8F-643006F5AC82";assert(probe_gate(&dev,c)==0);
+     image_uuid="90F849E1-B422-367E-B389-50246F8DEC47";assert(probe_gate(&dev,c)==-ENODEV);
+     image_uuid="DDF38191-93B3-324A-BC8F-643006F5AC8";assert(probe_gate(&dev,c)==-ENODEV);
+     image_uuid=NULL;assert(probe_gate(&dev,c)==-ENODEV);
+     image_uuid="DDF38191-93B3-324A-BC8F-643006F5AC82";marker_value=0;assert(probe_gate(&dev,c)==-ENODEV);marker_value=1;
+     struct apple_dcp_v14 m={.dev=&dev,.board=c};width=3456;height=2160;stride=width*4;notch=74;
+     assert(dcp_v14_geometry(&m)==0&&m.panel_height==2234&&m.notch_rows==74);
+     height=2234;assert(dcp_v14_geometry(&m)==0&&m.panel_height==2234);
+     height=2160;notch=0;assert(dcp_v14_geometry(&m)==-EINVAL);
+     notch=74;width=3024;stride=width*4;height=1890;assert(dcp_v14_geometry(&m)==-EINVAL);
+     machine="apple,j514c";assert(IS_ERR(iomfb_v14_7_board(&dev)));
+     machine="apple,j516m";assert(IS_ERR(iomfb_v14_7_board(&dev)));
+     dcp.compatible="apple,t6030-dcp";machine="apple,j516s";assert(iomfb_v14_7_board(&dev)==&dcp_v14_board_t6030);
+     puts("current J615/J613/T6030/J516C admission + hidden/full notch, wrong geometry controls: PASS");
     #endif
     }
     '''
