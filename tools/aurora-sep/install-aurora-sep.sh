@@ -307,7 +307,7 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 # Downloads $1 to $2. A dropped connection (an HTTP/2 stream reset, a timeout, a cut transfer) is not a missing file:
 # curl --retry skips most of those, and it restarts from byte 0, so each try here is its own curl call that continues from
 # the bytes already on disk. Returns 0 on success (a 416 answer means the file was already complete; the checksum check
-# after the call still decides). Returns 22 only when the server answers a client error at once (the file is not there).
+# after the call still decides). Returns 22 for HTTP 404/410, and 101 for other non-retryable client errors.
 # After five failed tries it returns 100 if the last answer was a server error (HTTP 408, 429 or 5xx), else curl's last
 # exit code. Exit 33 (the server ignored the Range request) removes the partial file, so the next try starts at byte 0.
 fetch_release_file() {
@@ -317,7 +317,10 @@ fetch_release_file() {
       -w '%{http_code}' "$url") && return 0
     rc=$?
     [[ $rc == 22 && $code == 416 ]] && return 0
-    if [[ $rc == 22 && $code == 4* && $code != 408 && $code != 429 ]]; then return 22; fi
+    if [[ $rc == 22 && $code == 4* && $code != 408 && $code != 429 ]]; then
+      [[ $code == 404 || $code == 410 ]] && return 22
+      return 101
+    fi
     last=$rc why="curl exit $rc"
     if [[ $rc == 22 ]]; then last=100 why="HTTP $code"; fi
     if [[ $rc == 33 ]]; then rm -f "$out"; fi
@@ -4108,6 +4111,11 @@ install_all() {
     AURORA_RELEASE_URL names (shown at the start). That copy is missing the file
     or can't be reached: check it, or unset AURORA_RELEASE_URL to install from
     the public release. Nothing was installed."
+      ((rc != 101)) ||
+        die "could not download $file from $TAG: the server refused the request.
+    See curl's HTTP error above. This does not establish that the release asset is missing.
+    Nothing was installed. Check access to GitHub or the intervening proxy; if this persists,
+    report the file name and HTTP status."
       ((rc == 22)) ||
         die "could not download $file from $TAG: the download failed on all five tries
     (curl exit $rc; exit 100 means the server kept answering with an error such as HTTP 503).

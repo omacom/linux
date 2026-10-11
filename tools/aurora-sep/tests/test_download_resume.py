@@ -77,6 +77,13 @@ class DownloadTest(unittest.TestCase):
         self.assertEqual(self.fetch().returncode, 22)
         self.assertEqual(len(self.requests), 1)
 
+    def test_authorization_errors_are_not_missing_files_or_retried(self):
+        for code in ('401', '403'):
+            with self.subTest(code=code):
+                self.mode = code; self.requests.clear()
+                self.assertEqual(self.fetch().returncode, 101)
+                self.assertEqual(len(self.requests), 1)
+
     def test_busy_server_errors_are_bounded_and_not_missing_assets(self):
         for code in ('408', '429', '500', '503'):
             with self.subTest(code=code):
@@ -122,4 +129,14 @@ class DownloadAdmissionTest(flow.M3FlowBase):
         self.assertNotEqual(run.returncode, 0)
         self.assertIn('network or a busy server', run.stderr)
         self.assertNotIn('packaging\n    mistake', run.stderr)
+        self.assertNotIn('pacman -U', self.log())
+
+    def test_authorization_refusal_does_not_claim_a_packaging_error(self):
+        script = self.tmp / 'bin/curl'
+        script.write_text('#!/bin/bash\nprintf 403\nexit 22\n'); script.chmod(0o755)
+        run = self.install(check=False)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn('server refused the request', run.stderr)
+        self.assertNotIn('packaging\n    mistake', run.stderr)
+        self.assertNotIn('all five tries', run.stderr)
         self.assertNotIn('pacman -U', self.log())
