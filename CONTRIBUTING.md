@@ -1,6 +1,6 @@
 # Reporting Aurora Linux results
 
-Search the [existing issues](https://github.com/iconidentify/aurora-linux/issues)
+Search the [existing issues](https://github.com/omacom/linux-aurora/issues)
 before opening a report. Add evidence for a known bug to its existing issue,
 including your Mac and build details. Link related issues, pull requests, and
 relevant code or error examples instead of opening duplicates.
@@ -8,8 +8,8 @@ relevant code or error examples instead of opening duplicates.
 For a broad test report, keep **one issue per Mac** and append later results as
 comments on that issue. Use a title such as `j516s (MacBook Pro M3 Pro): Bluetooth
 setup times out`. The [reporting guide (#6)](https://github.com/iconidentify/aurora-linux/issues/6)
-and [roadmap (#57)](https://github.com/iconidentify/aurora-linux/issues/57) track
-reporting and fix priorities. The [latest release](https://github.com/iconidentify/aurora-linux/releases/latest)
+and [roadmap (#56)](https://github.com/omacom/linux-aurora/issues/56) track
+reporting and fix priorities. The [latest release](https://github.com/omacom/linux-aurora/releases/latest)
 shows available release artifacts; report the exact tag you actually installed.
 
 ## Machine and build

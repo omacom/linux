@@ -3,12 +3,13 @@
 For the **13-inch and 15-inch M3 MacBook Air (J613/J615)** with the supported
 14.8.3 stub, the matched installer prepares the experimental profile.
 
-**Current status:** current14 firmware startup still stalls on reported J613
-installs ([#35](https://github.com/iconidentify/aurora-linux/issues/35)), even
-after correcting PMP power admission. Installation and a working panel do
-not establish acceleration. Native25 remains a separate J613 GL-only route
-requiring its own exact firmware and matched stage1. The J613 native25
-profile supports experimental OpenGL; Vulkan is unavailable.
+**Current status:** the matched J613 exact26.6.2/25G83 profile has a reported
+cold boot, native desktop and passing GPU checker. J615 current14 and the
+explicit J615 native25 profile are packaged, with physical qualification
+tracked in [#26](https://github.com/omacom/linux-aurora/issues/26). Current14
+and exact26.6.2 profiles remain separate; an installed package or working panel
+alone does not establish acceleration. Native25 supports experimental OpenGL
+and reports Vulkan unavailable.
 
 1. Enable the experimental GPU profile:
 
@@ -63,7 +64,8 @@ J613 already booted from its own exact 26.6.2/25G83 volume group with an
 existing matched `v1.6.1-m3next.stage1` handoff may use
 `--m3-profile=j613-25g83`. This selects `/opt/mesa-m3/25g83` and
 `j613-25g83-hal200`. Its checker reports OpenGL readback and **Vulkan
-unavailable**. J615 native25 is unsupported. Native scratch shaders are
+unavailable**. J615 native25 requires its own explicit option and matched stage1, described
+below. Native scratch shaders are
 refused; power calibration remains experimental. Legacy 14/Pro Vulkan
 stays separate. Firmware and calibration remain specific to each Mac;
 the installer migrates neither firmware nor stage 1.
