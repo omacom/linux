@@ -175,6 +175,10 @@ kernel::module_platform_driver! {
             default: -1,
             description: "M3 render node registration: -1 = auto (on apple,j514s and apple,j516s, where the M3 runtime is validated), 0 = never, 1 = always",
         },
+        compute_preempt: i32 {
+            default: -1,
+            description: "Let the firmware preempt compute work: -1 = auto (on for M2 Max or Debug0), 0 = never, 1 = always",
+        },
 
         fault_control: u32 {
             default: 0xb,
