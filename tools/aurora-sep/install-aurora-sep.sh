@@ -487,7 +487,7 @@ require_supported_soc() {
   die "this Mac (${soc:+apple,$soc, }$(this_board)) is not one $VERSION supports: M1, M2, the MacBook
     Neo, and M3, M3 Pro and M3 Max. ${1:-Installing} would replace its boot loader with an m1n1 that
     can't start it. Nothing was changed. If you are bringing this Mac up, please open an issue at
-    https://github.com/iconidentify/aurora-linux/issues"
+    https://github.com/omacom/linux-aurora/issues"
 }
 
 # Every M3 chip: M3 (t8122), M3 Pro (t6030), M3 Max (t6031, t6034).
@@ -846,7 +846,7 @@ m3_bootbin_report() {
   now=$(m3_bootbin_sha)
   if [[ -n $M3_BOOTBIN_SHA && $now != "$M3_BOOTBIN_SHA" ]]; then
     die "m1n1's boot.bin changed during the install, which it must not on an M3.
-    Please report it at https://github.com/iconidentify/aurora-linux/issues before rebooting."
+    Please report it at https://github.com/omacom/linux-aurora/issues before rebooting."
   fi
   if [[ $M3_FROZEN_BY == aurora-sep ]]; then
     say "M3: m1n1's boot.bin is unchanged. pacman's \"Updating m1n1 image\" step did nothing:
@@ -1045,7 +1045,7 @@ m3_oslog_overlap_check() {
   [[ -e $DT/$M3_OSLOG_OVERLAP ]] || return 0
   warn "this boot's m1n1 reports that a display log buffer overlaps where its stage 1 loaded
     it ($DT/$M3_OSLOG_OVERLAP). This m1n1 was only checked with those buffers clear of it.
-    Please report it at https://github.com/iconidentify/aurora-linux/issues with the file that
+    Please report it at https://github.com/omacom/linux-aurora/issues with the file that
     --m3-report writes. The boot loader this Mac had before the handoff is kept on the EFI
     partition as m1n1/boot.bin.before-<version>."
 }
@@ -1141,7 +1141,7 @@ m1n1_check_and_record() {
     die "the m1n1 at the start of $target is sha256 $sha, not this release's
     ($M1N1_BIN_SHA), so boot.bin was not rebuilt as it should be. The boot loader this Mac booted
     with is kept as m1n1/boot.bin.before-$VERSION on the EFI partition. Please report it at
-    https://github.com/iconidentify/aurora-linux/issues before rebooting."
+    https://github.com/omacom/linux-aurora/issues before rebooting."
   printf '%s %s %s\n' "$sha" "$size" "${M1N1_PACKAGE%% *}" | $sudo tee "$STATE/m1n1-installed" >/dev/null
   say "m1n1's boot.bin starts with this release's m1n1 (sha256 $sha)"
 }
@@ -2617,7 +2617,7 @@ m3_pro_mesa_install() {
   if [[ $name != "$M3_PRO_MESA_NAME" ]]; then
     M3_PRO_MESA_RESULT=failed
     warn "left out the $(m3_mesa_name): ${file##*/} names the package \"$name\", not $M3_PRO_MESA_NAME.
-    The kernel install is complete. Please report it at https://github.com/iconidentify/aurora-linux/issues"
+    The kernel install is complete. Please report it at https://github.com/omacom/linux-aurora/issues"
     return 0
   fi
   if is_m3_air && ! m3_pro_mesa_replace_old; then
@@ -4143,12 +4143,12 @@ install_all() {
     [[ $sha == "$M1N1_BIN_SHA" ]] ||
       die "${M1N1_PACKAGE%% *} holds an m1n1.bin with sha256 ${sha:-(none)}, not the
     $M1N1_BIN_SHA this release names. Nothing was installed. Please report it at
-    https://github.com/iconidentify/aurora-linux/issues"
+    https://github.com/omacom/linux-aurora/issues"
   fi
   if [[ $M3_MODE == handoff ]]; then
     m1n1_pkg_has_handoff "$work/${M1N1_PACKAGE%% *}" ||
       die "this release's m1n1 has no $(m3_handoff_name), so it can't switch it
-    on. Nothing was installed. Please report it at https://github.com/iconidentify/aurora-linux/issues"
+    on. Nothing was installed. Please report it at https://github.com/omacom/linux-aurora/issues"
   fi
 
   m3_gpu_disarm || die "air-gpu-oneshot.sh --disarm failed, so a boot may still be armed for the
@@ -5327,17 +5327,17 @@ m3_report() {
   m3_report_readme >"$dir/README.txt"
   if [[ $src == journal ]]; then
     m3_privacy_pack "$dir" "$out" "$M3_WORK/secrets" "$dir/kernel-log.txt" || die "the report was not kept (see above). Nothing was written.
-    Please tell us at https://github.com/iconidentify/aurora-linux/issues what this printed, without any file."
+    Please tell us at https://github.com/omacom/linux-aurora/issues what this printed, without any file."
   else
     m3_privacy_pack "$dir" "$out" "$M3_WORK/secrets" || die "the report was not kept (see above). Nothing was written.
-    Please tell us at https://github.com/iconidentify/aurora-linux/issues what this printed, without any file."
+    Please tell us at https://github.com/omacom/linux-aurora/issues what this printed, without any file."
   fi
   m3_oslog_overlap_check
   [[ -n $(m3_smc_keys_file) ]] || warn "$(m3_smc_missing): the report has no SMC keys."
   say "Report written to $out
     It only read this Mac. The host name, user names, serial numbers and MAC addresses in it
     are masked, and the file was checked for them before it was kept.
-    Attach it to an issue at https://github.com/iconidentify/aurora-linux/issues (drag the file
+    Attach it to an issue at https://github.com/omacom/linux-aurora/issues (drag the file
     into the comment box), together with the serial log if you recorded one."
 }
 
@@ -6057,7 +6057,7 @@ m3_power_survey() {
   cp "$M3_WORK/sampler.err" "$M3_WORK/out/sampler-errors.txt" 2>/dev/null || true
   m3_privacy_pack "$M3_WORK/out" "$out" "$M3_WORK/secrets" ||
     die "the survey's file was not kept (see above). Please tell us at
-    https://github.com/iconidentify/aurora-linux/issues what this printed, without any file."
+    https://github.com/omacom/linux-aurora/issues what this printed, without any file."
   m3_survey_cleanup
   trap - EXIT INT TERM HUP
   if [[ -n $M3_SURVEY_STOP && -z $M3_SURVEY_FAIL ]]; then
@@ -6068,7 +6068,7 @@ m3_power_survey() {
   say "Power survey written to $out
     The host name, user names, serial numbers and MAC addresses in it are masked, and the file
     was checked for them before it was kept. Attach it to your issue at
-    https://github.com/iconidentify/aurora-linux/issues (drag the file into the comment box)."
+    https://github.com/omacom/linux-aurora/issues (drag the file into the comment box)."
   m3_survey_report_cleanup
   if [[ -n $M3_SURVEY_FAIL ]]; then die "the survey failed: $M3_SURVEY_FAIL. The load was stopped."; fi
   [[ -z $M3_SURVEY_CLEANUP_ERR ]] || die "the survey could not put everything back (see above)."
@@ -6105,7 +6105,7 @@ m3_next_steps() {
   echo "     directory, aurora-m3-report-$(this_board)-<date>.tgz, with the host name, user names,"
   echo "     serial numbers and MAC addresses masked:"
   echo "       curl -fsSL $LATEST_URL | bash -s -- --m3-report"
-  echo "  4. Attach that file to an issue at https://github.com/iconidentify/aurora-linux/issues"
+  echo "  4. Attach that file to an issue at https://github.com/omacom/linux-aurora/issues"
   echo "=========================================================================================="
 }
 
@@ -6558,7 +6558,7 @@ fingerprint.
    with --m3-handoff.
 
 HOW TO REPORT
-  Open one issue per Mac at https://github.com/iconidentify/aurora-linux/issues
+  Open one issue per Mac at https://github.com/omacom/linux-aurora/issues
   (not on omacom/linux#7 any more), with the first line of the report as its
   title. Post later results for the same Mac as comments on that issue.
   Structure it exactly like this:

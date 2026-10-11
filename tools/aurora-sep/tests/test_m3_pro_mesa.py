@@ -134,8 +134,22 @@ def same_commands(tc, before, after):
     tc.assertEqual([l for l in b if not l.startswith("sudo ")], [l for l in a if not l.startswith("sudo ")])
 
 
+def release_repository_text(text):
+    """Map the historical release and new-report endpoints to their current repository."""
+    old = 'https://github.com/iconidentify/aurora-linux/releases/'
+    new = 'https://github.com/omacom/linux-aurora/releases/'
+    binary = isinstance(text, bytes)
+    value = text.decode('utf-8', errors='surrogateescape') if binary else text
+    value = value.replace(old, new)
+    # Only the unnumbered issue endpoint moved; historical issue IDs stay put.
+    value = re.sub(r'https://github\.com/iconidentify/aurora-linux/issues(?![A-Za-z0-9_/-])',
+                   'https://github.com/omacom/linux-aurora/issues', value)
+    return value.encode('utf-8', errors='surrogateescape') if binary else value
+
+
 def release_text(text, old, new):
     """Replace only the earlier release's exact legacy tag and package version."""
+    text = release_repository_text(text)
     binary = isinstance(text, bytes)
     tag = "sep-" + old
     pattern = r"(?<![A-Za-z0-9._-])" + re.escape(tag) + r"(?![A-Za-z0-9._-])"
@@ -154,10 +168,36 @@ def as_this_release(run, old, new):
 
 
 class ReleaseIdentityComparisonTest(unittest.TestCase):
+    def test_only_exact_release_repository_is_mapped(self):
+        old = 'https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh'
+        new = 'https://github.com/omacom/linux-aurora/releases/latest/download/install-aurora-sep.sh'
+        self.assertEqual(release_repository_text(old), new)
+        self.assertEqual(release_repository_text(old.encode()), new.encode())
+        for untouched in (old.replace('github.com', 'wrong.example'),
+                          old.replace('aurora-linux/', 'aurora-linux-other/'),
+                          old.replace('/releases/', '/blob/'),
+                          old.replace('https://', 'http://')):
+            self.assertEqual(release_repository_text(untouched), untouched)
+        for changed in (new.replace('github.com', 'wrong.example'), new+' --insecure',
+                        new.replace('install-aurora-sep.sh', 'foreign.sh')):
+            with self.subTest(changed=changed), self.assertRaises(AssertionError):
+                same_commands(self, new, changed)
+
+    def test_report_endpoint_moves_but_numbered_reports_stay_historical(self):
+        old = 'https://github.com/iconidentify/aurora-linux/issues'
+        self.assertEqual(release_repository_text(old),
+                         'https://github.com/omacom/linux-aurora/issues')
+        self.assertEqual(release_repository_text(old+'/35'), old+'/35')
+        self.assertEqual(release_repository_text(old+'/147'), old+'/147')
+        self.assertEqual(release_repository_text(old+'-else'), old+'-else')
+        self.assertEqual(release_repository_text(old+'/new'), old+'/new')
+        self.assertEqual(release_repository_text(old.replace('github.com','wrong.example')),
+                         old.replace('github.com','wrong.example'))
+
     def test_only_known_identity_is_normalized(self):
         old = "7.1.12.aurora2-12.2"
         command = f"curl https://github.com/iconidentify/aurora-linux/releases/download/sep-{old}/linux-{old}.pkg"
-        expected = f"curl https://github.com/iconidentify/aurora-linux/releases/download/{TAG}/linux-{VERSION}.pkg"
+        expected = f"curl https://github.com/omacom/linux-aurora/releases/download/{TAG}/linux-{VERSION}.pkg"
         self.assertEqual(release_text(command, old, VERSION), expected)
         for changed in (expected.replace("github.com", "wrong.example"), expected + " --insecure",
                         expected.replace("linux-", "other-")):

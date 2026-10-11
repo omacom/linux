@@ -515,7 +515,7 @@ class ReportTest(MaxBase):
         self.assertTrue(facts.startswith(b"\x01\x02\0"))
         # The attach instructions.
         self.assertIn(f"aurora-m3-report-{board}-", proc.stdout)
-        self.assertIn("https://github.com/iconidentify/aurora-linux/issues", proc.stdout)
+        self.assertIn("https://github.com/omacom/linux-aurora/issues", proc.stdout)
 
     def test_m3_max_t6031(self):
         self.max_mac("j514c")
@@ -973,9 +973,9 @@ class NextStepsTest(MaxBase):
                 self.assertIn("1. Reboot.", block)
                 self.assertIn("uname -r", block)
                 self.assertIn(f"It should print {KREL}.", block)
-                self.assertIn("curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/"
+                self.assertIn("curl -fsSL https://github.com/omacom/linux-aurora/releases/latest/download/"
                               "install-aurora-sep.sh | bash -s -- --m3-report", block)
-                self.assertIn("https://github.com/iconidentify/aurora-linux/issues", block)
+                self.assertIn("https://github.com/omacom/linux-aurora/issues", block)
                 # In that order, after everything else.
                 self.assertLess(block.index("Reboot"), block.index("uname -r"))
                 self.assertLess(block.index("uname -r"), block.index("--m3-report"))
