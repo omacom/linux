@@ -3942,7 +3942,13 @@ def main():
     hook = hookdir / "00-aurora-frozen-dependencies.hook"
 
     commit_config.write_text("\n".join(private_options + ["HookDir = " + str(hookdir)]) + "\n")
-    base = ["pacman", "--config", str(download_config), "--noconfirm"]
+    # The local candidates join only the final transaction. pacman still resolves the repository
+    # targets' dependencies, with the candidates' exact names and provisions assumed installed.
+    assumed = []
+    for pkg in candidates:
+        for provision in [pkg["name"] + "=" + pkg["version"]] + pkg["provides"]:
+            assumed += ["--assume-installed", provision]
+    base = ["pacman", "--config", str(download_config), "--noconfirm", *assumed]
     plan = []
     if selected:
         targets = [p["repo"] + "/" + p["name"] for p in selected]

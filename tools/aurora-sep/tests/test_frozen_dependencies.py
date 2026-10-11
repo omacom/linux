@@ -56,11 +56,11 @@ class FrozenDependencies(unittest.TestCase):
         path=self.p/'db/sync/fixture.db'; path.unlink()
         path.write_bytes((self.p/'db/sync/fixture.db.tar.gz').read_bytes())
 
-    def call(self, candidate, requires=('fprintd',), extra=(), okay=True):
+    def call(self, candidate, requires=('fprintd',), extra=(), okay=True, helper=HELPER):
         self.db()
         before=self.conf.read_bytes()
         db_before={str(p.relative_to(self.p/'db/local')):p.read_bytes() for p in (self.p/'db/local').rglob('*') if p.is_file()}
-        command=['fakeroot','python3',str(HELPER),'--config',str(self.conf),'--work',str(self.p/'work'),'--candidate',str(candidate)]
+        command=['fakeroot','python3',str(helper),'--config',str(self.conf),'--work',str(self.p/'work'),'--candidate',str(candidate)]
         for requirement in requires: command+=['--require',requirement]
         result=subprocess.run(command+list(extra),text=True,capture_output=True)
         self.assertEqual(result.returncode, 0 if okay else 1, result.stderr+result.stdout)
@@ -122,6 +122,37 @@ class FrozenDependencies(unittest.TestCase):
         self.assertEqual({p['name'] for p in receipt['dependencies']},{'fprintd','libgusb','touch-helper'})
         for p in receipt['dependencies']:
             self.assertEqual(p['sha256'],hashlib.sha256(Path(p['file']).read_bytes()).hexdigest())
+
+    def candidate_supplied_dependency_fixture(self):
+        # The repository carries its own libfprint, but this release ships a newer one.
+        self.pkg('libfprint', '1.94.9-1', provides=['libfprint-2.so=2-64'])
+        self.pkg('libgusb')
+        self.pkg('fprintd', depends=['libfprint', 'libfprint-2.so=2-64', 'libgusb'])
+        return self.pkg('libfprint', '1.94.100-1.1', provides=['libfprint-2.so=2-64'], local=True)
+
+    def test_held_image_missing_repo_package_uses_candidate_dependency(self):
+        candidate = self.candidate_supplied_dependency_fixture()
+        receipt = self.call(candidate)
+        self.assertEqual({p['name'] for p in receipt['dependencies']}, {'fprintd', 'libgusb'})
+        prepared = subprocess.run(['pacman', '--config', receipt['transaction_config'], '-Up', '--noconfirm',
+                                   '--print-format', '%n %v', str(candidate),
+                                   *[p['file'] for p in receipt['dependencies']]], capture_output=True, text=True)
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        self.assertEqual(sorted(prepared.stdout.splitlines()),
+                         ['fprintd 1-1', 'libfprint 1.94.100-1.1', 'libgusb 1-1'])
+
+    def test_repository_resolver_still_refuses_incomplete_closure(self):
+        candidate = self.candidate_supplied_dependency_fixture()
+        source = HELPER.read_text()
+        resolved = 'selected = resolve(args.require, candidates, remaining, available)\n'
+        self.assertIn(resolved, source)
+        incomplete = self.p/'incomplete-helper.py'
+        incomplete.write_text(source.replace(resolved, resolved +
+                                             '    selected = [p for p in selected if p["name"] != "libgusb"]\n'))
+        result = self.call(candidate, okay=False, helper=incomplete)
+        self.assertIn(' -Sp ', result.stderr)
+        unmet = [line for line in result.stderr.splitlines() if 'unable to satisfy' in line]
+        self.assertEqual(unmet, [":: unable to satisfy dependency 'libgusb' required by fprintd"])
 
     def test_satisfied_root_and_provider_are_excluded(self):
         self.installed('fprintd'); self.installed('provider',provides=['virtual=3'])
