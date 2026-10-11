@@ -48,6 +48,16 @@
  * T8122 device tree without display nodes is normal and the gate says
  * nothing. apple_t8122_display.enable=0 has the same effect as the T6030
  * option.
+ *
+ * On T6031 (M3 Max) the gate serves the same handoff, marked
+ * apple,t6031-handoff, but only when apple_t6031_display.enable=1 is on the
+ * kernel command line: the native display is off by default there until it
+ * has been seen to work. The PMP values must come from the boot loader, in
+ * /chosen/asahi,t6031-pmp; there is no fallback. The T6031 display power
+ * states nest the other way round (the DCP's DISP_FE under DISP_CPU under
+ * DISP_SYS), and its PMP power states are in another PMGR block. On every
+ * T6031 boot the gate also logs what the boot loader handed over, so that
+ * a boot without the option already records what the next one needs.
  */
 
 #define pr_fmt(fmt) fmt
@@ -103,6 +113,8 @@ extern const u8 __dtbo_t6030_j516s_pmp_begin[];
 extern const u8 __dtbo_t6030_j516s_pmp_end[];
 extern const u8 __dtbo_t8122_pmp_begin[];
 extern const u8 __dtbo_t8122_pmp_end[];
+extern const u8 __dtbo_t6031_pmp_begin[];
+extern const u8 __dtbo_t6031_pmp_end[];
 
 /* This Mac's PMP values, from the boot loader, or NULL. */
 static struct device_node *gate_pmp_values __initdata;
@@ -117,6 +129,15 @@ static const char gate_pmp_uuid[] __initconst = "2F4EB4C4-001B-3ACF-A9A0-68D8E42
 /* The T8122 PMP image of the 14.x system firmware. */
 static const char gate_t8122_pmp_uuid[] __initconst = "3B18C886-4C70-349B-B1C4-70F35DE2C5CD";
 
+/*
+ * apple_t6030_display.enable and apple_t8122_display.enable: the native
+ * display is on unless one of them is 0.
+ */
+static bool gate_requested __initdata = true;
+
+/* apple_t6031_display.enable: the T6031 native display is off unless it is 1. */
+static bool gate_t6031_requested __initdata;
+
 /* One SoC's internal display handoff, as the gate checks and completes it */
 struct gate_soc {
 	const char *machine;		/* root compatible */
@@ -130,9 +151,17 @@ struct gate_soc {
 	const char *pmp_values;		/* the boot loader's PMP values for this Mac */
 	const char *pmp_uuid;		/* the PMP image the PMP support is written for */
 	const char *report_compat;	/* the PMP report the overlay adds */
+	const char *disp_entry;		/* its display request entry, which the DCP waits for */
 	const u8 *pmp_dtbo, *pmp_dtbo_end;	/* NULL: no PMP description built in */
 	const char *fallback_board;	/* gets the fallback overlay without boot loader values */
 	const u8 *fallback_dtbo, *fallback_dtbo_end;
+	bool *requested;		/* the command line switch */
+	const char *opt_in;		/* set: off unless this is on the command line */
+	/* The DCP's power state and its parents, nearest first, as PMP_PS_*. */
+	u8 ps_chain[3];
+	bool pmp_ps_any_pmgr;		/* PMP and PMS_SRAM are not beside the DCP's power state */
+	bool describe;			/* log the boot loader's handoff on every boot */
+	const char *fw_uuids;		/* /chosen strings naming each firmware image */
 	bool quiet_without_nodes;	/* no display nodes in the device tree is normal */
 	bool dcpext;			/* the external display processors and their DARTs */
 };
@@ -149,11 +178,14 @@ static const struct gate_soc gate_t6030 __initconst = {
 	.pmp_values = "/chosen/asahi,t6030-pmp",
 	.pmp_uuid = gate_pmp_uuid,
 	.report_compat = "apple,t6030-pmp-v2-report",
+	.disp_entry = "report@7",
 	.pmp_dtbo = __dtbo_t6030_pmp_begin,
 	.pmp_dtbo_end = __dtbo_t6030_pmp_end,
 	.fallback_board = "apple,j516s",
 	.fallback_dtbo = __dtbo_t6030_j516s_pmp_begin,
 	.fallback_dtbo_end = __dtbo_t6030_j516s_pmp_end,
+	.requested = &gate_requested,
+	.ps_chain = { PMP_PS_DISP_CPU, PMP_PS_DISP_FE, PMP_PS_DISP_SYS },
 	.dcpext = true,
 };
 
@@ -174,14 +206,48 @@ static const struct gate_soc gate_t8122 __initconst = {
 	.pmp_values = "/chosen/asahi,t8122-pmp",
 	.pmp_uuid = gate_t8122_pmp_uuid,
 	.report_compat = "apple,t8122-pmp-v2-report",
+	.disp_entry = "report@7",
 	.pmp_dtbo = __dtbo_t8122_pmp_begin,
 	.pmp_dtbo_end = __dtbo_t8122_pmp_end,
+	.requested = &gate_requested,
+	.ps_chain = { PMP_PS_DISP_CPU, PMP_PS_DISP_FE, PMP_PS_DISP_SYS },
 	.quiet_without_nodes = true,
+};
+
+/*
+ * T6031 (M3 Max): the T6030 handoff at the T6031 addresses, off unless
+ * apple_t6031_display.enable=1. The PMP values must come from the boot
+ * loader: there is no built-in fallback. The PMP image is the one the
+ * T6030 support was brought up with (the PMP firmware is one t603x image);
+ * any other is refused. The internal display's PMP request is bit 0x10.
+ */
+static const struct gate_soc gate_t6031 __initconst = {
+	.machine = "apple,t6031",
+	.prefix = "apple-t6031-display: ",
+	.name = "T6031",
+	.dcp_compat = "apple,t6031-dcp",
+	.display_compat = "apple,t6031-display-subsystem",
+	.marker = "apple,t6031-handoff",
+	.pwrstate_compat = "apple,t6031-pmgr-pwrstate",
+	.dcp_full_name = "dcp@386c00000",
+	.pmp_values = "/chosen/asahi,t6031-pmp",
+	.pmp_uuid = gate_pmp_uuid,
+	.report_compat = "apple,t6031-pmp-v2-report",
+	.disp_entry = "report@10",
+	.pmp_dtbo = __dtbo_t6031_pmp_begin,
+	.pmp_dtbo_end = __dtbo_t6031_pmp_end,
+	.requested = &gate_t6031_requested,
+	.opt_in = "apple_t6031_display.enable=1",
+	.ps_chain = { PMP_PS_DISP_FE, PMP_PS_DISP_CPU, PMP_PS_DISP_SYS },
+	.pmp_ps_any_pmgr = true,
+	.describe = true,
+	.fw_uuids = "asahi,t6031-fw-uuids",
 };
 
 static const struct gate_soc *const gate_socs[] __initconst = {
 	&gate_t6030,
 	&gate_t8122,
+	&gate_t6031,
 };
 
 /* The SoC this boot runs on, if the gate serves it. */
@@ -201,8 +267,6 @@ static bool __init gate_pmp_value_wanted(const struct property *prop)
 	return strstarts(prop->name, "apple,tunable-");
 }
 
-static bool gate_requested __initdata = true;
-
 bool __init apple_t6030_display_gate_enabled(void)
 {
 	return gate_requested;
@@ -211,6 +275,8 @@ bool __init apple_t6030_display_gate_enabled(void)
 /* Kept after a successful apply: the live tree now holds its properties. */
 static struct of_changeset gate_cs;
 static struct of_changeset gate_pmp_cs;
+/* The PMP overlay, once applied; only the KUnit test removes it again. */
+static int gate_pmp_ovcs __initdata;
 
 static int __init gate_setup(char *arg)
 {
@@ -223,6 +289,13 @@ static int __init gate_setup_t8122(char *arg)
 	return gate_setup(arg);
 }
 early_param("apple_t8122_display.enable", gate_setup_t8122);
+
+/* Its own switch: the T6030 and T8122 options do not change it, nor it them. */
+static int __init gate_setup_t6031(char *arg)
+{
+	return kstrtobool(arg, &gate_t6031_requested);
+}
+early_param("apple_t6031_display.enable", gate_setup_t6031);
 
 /* Returns the only node compatible with @compat, or NULL if there are none or several. */
 static struct device_node *__init gate_find_one(const char *compat)
@@ -429,13 +502,34 @@ static struct device_node *__init gate_ps_child(struct device_node *pmgr, const 
 	return found;
 }
 
+/* The only power state of this SoC labelled @label, in any PMGR block. */
+static struct device_node *__init gate_ps_unique(const char *label)
+{
+	struct device_node *np, *found = NULL;
+
+	for_each_compatible_node(np, NULL, gate_soc->pwrstate_compat) {
+		if (!gate_ps_is(np, label))
+			continue;
+		if (found) {
+			of_node_put(np);
+			of_node_put(found);
+			return NULL;
+		}
+		found = of_node_get(np);
+	}
+
+	return found;
+}
+
 /*
- * The display domains are the DCP's power domain and its parents; the PMP
- * and PMS_SRAM domains are found by label beside them.
+ * The display domains are the DCP's power domain and its parents, in the
+ * SoC's order; the PMP and PMS_SRAM domains are found by label beside them,
+ * or anywhere on a SoC that has them in another PMGR block.
  */
 static int __init gate_pmp_resolve(struct device_node **np, struct device_node **ps,
 				   struct device_node **aic)
 {
+	const u8 *chain = gate_soc->ps_chain;
 	struct device_node *pmgr, *other;
 	int i;
 
@@ -489,16 +583,21 @@ static int __init gate_pmp_resolve(struct device_node **np, struct device_node *
 		return -EINVAL;
 	}
 
-	ps[PMP_PS_DISP_CPU] = gate_ps_parent(np[GATE_DCP]);
-	if (ps[PMP_PS_DISP_CPU])
-		ps[PMP_PS_DISP_FE] = gate_ps_parent(ps[PMP_PS_DISP_CPU]);
-	if (ps[PMP_PS_DISP_FE])
-		ps[PMP_PS_DISP_SYS] = gate_ps_parent(ps[PMP_PS_DISP_FE]);
-	pmgr = of_get_parent(ps[PMP_PS_DISP_CPU]);
-	if (pmgr) {
-		ps[PMP_PS_PMP] = gate_ps_child(pmgr, "pmp");
-		ps[PMP_PS_PMS_SRAM] = gate_ps_child(pmgr, "pms_sram");
-		of_node_put(pmgr);
+	ps[chain[0]] = gate_ps_parent(np[GATE_DCP]);
+	if (ps[chain[0]])
+		ps[chain[1]] = gate_ps_parent(ps[chain[0]]);
+	if (ps[chain[1]])
+		ps[chain[2]] = gate_ps_parent(ps[chain[1]]);
+	if (gate_soc->pmp_ps_any_pmgr) {
+		ps[PMP_PS_PMP] = gate_ps_unique("pmp");
+		ps[PMP_PS_PMS_SRAM] = gate_ps_unique("pms_sram");
+	} else {
+		pmgr = of_get_parent(ps[PMP_PS_DISP_CPU]);
+		if (pmgr) {
+			ps[PMP_PS_PMP] = gate_ps_child(pmgr, "pmp");
+			ps[PMP_PS_PMS_SRAM] = gate_ps_child(pmgr, "pms_sram");
+			of_node_put(pmgr);
+		}
 	}
 	for (i = 0; i < PMP_PS_NR; i++) {
 		if (!gate_ps_is(ps[i], pmp_ps_labels[i])) {
@@ -625,9 +724,9 @@ static int __init gate_pmp_apply(struct device_node *dcp, struct device_node **p
 		struct device_node *child;
 
 		pmp = of_parse_phandle(report, "apple,pmp", 0);
-		/* The display request entry: DISP is PMP device 7. */
+		/* The display request entry: DISP is PMP device 7 (0x10 on T6031). */
 		for_each_child_of_node(report, child) {
-			if (!strcmp(of_node_full_name(child), "report@7")) {
+			if (!strcmp(of_node_full_name(child), gate_soc->disp_entry)) {
 				disp = child;
 				break;
 			}
@@ -681,6 +780,7 @@ static int __init gate_pmp_apply(struct device_node *dcp, struct device_node **p
 		gate_err("PMP not added: changeset failed: %d\n", ret);
 		return ret;
 	}
+	gate_pmp_ovcs = ovcs_id;
 
 	if (gate_pmp_values)
 		gate_info("PMP: this Mac's %d values from %pOF\n", values, gate_pmp_values);
@@ -1253,13 +1353,156 @@ static void __init gate_dcpext(const char *refuse)
 		gate_dcpext_one(np, refuse);
 }
 
-/* Runs before of_platform_default_populate_init() at arch_initcall_sync. */
-static int __init apple_t6030_display_gate(void)
+/* A one-cell property of @np as text, or "-" if there is none. */
+static const char *__init gate_u32_text(const struct device_node *np, const char *name,
+					char *buf, size_t len)
+{
+	u32 val;
+
+	if (!np || of_property_count_u32_elems(np, name) != 1 ||
+	    of_property_read_u32(np, name, &val))
+		return "-";
+	snprintf(buf, len, "%#x", val);
+	return buf;
+}
+
+/* A firmware version property (3 to 5 cells) of @np as text, or "-". */
+static const char *__init gate_version_text(const struct device_node *np, const char *name,
+					    char *buf, size_t len)
+{
+	u32 ver[5];
+	int i, n, pos;
+
+	n = np ? of_property_read_variable_u32_array(np, name, ver, 3, ARRAY_SIZE(ver)) : -EINVAL;
+	if (n < 3)
+		return "-";
+	pos = scnprintf(buf, len, "%u", ver[0]);
+	for (i = 1; i < n; i++)
+		pos += scnprintf(buf + pos, len - pos, ".%u", ver[i]);
+	return buf;
+}
+
+/*
+ * What the boot loader handed over, as found before the gate changes
+ * anything: the markers, the DCP firmware identity and memory, this Mac's
+ * PMP values and the DCP OS log reservations. Logged on every boot, also
+ * when the native display is not requested.
+ */
+static void __init gate_describe(void)
+{
+	struct device_node *dcp, *display, *piodma = NULL, *values, *resv, *node;
+	char m_dcp[12], m_disp[12], m_pio[12], compat[48], version[48], bdid[12], dvid[12];
+	const char *uuid = "-", *pmp_uuid = "-";
+	int i, regions = 0, oslog = 0, tunables = 0, reserved = 0;
+	struct property *prop;
+	struct resource res;
+
+	dcp = gate_find_one(gate_soc->dcp_compat);
+	display = gate_find_one(gate_soc->display_compat);
+	if (dcp) {
+		piodma = of_get_child_by_name(dcp, "piodma");
+		of_property_read_string(dcp, "apple,firmware-uuid", &uuid);
+		for (i = 0; (node = of_parse_phandle(dcp, "memory-region", i)); i++) {
+			regions++;
+			if (of_property_read_bool(node, "apple,dcp-os-log"))
+				oslog++;
+			of_node_put(node);
+		}
+	}
+	gate_info("handoff: %s dcp %s display %s piodma %s; dcp firmware-compat %s version %s uuid %s; %d memory regions, %d OS log\n",
+		  gate_soc->marker,
+		  gate_u32_text(dcp, gate_soc->marker, m_dcp, sizeof(m_dcp)),
+		  gate_u32_text(display, gate_soc->marker, m_disp, sizeof(m_disp)),
+		  gate_u32_text(piodma, gate_soc->marker, m_pio, sizeof(m_pio)),
+		  gate_version_text(dcp, "apple,firmware-compat", compat, sizeof(compat)),
+		  gate_version_text(dcp, "apple,firmware-version", version, sizeof(version)),
+		  uuid, regions, oslog);
+
+	values = of_find_node_by_path(gate_soc->pmp_values);
+	if (values) {
+		of_property_read_string(values, "apple,tunable-uuid", &pmp_uuid);
+		for_each_property_of_node(values, prop)
+			if (strstarts(prop->name, "apple,tunable-"))
+				tunables++;
+		gate_info("handoff: PMP values %pOF: board-id %s dram-vendor-id %s tunable-uuid %s, %d tunables (image pinned: %s)\n",
+			  values, gate_u32_text(values, "apple,board-id", bdid, sizeof(bdid)),
+			  gate_u32_text(values, "apple,dram-vendor-id", dvid, sizeof(dvid)),
+			  pmp_uuid, tunables, gate_soc->pmp_uuid);
+	} else {
+		gate_info("handoff: no PMP values (%s)\n", gate_soc->pmp_values);
+	}
+
+	resv = of_find_node_by_path("/reserved-memory");
+	for_each_child_of_node(resv, node) {
+		if (!of_node_name_prefix(node, "dcp-oslog"))
+			continue;
+		reserved++;
+		if (!of_address_to_resource(node, 0, &res))
+			gate_info("handoff: %pOFn %pR%s\n", node, &res,
+				  of_property_read_bool(node, "no-map") ? " no-map" : "");
+	}
+	gate_info("handoff: %d dcp-oslog reservations\n", reserved);
+
+	if (gate_soc->fw_uuids) {
+		const char *image;
+
+		i = 0;
+		of_property_for_each_string(of_chosen, gate_soc->fw_uuids, prop, image) {
+			gate_info("handoff: firmware image %s\n", image);
+			i++;
+		}
+		if (!i)
+			gate_info("handoff: no /chosen/%s\n", gate_soc->fw_uuids);
+	}
+
+	of_node_put(resv);
+	of_node_put(values);
+	of_node_put(piodma);
+	of_node_put(display);
+	of_node_put(dcp);
+}
+
+static void __init gate_run(void)
 {
 	struct device_node *np[GATE_NR_NODES] = {};
 	struct device_node *ps[PMP_PS_NR] = {};
 	struct device_node *aic = NULL;
 	bool panel = false;
+	int i;
+
+	if (gate_soc->describe)
+		gate_describe();
+
+	if (!*gate_soc->requested) {
+		if (gate_soc->opt_in)
+			gate_info("native display not requested (%s is not on the command line), display stays on the boot framebuffer\n",
+				  gate_soc->opt_in);
+		else
+			gate_info("disabled on the command line, display stays on the boot framebuffer\n");
+		if (gate_soc->dcpext)
+			gate_dcpext("the display gate is disabled");
+		return;
+	}
+
+	if (!gate_resolve(np) && !gate_pmp_resolve(np, ps, &aic) && !gate_apply(np)) {
+		if (gate_pmp_apply(np[GATE_DCP], ps, aic))
+			gate_revert();
+		else
+			panel = true;
+	}
+	/* External processors need the panel's PMP; without it they stay off. */
+	if (gate_soc->dcpext)
+		gate_dcpext(panel ? NULL : "the internal display was not handed over");
+	of_node_put(aic);
+	for (i = 0; i < PMP_PS_NR; i++)
+		of_node_put(ps[i]);
+	for (i = 0; i < GATE_NR_NODES; i++)
+		of_node_put(np[i]);
+}
+
+/* Runs before of_platform_default_populate_init() at arch_initcall_sync. */
+static int __init apple_t6030_display_gate(void)
+{
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(gate_socs) && !gate_soc; i++)
@@ -1278,28 +1521,11 @@ static int __init apple_t6030_display_gate(void)
 			return 0;
 	}
 
-	if (!gate_requested) {
-		gate_info("disabled on the command line, display stays on the boot framebuffer\n");
-		if (gate_soc->dcpext)
-			gate_dcpext("the display gate is disabled");
-		return 0;
-	}
-
-	if (!gate_resolve(np) && !gate_pmp_resolve(np, ps, &aic) && !gate_apply(np)) {
-		if (gate_pmp_apply(np[GATE_DCP], ps, aic))
-			gate_revert();
-		else
-			panel = true;
-	}
-	/* External processors need the panel's PMP; without it they stay off. */
-	if (gate_soc->dcpext)
-		gate_dcpext(panel ? NULL : "the internal display was not handed over");
-	of_node_put(aic);
-	for (i = 0; i < PMP_PS_NR; i++)
-		of_node_put(ps[i]);
-	for (i = 0; i < GATE_NR_NODES; i++)
-		of_node_put(np[i]);
-
+	gate_run();
 	return 0;
 }
 arch_initcall(apple_t6030_display_gate);
+
+#if IS_ENABLED(CONFIG_APPLE_DISPLAY_GATE_KUNIT_TEST)
+#include "t6030-display-gate-test.c"
+#endif
