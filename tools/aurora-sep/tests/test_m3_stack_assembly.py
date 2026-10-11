@@ -82,6 +82,18 @@ class Assembly(unittest.TestCase):
         self.manifest['source_commits']['m1n1']='e'*40
         with self.assertRaisesRegex(ValueError,'m1n1 producer'):self.assemble()
 
+    def test_previous_standard_boot_keeps_legacy_j615_admission(self):
+        self.manifest['legacy_gpu_boards']=['j613','j615']
+        self.manifest['source_commits'].update(kernel=mod.NEO_PREVIOUS_FW_ROOT_PAIR['kernel'],
+                                              m1n1=mod.PREVIOUS_STANDARD_M1N1_SOURCE)
+        files=self.standard_boot_files()
+        files['usr/share/m1n1-aurora/source']=(mod.PREVIOUS_STANDARD_M1N1_SOURCE+'\n').encode()
+        self.package('m1n1','m1n1-aurora',files)
+        self.assertIn('M3_PERSISTENT_BOARDS="j613 j615"', self.assemble()[0])
+        files['usr/share/m1n1-aurora/build-config']=b'release=0\n'
+        self.package('m1n1','m1n1-aurora',files)
+        with self.assertRaisesRegex(ValueError,'standard m1n1'):self.assemble()
+
     def neo_pair(self):
         self.manifest['source_commits']['kernel']=mod.NEO_KERNEL
         neo=dict(profile='j700-g17p-hal200', source_commits={'mesa':'c'*40,'m1n1':'d'*40}, packages={})
@@ -116,7 +128,9 @@ class Assembly(unittest.TestCase):
     def test_new_kernel_keeps_both_air_and_neo_pairs(self):
         neo=self.neo_pair()
         pair=dict(kernel=mod.NEO_FW_ROOT_PAIR['kernel'],m1n1=neo['source_commits']['m1n1'],m1n1_bin_sha256=neo['m1n1_bin_sha256'])
-        patch=mock.patch.object(mod,'NEO_FW_ROOT_PAIR',pair);patch.start();self.addCleanup(patch.stop)
+        for name in ('NEO_FW_ROOT_PAIR', 'NEO_PREVIOUS_FW_ROOT_PAIR'):
+            changed=dict(pair,kernel=getattr(mod,name)['kernel'])
+            patch=mock.patch.object(mod,name,changed);patch.start();self.addCleanup(patch.stop)
         self.manifest['legacy_gpu_boards']=['j613','j615']
         self.manifest['source_commits']['m1n1']='74ba6bea52d1f865d204bb3f8168705a148fd5c5'
         for kernel in mod.NEO_KERNELS:
@@ -139,6 +153,32 @@ class Assembly(unittest.TestCase):
         changed=dict(pair);changed['m1n1']=None
         with mock.patch.object(mod,'NEO_FW_ROOT_PAIR',changed):
             with self.assertRaisesRegex(ValueError,'recorded boot source'):self.assemble()
+
+    def test_previous_reserved_table_kernel_keeps_exact_boot_binding(self):
+        neo=self.neo_pair()
+        self.manifest['source_commits']['kernel']=mod.NEO_PREVIOUS_FW_ROOT_PAIR['kernel']
+        pair=dict(kernel=mod.NEO_PREVIOUS_FW_ROOT_PAIR['kernel'],
+                  m1n1=neo['source_commits']['m1n1'],m1n1_bin_sha256=neo['m1n1_bin_sha256'])
+        with mock.patch.object(mod,'NEO_PREVIOUS_FW_ROOT_PAIR',pair):
+            self.assemble()
+        for field,word in [('m1n1','source'),('m1n1_bin_sha256','binary')]:
+            changed=dict(pair);changed[field]='e'*len(pair[field])
+            with self.subTest(field=field), mock.patch.object(mod,'NEO_PREVIOUS_FW_ROOT_PAIR',changed):
+                with self.assertRaisesRegex(ValueError,'firmware tables.*'+word):self.assemble()
+
+    def test_generic_esp_stage2_requires_stage2_build(self):
+        neo=self.neo_pair()
+        tree=self.root/'neo-m1n1'
+        files={str(p.relative_to(tree)):p.read_bytes() for p in tree.rglob('*') if p.is_file()}
+        key='usr/share/m1n1-neo/build-config.h'
+        files[key]=files[key].replace(b'J700_ESP_STAGE2',b'ESP_STAGE2')
+        self.package('neo-m1n1','m1n1-neo',files)
+        neo['packages']['m1n1']=self.manifest['packages'].pop('neo-m1n1')
+        self.assemble()
+        files[key]=files[key].replace(b'#define ESP_STAGE2\n',b'')
+        self.package('neo-m1n1','m1n1-neo',files)
+        neo['packages']['m1n1']=self.manifest['packages'].pop('neo-m1n1')
+        with self.assertRaisesRegex(ValueError,'Neo ESP configuration'):self.assemble()
 
     def test_neo_helper_bytes_are_bound_after_valid_package_hash(self):
         neo=self.neo_pair()
