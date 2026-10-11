@@ -316,8 +316,8 @@ class RealM1n1PackageTest(unittest.TestCase):
 
 
 TAG = re.search(r"^TAG=(\S+)$", SRC, re.M).group(1)
-DEFAULT_RELEASE_URL = f"https://github.com/iconidentify/aurora-linux/releases/download/{TAG}"
-DEFAULT_RELEASES_API = "https://api.github.com/repos/iconidentify/aurora-linux/releases"
+DEFAULT_RELEASE_URL = f"https://github.com/omacom/linux-aurora/releases/download/{TAG}"
+DEFAULT_RELEASES_API = "https://api.github.com/repos/omacom/linux-aurora/releases"
 LATEST_URL = re.search(r"^LATEST_URL=(\S+)$", SRC, re.M).group(1)
 # Tags and package versions are separate release identities.
 _legacy = re.fullmatch(r"sep-([^-]+)-(\d+)\.(\d+)(?:-stable)?", TAG)
@@ -575,7 +575,7 @@ class StagedCopyTest(flow.M3FlowBase):
         commands = [l for l in printed.splitlines() if "curl " in l]
         self.assertTrue(commands)
         for line in commands:
-            self.assertIn("https://github.com/iconidentify/aurora-linux/releases/", line)
+            self.assertIn("https://github.com/omacom/linux-aurora/releases/", line)
             self.assertNotIn(self.stage.as_uri(), line)
         # The stage is named once, in the first line, and nowhere else.
         notice = f"Using a staging/mirror copy: {self.stage.as_uri()}; checksums are still verified"
