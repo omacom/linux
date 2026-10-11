@@ -2521,6 +2521,7 @@ impl GpuManager::ver {
         )?;
         let wq = workqueue::WorkQueue::ver::new(
             &self.dev,
+            self.cfg,
             kalloc,
             self.event_manager.clone(),
             gpu_context,

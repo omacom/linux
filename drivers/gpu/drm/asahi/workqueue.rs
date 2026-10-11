@@ -667,6 +667,7 @@ impl WorkQueue::ver {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         dev: &driver::AsahiDevice,
+        cfg: &crate::hw::HwConfig,
         alloc: &mut gpu::KernelAllocators,
         event_manager: Arc<event::EventManager>,
         gpu_context: Arc<GpuContext>,
@@ -682,11 +683,14 @@ impl WorkQueue::ver {
         let mut prio = *raw::PRIORITY.get(priority as usize).ok_or(EINVAL)?;
 
         #[ver(G == G14X)]
-        let preempt_auto = true;
+        let preempt_auto = cfg.chip_id == 0x6021;
         #[ver(G != G14X)]
-        let preempt_auto = false;
+        let preempt_auto = {
+            let _ = cfg;
+            false
+        };
         let preempt = match *module_parameters::compute_preempt.value() {
-            -1 => preempt_auto,
+            -1 => preempt_auto || debug_enabled(DebugFlags::Debug0),
             value => value != 0,
         };
 
