@@ -8213,12 +8213,23 @@ neo_gpu_files() {
   return 0
 }
 
+# Both ESP spellings select the same release boot= payload path.
+neo_gpu_stage2_config_check() {
+  local config=$1
+  grep -Eq '^#define (J700_ESP_STAGE2|ESP_STAGE2)$' <<<"$config" &&
+    grep -qx '#define CHAINLOADING' <<<"$config" &&
+    grep -qx '#define RELEASE' <<<"$config" &&
+    ! grep -Eq '^#define (T8140_KIS_PROXY|J700_CDC_PROXY|J613_ESP_STAGE1)$' <<<"$config"
+}
+
 neo_gpu_package_check() {
   ((NEO_GPU)) || return 0
   local mesa=$work/${NEO_MESA_PACKAGE%% *} boot=$work/${NEO_M1N1_PACKAGE%% *}
   [[ $(bsdtar -xOf "$mesa" opt/mesa-neo/share/mesa-neo/profile) == "$NEO_GPU_PROFILE" ]] || die "Neo Mesa profile marker differs; nothing was installed"
   [[ $(bsdtar -xOf "$boot" usr/share/m1n1-neo/profile) == "$NEO_GPU_PROFILE" ]] || die "Neo bootloader profile marker differs; nothing was installed"
-  bsdtar -xOf "$boot" usr/share/m1n1-neo/build-config.h | grep -qx '#define J700_ESP_STAGE2' || die "Neo bootloader is not an ESP stage 2; nothing was installed"
+  local config
+  config=$(bsdtar -xOf "$boot" usr/share/m1n1-neo/build-config.h) || die "Neo bootloader build configuration is missing; nothing was installed"
+  neo_gpu_stage2_config_check "$config" || die "Neo bootloader is not an ESP release stage 2; nothing was installed"
   local path
   for path in opt/mesa-neo/libexec/mesa-neo-abi-check opt/mesa-neo/libexec/mesa-neo-loadcheck \
     opt/mesa-neo/share/vulkan/icd.d/asahi_icd.aarch64.json opt/mesa-neo/bin/mesa-neo-probe; do

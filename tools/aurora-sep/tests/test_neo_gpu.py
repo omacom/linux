@@ -55,6 +55,23 @@ esp_bootbin() {{ echo '{self.boot}'; }}
         return subprocess.run(['bash', '-c', setup], text=True, capture_output=True,
                               env={**os.environ, 'PATH': f'{self.bin}:{os.environ["PATH"]}'})
 
+    def test_actual_shipped_esp_stage2_config_and_legacy_spelling(self):
+        for marker in ('ESP_STAGE2', 'J700_ESP_STAGE2'):
+            result = self.run_sh("neo_gpu_stage2_config_check $'#define RELEASE\n#define CHAINLOADING\n#define " + marker + "\n'")
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_stage1_proxy_and_incomplete_build_flavors_refused(self):
+        for config in (
+            '#define RELEASE\n#define CHAINLOADING',
+            '#define RELEASE\n#define ESP_STAGE2',
+            '#define CHAINLOADING\n#define ESP_STAGE2',
+            '#define RELEASE\n#define CHAINLOADING\n#define ESP_STAGE2\n#define J700_CDC_PROXY',
+            '#define RELEASE\n#define CHAINLOADING\n#define ESP_STAGE2\n#define T8140_KIS_PROXY',
+            '#define RELEASE\n#define CHAINLOADING\n#define ESP_STAGE2\n#define J613_ESP_STAGE1',
+        ):
+            result = self.run_sh("neo_gpu_stage2_config_check $'" + config + "'")
+            self.assertNotEqual(result.returncode, 0, config)
+
     def test_neo_plan_selects_separate_pair(self):
         result = self.run_sh('NEO_GPU=1; neo_gpu_plan; m1n1_for_this_mac; echo "$M1N1_PACKAGE:$M1N1_BIN"; neo_gpu_files')
         self.assertEqual(result.returncode, 0, result.stderr)
