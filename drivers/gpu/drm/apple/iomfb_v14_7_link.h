@@ -29,6 +29,9 @@ struct work_struct;
 typedef int (*dcp_v14_callback_fn)(void *cookie, u32 tag, const void *in,
 				   u32 in_size, void *out, u32 out_size);
 
+/* Called under the link lock immediately before a packet is submitted. */
+typedef bool (*dcp_v14_admit_fn)(void *cookie);
+
 struct dcp_v14_link {
 	struct device *dev;
 	struct apple_rtkit *rtk;
@@ -85,6 +88,10 @@ void dcp_v14_link_set_idle_work(struct dcp_v14_link *link, struct work_struct *w
 int dcp_v14_link_call(struct dcp_v14_link *link, u32 tag, const void *input,
 		      u32 input_size, void *output, u32 output_size,
 		      u32 completion_id, dcp_v14_callback_fn callback, void *cookie);
+int dcp_v14_link_call_guarded(struct dcp_v14_link *link, u32 tag, const void *input,
+		      u32 input_size, void *output, u32 output_size,
+		      u32 completion_id, dcp_v14_callback_fn callback, void *cookie,
+		      dcp_v14_admit_fn admit, void *admit_cookie, bool *vetoed);
 int dcp_v14_link_pump(struct dcp_v14_link *link, unsigned long timeout,
 		      dcp_v14_callback_fn callback, void *cookie);
 
