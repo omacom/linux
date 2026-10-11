@@ -39,6 +39,7 @@
 #include "dcp-lifecycle.h"
 #include "iomfb_internal.h"
 #include "iomfb_v14_7.h"
+#include "iomfb_v14_7_board.h"
 #include "iomfb_v14_7_link.h"
 #include "iomfb_v14_7_swap.h"
 #include "parser.h"
@@ -63,36 +64,6 @@
 /* IOMFB layer of the primary plane. */
 #define DCP_V14_LAYER		0
 #define DCP_V14_BLACK		0xff000000
-
-/*
- * What differs between the internal panels this file drives. The T6030
- * record holds the values the file was written and tested with (J514S,
- * J516S); another board's record enables only what was tested on it, and
- * anything else fails closed. External processors have no board record.
- */
-struct dcp_v14_board {
-	/* In log messages. */
-	const char *name;
-	/* The debugfs status file. */
-	const char *debugfs;
-	const char *dcp_compatible;
-	/* The machine compatible; NULL for any machine with this DCP. */
-	const char *machine;
-	/* The firmware image whose layouts were tested on this board. */
-	const char *firmware_uuid;
-	/* Set to <1> by the boot loader on the DCP, display and PIODMA nodes. */
-	const char *handoff;
-	/* Native panel size, notch rows included; 0: any, from the boot framebuffer. */
-	u32 panel_width, panel_height;
-	/* The panel may have a 120 Hz timing besides 60 Hz. */
-	bool promotion;
-	/*
-	 * The colour matrix setter and getter of this board's firmware image;
-	 * 0: the matrix is not sent. Method numbers differ between firmware
-	 * releases, so they are only set where tested.
-	 */
-	u32 ctm_set, ctm_get;
-};
 
 static const struct dcp_v14_board dcp_v14_board_t6030 = {
 	.name = "T6030",
@@ -136,10 +107,33 @@ static const struct dcp_v14_board dcp_v14_board_j615 = {
 	.ctm_get = A(420),
 };
 
+/*
+ * J516C (MacBook Pro 16", M3 Max): the J516S panel, 3456x2234 with 74 notch
+ * rows above the 3456x2160 boot framebuffer, at 60 or 120 Hz, on the T6031
+ * DCP. Only the T6030 DCP image has validated IOMFB layouts, so a J516C DCP
+ * running any other image is refused and the boot framebuffer stays. Every
+ * panel timing and the display clock the firmware is told are logged: the
+ * first boots on this board are read from the kernel log. The clock is the
+ * T6030 rate (clk_disp0), unconfirmed on T6031.
+ */
+static const struct dcp_v14_board dcp_v14_board_j516c = {
+	.name = "J516C",
+	.debugfs = "dcp-j516c",
+	.dcp_compatible = "apple,t6031-dcp",
+	.machine = "apple,j516c",
+	.firmware_uuid = DCP_V14_FIRMWARE_UUID,
+	.handoff = "apple,t6031-handoff",
+	.panel_width = 3456,
+	.panel_height = 2234,
+	.promotion = true,
+	.log_bringup = true,
+};
+
 static const struct dcp_v14_board *const dcp_v14_boards[] = {
 	&dcp_v14_board_t6030,
 	&dcp_v14_board_j613,
 	&dcp_v14_board_j615,
+	&dcp_v14_board_j516c,
 };
 
 struct dcp_v14_property {
@@ -994,7 +988,12 @@ static int dcp_v14_callback(void *cookie, u32 tag, const void *input, u32 in_siz
 		if (memcmp(in, "VORP", 4) || count > 1)
 			return -EINVAL;
 		put_unaligned_le64(count ? 0 : v14->clock_rate, out);
-		dev_dbg(v14->dev, "display clock %u: %llu Hz\n", count, get_unaligned_le64(out));
+		if (v14->board && v14->board->log_bringup)
+			dev_info(v14->dev, "display clock %u: %llu Hz\n", count,
+				 get_unaligned_le64(out));
+		else
+			dev_dbg(v14->dev, "display clock %u: %llu Hz\n", count,
+				get_unaligned_le64(out));
 		return 0;
 	}
 	if (tag == D(125) && SHAPE(100, 36)) {
@@ -1408,21 +1407,50 @@ static int dcp_v14_cpu_running(struct device *dev, const char *name)
  * The board of an internal 14.x DCP node: NULL if the node is not one, an
  * error if it is but this machine has no board record.
  */
-const struct dcp_v14_board *iomfb_v14_7_board(struct device *dev)
+const struct dcp_v14_board *dcp_v14_board_select(dcp_v14_compat_fn dcp_is,
+						 dcp_v14_compat_fn machine_is,
+						 const void *ctx, bool *dcp_known)
 {
 	const struct dcp_v14_board *board;
-	bool dcp_known = false;
 	unsigned int i;
 
+	*dcp_known = false;
 	for (i = 0; i < ARRAY_SIZE(dcp_v14_boards); i++) {
 		board = dcp_v14_boards[i];
-		if (!of_device_is_compatible(dev->of_node, board->dcp_compatible))
+		if (!dcp_is(ctx, board->dcp_compatible))
 			continue;
-		dcp_known = true;
-		if (board->machine && !of_machine_is_compatible(board->machine))
+		*dcp_known = true;
+		if (board->machine && !machine_is(ctx, board->machine))
 			continue;
 		return board;
 	}
+	return NULL;
+}
+
+bool dcp_v14_board_admits(const struct dcp_v14_board *board, const char *uuid)
+{
+	return uuid && !strcmp(uuid, board->firmware_uuid);
+}
+
+static bool dcp_v14_node_is(const void *np, const char *compat)
+{
+	return of_device_is_compatible(np, compat);
+}
+
+static bool dcp_v14_machine_is(const void *np, const char *compat)
+{
+	return of_machine_is_compatible(compat);
+}
+
+const struct dcp_v14_board *iomfb_v14_7_board(struct device *dev)
+{
+	const struct dcp_v14_board *board;
+	bool dcp_known;
+
+	board = dcp_v14_board_select(dcp_v14_node_is, dcp_v14_machine_is, dev->of_node,
+				     &dcp_known);
+	if (board)
+		return board;
 	if (dcp_known) {
 		dev_err(dev, "display not started: no board record for this machine\n");
 		return ERR_PTR(-ENODEV);
@@ -1448,7 +1476,7 @@ int iomfb_v14_7_probe(struct apple_dcp *dcp)
 	if (IS_ERR_OR_NULL(board))
 		return -ENODEV;
 	if (of_property_read_string(np, "apple,firmware-uuid", &uuid) ||
-	    strcmp(uuid, board->firmware_uuid))
+	    !dcp_v14_board_admits(board, uuid))
 		return dev_err_probe(dev, -ENODEV,
 				     "%s display not started: DCP firmware %s is not supported\n",
 				     board->name, uuid ?: "(unknown)");
@@ -2268,8 +2296,12 @@ static int dcp_v14_mode(struct apple_dcp *dcp, struct apple_dcp_v14 *v14)
 		struct drm_display_mode *m = &modes[i].mode;
 		int hz = drm_mode_vrefresh(m);
 
-		dev_dbg(dcp->dev, "timing %u/%u: " DRM_MODE_FMT "%s\n", i + 1, count,
-			DRM_MODE_ARG(m), m->type & DRM_MODE_TYPE_PREFERRED ? " best" : "");
+		if (v14->board->log_bringup)
+			dev_info(dcp->dev, "timing %u/%u: " DRM_MODE_FMT "%s\n", i + 1, count,
+				 DRM_MODE_ARG(m), m->type & DRM_MODE_TYPE_PREFERRED ? " best" : "");
+		else
+			dev_dbg(dcp->dev, "timing %u/%u: " DRM_MODE_FMT "%s\n", i + 1, count,
+				DRM_MODE_ARG(m), m->type & DRM_MODE_TYPE_PREFERRED ? " best" : "");
 		if (m->hdisplay != v14->panel_width ||
 		    m->vdisplay != v14->panel_height - dcp->notch_height ||
 		    (hz != 60 && (hz != 120 || !v14->board->promotion)))

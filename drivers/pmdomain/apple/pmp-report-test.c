@@ -36,6 +36,64 @@ static void pmp_ranges_t8122(struct kunit *test)
 							0x1180, 0x108c0, 0x11c0));
 }
 
+/* T6031 (J516C ADT): SOC-DEV-PS-REQ at 0x200, SOC-DEV-PS-ACK at 0x208. */
+static void pmp_ranges_t6031(struct kunit *test)
+{
+	u8 table[3 * PMP_PTD_RANGE_SIZE];
+
+	pmp_range(table, 1, 0x1, 1);
+	pmp_range(table + PMP_PTD_RANGE_SIZE, PMP_PTD_RANGE_REQUEST, 0x200, 8);
+	pmp_range(table + 2 * PMP_PTD_RANGE_SIZE, PMP_PTD_RANGE_ACK, 0x208, 8);
+	KUNIT_EXPECT_TRUE(test, apple_pmp_ranges_valid(table, sizeof(table),
+						       0x2000, 0x11000, 0x2080));
+	KUNIT_EXPECT_FALSE(test, apple_pmp_ranges_valid(table, sizeof(table),
+							0x1180, 0x108c0, 0x11c0));
+	KUNIT_EXPECT_FALSE(test, apple_pmp_ranges_valid(table, sizeof(table),
+							0x1000, 0x10800, 0x1080));
+
+	/* A T6030 table is refused with the T6031 apertures. */
+	pmp_range(table + PMP_PTD_RANGE_SIZE, PMP_PTD_RANGE_REQUEST, 0x118, 4);
+	pmp_range(table + 2 * PMP_PTD_RANGE_SIZE, PMP_PTD_RANGE_ACK, 0x11c, 4);
+	KUNIT_EXPECT_FALSE(test, apple_pmp_ranges_valid(table, sizeof(table),
+							0x2000, 0x11000, 0x2080));
+}
+
+/*
+ * T6031: 35 soc-device records in id order. DISPINT (id 17) and DISPEXT0-3
+ * (ids 18-21) are acknowledged, ANS (id 34) is not. The T6031 overlay seeds
+ * bits 0x10 (DISPINT, acknowledged) and 0x21 (ANS).
+ */
+static void pmp_devices_t6031(struct kunit *test)
+{
+	const size_t len = 35 * PMP_SOC_DEVICE_SIZE;
+	u64 seed = BIT_ULL(0x10) | BIT_ULL(0x21);
+	u64 ack = BIT_ULL(0x10);
+	u8 *table = kunit_kzalloc(test, len, GFP_KERNEL);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, table);
+	for (i = 0; i < 35; i++) {
+		put_unaligned_le32(i + 1, table + i * PMP_SOC_DEVICE_SIZE);
+		if (i + 1 >= 17 && i + 1 <= 21)
+			put_unaligned_le32(PMP_SOC_DEVICE_ACK,
+					   table + i * PMP_SOC_DEVICE_SIZE + 8);
+	}
+	KUNIT_EXPECT_TRUE(test, apple_pmp_devices_valid(table, len, seed, ack, true));
+	/* With the external display requests seeded and acknowledged too. */
+	KUNIT_EXPECT_TRUE(test, apple_pmp_devices_valid(table, len, seed | GENMASK_ULL(0x14, 0x11),
+							ack | GENMASK_ULL(0x14, 0x11), true));
+	/* Storage is not acknowledged; the display is. */
+	KUNIT_EXPECT_FALSE(test, apple_pmp_devices_valid(table, len, seed, seed, true));
+	KUNIT_EXPECT_FALSE(test, apple_pmp_devices_valid(table, len, seed, 0, true));
+	/* The T6030 entries (DISP bit 7, ANS bit 16) do not describe this table. */
+	KUNIT_EXPECT_FALSE(test, apple_pmp_devices_valid(table, len, BIT_ULL(7) | BIT_ULL(16),
+							 BIT_ULL(7), true));
+	/* Out of id order. */
+	put_unaligned_le32(18, table + 16 * PMP_SOC_DEVICE_SIZE);
+	put_unaligned_le32(17, table + 17 * PMP_SOC_DEVICE_SIZE);
+	KUNIT_EXPECT_FALSE(test, apple_pmp_devices_valid(table, len, seed, ack, true));
+}
+
 static void pmp_ranges_reject_bad_records(struct kunit *test)
 {
 	u8 table[3 * PMP_PTD_RANGE_SIZE];
@@ -168,10 +226,12 @@ static void pmp_bootargs_reject_integer_width(struct kunit *test)
 static struct kunit_case apple_pmp_report_cases[] = {
 	KUNIT_CASE(pmp_ranges_t6030),
 	KUNIT_CASE(pmp_ranges_t8122),
+	KUNIT_CASE(pmp_ranges_t6031),
 	KUNIT_CASE(pmp_ranges_reject_bad_records),
 	KUNIT_CASE(pmp_ranges_reject_wrapped_base),
 	KUNIT_CASE(pmp_devices_seed_and_ack),
 	KUNIT_CASE(pmp_devices_reordered),
+	KUNIT_CASE(pmp_devices_t6031),
 	KUNIT_CASE(pmp_bootargs_valid_ids),
 	KUNIT_CASE(pmp_bootargs_reject_truncation),
 	KUNIT_CASE(pmp_bootargs_reject_integer_width),

@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * T6031 power management processor, added by the display gate when it
+ * enables the internal display, on a T6031 board whose boot loader passes
+ * that Mac's PMP values in /chosen/asahi,t6031-pmp. There is no fallback:
+ * without those values the gate adds nothing.
+ *
+ * The layout is the T6030 overlay's: the PMP, its DART, its mailbox and its
+ * report. The addresses and interrupts are those of the J516C ADT:
+ *  - the PMP SRAM is the pmp node's third window (the nub's region),
+ *    0x2_9070_0000, 1 MiB; its ASC is at 0x2_90c0_0000, and its mailbox
+ *    at ASC + 0x8000;
+ *  - the PTD update page is the pmp node's window ptd-update-reg-index (3),
+ *    0x2_903d_0000, so the report window starts 0x10000 below it;
+ *  - the soc-device ids are 17 for the internal display (DISPINT, request
+ *    bit 0x10), 18-21 for DISPEXT0-3 (bits 0x11-0x14) and 34 for storage
+ *    (ANS, bit 0x21). The display requests are acknowledged, the storage
+ *    request is not.
+ * It carries none of the per-Mac values; the gate copies those from
+ * /chosen/asahi,t6031-pmp onto the PMP node (apple,board-id,
+ * apple,dram-vendor-id and every apple,tunable-* value, including
+ * apple,tunable-uuid).
+ *
+ * The PMP, its DART and its mailbox stay disabled here; the PMP report
+ * driver starts the PMP when the display driver first asks for it.
+ */
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/soc";
+
+		__overlay__ {
+			#address-cells = <2>;
+			#size-cells = <2>;
+
+			pmp_report: pmp-report@2903c0000 {
+				compatible = "apple,t6031-pmp-v2-report";
+				/* PTD read aperture and update page */
+				reg = <0x2 0x903c0000 0x0 0x14000>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				apple,pmp = <&pmp>;
+
+				/*
+				 * The gate points the DCP at this entry (apple,pmp-report)
+				 * through the phandle; the overlay itself does not refer to it.
+				 */
+				pmp_report_disp: report@10 {
+					compatible = "apple,t6000-pmp-v2-report-entry";
+					reg = <0x10>;
+					label = "pmp-disp";
+					#power-domain-cells = <0>;
+					apple,always-on;
+					phandle = <0x100>;
+				};
+
+				/*
+				 * The external display processors. Disabled: no boot loader
+				 * hands them over on T6031, so nothing enables them.
+				 */
+				pmp_report_dispext0: report@11 {
+					compatible = "apple,t6000-pmp-v2-report-entry";
+					reg = <0x11>;
+					label = "pmp-dispext0";
+					#power-domain-cells = <0>;
+					apple,always-on;
+					/* Missing external ACK must not block the internal panel. */
+					apple,defer-startup-ack;
+					phandle = <0x101>;
+					status = "disabled";
+				};
+
+				pmp_report_dispext1: report@12 {
+					compatible = "apple,t6000-pmp-v2-report-entry";
+					reg = <0x12>;
+					label = "pmp-dispext1";
+					#power-domain-cells = <0>;
+					apple,always-on;
+					apple,defer-startup-ack;
+					phandle = <0x102>;
+					status = "disabled";
+				};
+
+				pmp_report_dispext2: report@13 {
+					compatible = "apple,t6000-pmp-v2-report-entry";
+					reg = <0x13>;
+					label = "pmp-dispext2";
+					#power-domain-cells = <0>;
+					apple,always-on;
+					apple,defer-startup-ack;
+					phandle = <0x103>;
+					status = "disabled";
+				};
+
+				pmp_report_dispext3: report@14 {
+					compatible = "apple,t6000-pmp-v2-report-entry";
+					reg = <0x14>;
+					label = "pmp-dispext3";
+					#power-domain-cells = <0>;
+					apple,always-on;
+					apple,defer-startup-ack;
+					phandle = <0x104>;
+					status = "disabled";
+				};
+
+				pmp_report_ans: report@21 {
+					compatible = "apple,t6000-pmp-v2-report-entry";
+					reg = <0x21>;
+					label = "pmp-ans";
+					#power-domain-cells = <0>;
+					apple,always-on;
+					/* The PMP does not acknowledge storage requests. */
+					apple,no-ack;
+				};
+			};
+
+			pmp_dart: iommu@290300000 {
+				compatible = "apple,t6031-dart", "apple,t8110-dart";
+				reg = <0x2 0x90300000 0x0 0x4000>;
+				#iommu-cells = <1>;
+				interrupts = <0 0 1184 4>;
+				status = "disabled";
+			};
+
+			pmp_mbox: mailbox@290c08000 {
+				compatible = "apple,t6031-asc-mailbox", "apple,asc-mailbox-v4";
+				reg = <0x2 0x90c08000 0x0 0x4000>;
+				interrupts = <0 0 1180 4>, <0 0 1181 4>, <0 0 1182 4>, <0 0 1183 4>;
+				interrupt-names = "send-empty", "send-not-empty",
+						  "recv-empty", "recv-not-empty";
+				#mbox-cells = <0>;
+				status = "disabled";
+			};
+
+			pmp: pmp@290700000 {
+				compatible = "apple,t6031-pmp-v2", "apple,t6000-pmp-v2";
+				reg = <0x2 0x90700000 0x0 0x100000>,
+				      <0x2 0x90c00000 0x0 0x4000>;
+				reg-names = "pmp", "asc";
+				mboxes = <&pmp_mbox>;
+				mbox-names = "mbox";
+				iommus = <&pmp_dart 0>;
+				status = "disabled";
+			};
+		};
+	};
+};
