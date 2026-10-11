@@ -128,7 +128,7 @@ class Assembly(unittest.TestCase):
     def test_new_kernel_keeps_both_air_and_neo_pairs(self):
         neo=self.neo_pair()
         pair=dict(kernel=mod.NEO_FW_ROOT_PAIR['kernel'],m1n1=neo['source_commits']['m1n1'],m1n1_bin_sha256=neo['m1n1_bin_sha256'])
-        for name in ('NEO_FW_ROOT_PAIR', 'NEO_PREVIOUS_FW_ROOT_PAIR'):
+        for name in ('NEO_FW_ROOT_PAIR', 'NEO_RELEASED_FW_ROOT_PAIR', 'NEO_PREVIOUS_FW_ROOT_PAIR'):
             changed=dict(pair,kernel=getattr(mod,name)['kernel'])
             patch=mock.patch.object(mod,name,changed);patch.start();self.addCleanup(patch.stop)
         self.manifest['legacy_gpu_boards']=['j613','j615']
@@ -165,6 +165,33 @@ class Assembly(unittest.TestCase):
             changed=dict(pair);changed[field]='e'*len(pair[field])
             with self.subTest(field=field), mock.patch.object(mod,'NEO_PREVIOUS_FW_ROOT_PAIR',changed):
                 with self.assertRaisesRegex(ValueError,'firmware tables.*'+word):self.assemble()
+
+    def test_current_and_released_neo_kernels_require_their_exact_boot_pair(self):
+        for pair in (mod.NEO_FW_ROOT_PAIR, mod.NEO_RELEASED_FW_ROOT_PAIR,
+                     mod.NEO_PREVIOUS_FW_ROOT_PAIR):
+            with self.subTest(kernel=pair['kernel']):
+                mod.check_neo_firmware_tables(pair['kernel'], {'m1n1':pair['m1n1']},
+                                             pair['m1n1_bin_sha256'])
+                with self.assertRaisesRegex(ValueError,'matched boot source'):
+                    mod.check_neo_firmware_tables(pair['kernel'], {'m1n1':'e'*40},
+                                                 pair['m1n1_bin_sha256'])
+                with self.assertRaisesRegex(ValueError,'matched boot binary'):
+                    mod.check_neo_firmware_tables(pair['kernel'], {'m1n1':pair['m1n1']}, 'e'*64)
+
+    def test_new_kernel_keeps_exact_native25_boot_binding(self):
+        pair=mod.J615_NATIVE25_PAIR
+        self.assertEqual(pair['kernel'],mod.NEO_FW_ROOT_PAIR['kernel'])
+        sources={'kernel':pair['kernel'],'m1n1':pair['m1n1']}
+        members={'opt/mesa-m3/share/mesa-m3/native25-boards':b'j613\nj615-experimental\n',
+                 'opt/mesa-m3/libexec/mesa-m3-session-env':b'asahi,j615-25g83-experimental'}
+        with mock.patch.object(mod,'optional_member',side_effect=lambda p,n:members[n]), \
+             mock.patch.object(mod,'member',side_effect=lambda p,n:members[n]):
+            mod.check_j615_native25(sources,pair['m1n1_bin_sha256'],Path('mesa'))
+            for field,why in [('kernel','matched J615 kernel'),('m1n1','matched J615 m1n1 source')]:
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError,why):
+                    mod.check_j615_native25(dict(sources,**{field:'e'*40}),pair['m1n1_bin_sha256'],Path('mesa'))
+            with self.assertRaisesRegex(ValueError,'matched J615 m1n1 binary'):
+                mod.check_j615_native25(sources,'e'*64,Path('mesa'))
 
     def test_generic_esp_stage2_requires_stage2_build(self):
         neo=self.neo_pair()
