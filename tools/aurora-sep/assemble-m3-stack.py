@@ -19,9 +19,15 @@ NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa',
                '417c8e5e26319366cb5fff32d9887abfaa599e76',
                '9b96a8f6a29ceb3f645ed75e220a71c10e7d8e1f',
                '962bc344dd5c3725b63754e72b9cace43ca8e17e',
-               'bb07ce91aaded19baf92204ea930fc65cfd30aea')
+               'bb07ce91aaded19baf92204ea930fc65cfd30aea',
+               '9189760ca2222ba57d802d65ff3a0ebb2ca985ab')
 # J615 native25 requires exact kernel, boot source and packaged binary bindings.
 J615_NATIVE25_PAIR = {
+    'kernel': '9189760ca2222ba57d802d65ff3a0ebb2ca985ab',
+    'm1n1': 'd05ba17dfb771871d608225be42968bbb1e75a18',
+    'm1n1_bin_sha256': '396cf3ec1774ca9d15ca1b6f71b5e8a3639b27f80b95d530722b35a5ea35141d',
+}
+J615_PREVIOUS_NATIVE25_PAIR = {
     'kernel': 'bb07ce91aaded19baf92204ea930fc65cfd30aea',
     'm1n1': 'd05ba17dfb771871d608225be42968bbb1e75a18',
     'm1n1_bin_sha256': '396cf3ec1774ca9d15ca1b6f71b5e8a3639b27f80b95d530722b35a5ea35141d',
@@ -33,6 +39,11 @@ NEO_PREVIOUS_FW_ROOT_PAIR = {
     'm1n1_bin_sha256': '3eaa76ca39454b4aa232efecba72ffb3770b30a3b1047320c8f50c8ef627056c',
 }
 NEO_FW_ROOT_PAIR = {
+    'kernel': '9189760ca2222ba57d802d65ff3a0ebb2ca985ab',
+    'm1n1': '8b6cba90b4acc9c5817ae050a034dbef41177f24',
+    'm1n1_bin_sha256': 'bfe606c41c3b92bc95ea7bba384ac8d8de0e6d0a38a878e5f2de79488519f1b1',
+}
+NEO_PREVIOUS_RELEASE_FW_ROOT_PAIR = {
     'kernel': 'bb07ce91aaded19baf92204ea930fc65cfd30aea',
     'm1n1': '8b6cba90b4acc9c5817ae050a034dbef41177f24',
     'm1n1_bin_sha256': 'bfe606c41c3b92bc95ea7bba384ac8d8de0e6d0a38a878e5f2de79488519f1b1',
@@ -65,6 +76,8 @@ def check_standard_m1n1_source(source, package):
 
 def check_j615_native25(sources, binary_sha, mesa):
     pair = J615_NATIVE25_PAIR
+    if sources['kernel'] == J615_PREVIOUS_NATIVE25_PAIR['kernel']:
+        pair = J615_PREVIOUS_NATIVE25_PAIR
     if not isinstance(pair, dict) or set(pair) != {'kernel', 'm1n1', 'm1n1_bin_sha256'}:
         raise ValueError('J615 native25 requires the recorded J615 boot/kernel pair (J615_NATIVE25_PAIR)')
     if sources['kernel'] != pair['kernel']: raise ValueError('J615 native25 requires the matched J615 kernel')
@@ -77,7 +90,8 @@ def check_j615_native25(sources, binary_sha, mesa):
         raise ValueError('Mesa session hook lacks the J615 25G83 admission')
 
 def check_neo_firmware_tables(kernel, sources, binary_sha):
-    pair = next((p for p in (NEO_FW_ROOT_PAIR, NEO_RELEASED_FW_ROOT_PAIR,
+    pair = next((p for p in (NEO_FW_ROOT_PAIR, NEO_PREVIOUS_RELEASE_FW_ROOT_PAIR,
+                            NEO_RELEASED_FW_ROOT_PAIR,
                             NEO_PREVIOUS_FW_ROOT_PAIR)
                  if kernel == p['kernel']), None)
     if pair is None:
