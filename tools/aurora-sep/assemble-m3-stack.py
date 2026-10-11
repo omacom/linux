@@ -17,21 +17,29 @@ NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa',
                'e76133daffab1be549b47571691ab77ac7c28201',
                '25b138b77409fcb49c2e4fbebee57d81bdea9bb3',
                '417c8e5e26319366cb5fff32d9887abfaa599e76',
-               '9b96a8f6a29ceb3f645ed75e220a71c10e7d8e1f')
+               '9b96a8f6a29ceb3f645ed75e220a71c10e7d8e1f',
+               '962bc344dd5c3725b63754e72b9cace43ca8e17e')
 # J615 native25 requires exact kernel, boot source and packaged binary bindings.
 J615_NATIVE25_PAIR = {
-    'kernel': '9b96a8f6a29ceb3f645ed75e220a71c10e7d8e1f',
-    'm1n1': '31501778e863feb5d2afe77be3a1edc588c98119',
-    'm1n1_bin_sha256': '88561de86ca41eb3cc94b0550674fe07c41a5b6ee5c45b8539c04e2443b0d9d7',
+    'kernel': '962bc344dd5c3725b63754e72b9cace43ca8e17e',
+    'm1n1': 'd05ba17dfb771871d608225be42968bbb1e75a18',
+    'm1n1_bin_sha256': '396cf3ec1774ca9d15ca1b6f71b5e8a3639b27f80b95d530722b35a5ea35141d',
 }
 # Reserved firmware DART tables require the matched Neo ESP producer.
-NEO_FW_ROOT_PAIR = {
+NEO_PREVIOUS_FW_ROOT_PAIR = {
     'kernel': '9b96a8f6a29ceb3f645ed75e220a71c10e7d8e1f',
     'm1n1': 'a67a0420804e5096715d95b5f0fff4eed181557e',
     'm1n1_bin_sha256': '3eaa76ca39454b4aa232efecba72ffb3770b30a3b1047320c8f50c8ef627056c',
 }
-STANDARD_M1N1_SOURCE = "31501778e863feb5d2afe77be3a1edc588c98119"
-J615_LEGACY_M1N1_SOURCES = ("74ba6bea52d1f865d204bb3f8168705a148fd5c5", STANDARD_M1N1_SOURCE)
+NEO_FW_ROOT_PAIR = {
+    'kernel': '962bc344dd5c3725b63754e72b9cace43ca8e17e',
+    'm1n1': '8b6cba90b4acc9c5817ae050a034dbef41177f24',
+    'm1n1_bin_sha256': 'bfe606c41c3b92bc95ea7bba384ac8d8de0e6d0a38a878e5f2de79488519f1b1',
+}
+STANDARD_M1N1_SOURCE = "d05ba17dfb771871d608225be42968bbb1e75a18"
+PREVIOUS_STANDARD_M1N1_SOURCE = "31501778e863feb5d2afe77be3a1edc588c98119"
+J615_LEGACY_M1N1_SOURCES = ("74ba6bea52d1f865d204bb3f8168705a148fd5c5",
+                          PREVIOUS_STANDARD_M1N1_SOURCE, STANDARD_M1N1_SOURCE)
 
 def member(path, name):
     return subprocess.check_output(['bsdtar', '-xOf', str(path), name])
@@ -41,7 +49,7 @@ def optional_member(path, name):
     return result.stdout if result.returncode == 0 else None
 
 def check_standard_m1n1_source(source, package):
-    if source != STANDARD_M1N1_SOURCE:
+    if source not in (STANDARD_M1N1_SOURCE, PREVIOUS_STANDARD_M1N1_SOURCE):
         return
     if optional_member(package, 'usr/share/m1n1-aurora/source') != (source + '\n').encode():
         raise ValueError('standard m1n1 source marker differs')
@@ -63,8 +71,9 @@ def check_j615_native25(sources, binary_sha, mesa):
         raise ValueError('Mesa session hook lacks the J615 25G83 admission')
 
 def check_neo_firmware_tables(kernel, sources, binary_sha):
-    pair = NEO_FW_ROOT_PAIR
-    if kernel != pair['kernel']:
+    pair = next((p for p in (NEO_FW_ROOT_PAIR, NEO_PREVIOUS_FW_ROOT_PAIR)
+                 if kernel == p['kernel']), None)
+    if pair is None:
         return
     if not re.fullmatch(r'[0-9a-f]{40}', pair.get('m1n1') or ''):
         raise ValueError('Neo firmware tables require a recorded boot source')
@@ -132,9 +141,11 @@ def neo_data(manifest, directory):
     if member(paths['m1n1'], 'usr/share/m1n1-neo/source').strip().decode() != sources['m1n1']:
         raise ValueError('Neo bootloader source differs')
     cfg = member(paths['m1n1'], 'usr/share/m1n1-neo/build-config.h')
-    for flag in (b'RELEASE', b'CHAINLOADING', b'J700_ESP_STAGE2'):
+    for flag in (b'RELEASE', b'CHAINLOADING'):
         if not re.search(rb'^#define '+flag+rb'$', cfg, re.M):
             raise ValueError('Neo ESP configuration differs')
+    if not re.search(rb'^#define (?:ESP_STAGE2|J700_ESP_STAGE2)$', cfg, re.M):
+        raise ValueError('Neo ESP configuration differs')
     if b'#define T8140_KIS_PROXY' in cfg or b'#define J700_CDC_PROXY' in cfg:
         raise ValueError('Neo ESP must not use a debug proxy')
     for role, path in (('mesa', 'opt/mesa-neo/share/mesa-neo/profile'), ('m1n1', 'usr/share/m1n1-neo/profile')):
