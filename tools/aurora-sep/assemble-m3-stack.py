@@ -53,6 +53,12 @@ NEO_RELEASED_FW_ROOT_PAIR = {
     'm1n1': '8b6cba90b4acc9c5817ae050a034dbef41177f24',
     'm1n1_bin_sha256': 'bfe606c41c3b92bc95ea7bba384ac8d8de0e6d0a38a878e5f2de79488519f1b1',
 }
+# A live H17P session uses the same reserved-table kernel consumer.
+NEO_LIVE_FW_ROOT_PAIR = {
+    'kernel': '9189760ca2222ba57d802d65ff3a0ebb2ca985ab',
+    'm1n1': '1b36287e04788f4a028e6180c64d3d96e49f06b1',
+    'm1n1_bin_sha256': '1c61eea4da8bd4bd2e18de534d661ccc569e1b8e92b19d4af867d5b281516491',
+}
 STANDARD_M1N1_SOURCE = "d05ba17dfb771871d608225be42968bbb1e75a18"
 PREVIOUS_STANDARD_M1N1_SOURCE = "31501778e863feb5d2afe77be3a1edc588c98119"
 J615_LEGACY_M1N1_SOURCES = ("74ba6bea52d1f865d204bb3f8168705a148fd5c5",
@@ -90,15 +96,15 @@ def check_j615_native25(sources, binary_sha, mesa):
         raise ValueError('Mesa session hook lacks the J615 25G83 admission')
 
 def check_neo_firmware_tables(kernel, sources, binary_sha):
-    pair = next((p for p in (NEO_FW_ROOT_PAIR, NEO_PREVIOUS_RELEASE_FW_ROOT_PAIR,
-                            NEO_RELEASED_FW_ROOT_PAIR,
-                            NEO_PREVIOUS_FW_ROOT_PAIR)
-                 if kernel == p['kernel']), None)
-    if pair is None:
+    pairs = [p for p in (NEO_FW_ROOT_PAIR, NEO_PREVIOUS_RELEASE_FW_ROOT_PAIR,
+                        NEO_RELEASED_FW_ROOT_PAIR, NEO_PREVIOUS_FW_ROOT_PAIR,
+                        NEO_LIVE_FW_ROOT_PAIR) if kernel == p['kernel']]
+    if not pairs:
         return
-    if not re.fullmatch(r'[0-9a-f]{40}', pair.get('m1n1') or ''):
+    if any(not re.fullmatch(r'[0-9a-f]{40}', p.get('m1n1') or '') for p in pairs):
         raise ValueError('Neo firmware tables require a recorded boot source')
-    if sources['m1n1'] != pair['m1n1']:
+    pair = next((p for p in pairs if sources['m1n1'] == p['m1n1']), None)
+    if pair is None:
         raise ValueError('Neo firmware tables require the matched boot source')
     if binary_sha != pair['m1n1_bin_sha256']:
         raise ValueError('Neo firmware tables require the matched boot binary')
@@ -167,7 +173,7 @@ def neo_data(manifest, directory):
             raise ValueError('Neo ESP configuration differs')
     if not re.search(rb'^#define (?:ESP_STAGE2|J700_ESP_STAGE2)$', cfg, re.M):
         raise ValueError('Neo ESP configuration differs')
-    if b'#define T8140_KIS_PROXY' in cfg or b'#define J700_CDC_PROXY' in cfg:
+    if any(b'#define '+flag in cfg for flag in (b'T8140_KIS_PROXY', b'J700_CDC_PROXY', b'J613_ESP_STAGE1')):
         raise ValueError('Neo ESP must not use a debug proxy')
     for role, path in (('mesa', 'opt/mesa-neo/share/mesa-neo/profile'), ('m1n1', 'usr/share/m1n1-neo/profile')):
         if member(paths[role], path) != b'j700-g17p-hal200\n':

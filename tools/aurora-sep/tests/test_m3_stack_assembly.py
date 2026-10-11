@@ -167,6 +167,22 @@ class Assembly(unittest.TestCase):
             with self.subTest(field=field), mock.patch.object(mod,'NEO_PREVIOUS_FW_ROOT_PAIR',changed):
                 with self.assertRaisesRegex(ValueError,'firmware tables.*'+word):self.assemble()
 
+    def test_live_and_previous_boot_sources_keep_separate_binary_bindings(self):
+        old, new = mod.NEO_FW_ROOT_PAIR, mod.NEO_LIVE_FW_ROOT_PAIR
+        self.assertEqual(old['kernel'], new['kernel'])
+        for pair in (old, new):
+            mod.check_neo_firmware_tables(pair['kernel'], {'m1n1':pair['m1n1']},
+                                         pair['m1n1_bin_sha256'])
+            other = new if pair is old else old
+            with self.assertRaisesRegex(ValueError, 'matched boot binary'):
+                mod.check_neo_firmware_tables(pair['kernel'], {'m1n1':pair['m1n1']},
+                                             other['m1n1_bin_sha256'])
+        for pair in (mod.NEO_PREVIOUS_RELEASE_FW_ROOT_PAIR,
+                     mod.NEO_RELEASED_FW_ROOT_PAIR, mod.NEO_PREVIOUS_FW_ROOT_PAIR):
+            with self.assertRaisesRegex(ValueError, 'matched boot source'):
+                mod.check_neo_firmware_tables(pair['kernel'], {'m1n1':new['m1n1']},
+                                             new['m1n1_bin_sha256'])
+
     def test_current_and_released_neo_kernels_require_their_exact_boot_pair(self):
         for pair in (mod.NEO_FW_ROOT_PAIR, mod.NEO_PREVIOUS_RELEASE_FW_ROOT_PAIR,
                      mod.NEO_RELEASED_FW_ROOT_PAIR,
