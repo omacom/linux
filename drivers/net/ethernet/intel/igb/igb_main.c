@@ -719,7 +719,8 @@ u32 igb_rd32(struct e1000_hw *hw, u32 reg)
 	/* reads should not return all F's */
 	if (!(~value) && (!reg || !(~readl(hw_addr)))) {
 		struct net_device *netdev = igb->netdev;
-		hw->hw_addr = NULL;
+		WRITE_ONCE(hw->hw_addr, NULL);
+		netif_carrier_off(netdev);
 		netdev_err(netdev, "PCIe link lost\n");
 		WARN(pci_device_is_present(igb->pdev),
 		     "igb: Failed to read reg 0x%x!\n", reg);
@@ -5476,6 +5477,9 @@ bool igb_has_link(struct igb_adapter *adapter)
 	struct e1000_hw *hw = &adapter->hw;
 	bool link_active = false;
 
+	if (E1000_REMOVED(READ_ONCE(hw->hw_addr)))
+		return false;
+
 	/* get_link_status is set on LSC (link status) interrupt or
 	 * rx sequence error interrupt.  get_link_status will stay
 	 * false until the e1000_check_for_link establishes link
@@ -5494,6 +5498,9 @@ bool igb_has_link(struct igb_adapter *adapter)
 	case e1000_media_type_unknown:
 		break;
 	}
+
+	if (E1000_REMOVED(READ_ONCE(hw->hw_addr)))
+		return false;
 
 	if (((hw->mac.type == e1000_i210) ||
 	     (hw->mac.type == e1000_i211)) &&
@@ -5669,7 +5676,11 @@ retry_read_status:
 				dev_err(&adapter->pdev->dev, "read 1000Base-T Status Reg\n");
 			}
 no_wait:
-			netif_carrier_on(netdev);
+			/* A removed device cannot publish cached link state. */
+			if (!E1000_REMOVED(READ_ONCE(hw->hw_addr)))
+				netif_carrier_on(netdev);
+			if (E1000_REMOVED(READ_ONCE(hw->hw_addr)))
+				netif_carrier_off(netdev);
 
 			igb_ping_all_vfs(adapter);
 			igb_check_vf_rate_limit(adapter);

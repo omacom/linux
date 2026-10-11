@@ -149,14 +149,17 @@ static int brcmf_proto_bcdc_cmplt(struct brcmf_pub *drvr, u32 id, u32 len)
 				      len);
 		if (ret < 0)
 			break;
+		if (ret < sizeof(bcdc->msg))
+			return -EBADMSG;
 	} while (BCDC_DCMD_ID(le32_to_cpu(bcdc->msg.flags)) != id);
 
 	return ret;
 }
 
 static int
-brcmf_proto_bcdc_query_dcmd(struct brcmf_pub *drvr, int ifidx, uint cmd,
-			    void *buf, uint len, int *fwerr)
+brcmf_proto_bcdc_query_dcmd_len(struct brcmf_pub *drvr, int ifidx, uint cmd,
+			    void *buf, uint len, int *fwerr,
+			    u32 *ret_len)
 {
 	struct brcmf_bcdc *bcdc = (struct brcmf_bcdc *)drvr->proto->pd;
 	struct brcmf_proto_bcdc_dcmd *msg = &bcdc->msg;
@@ -167,6 +170,11 @@ brcmf_proto_bcdc_query_dcmd(struct brcmf_pub *drvr, int ifidx, uint cmd,
 	brcmf_dbg(BCDC, "Enter, cmd %d len %d\n", cmd, len);
 
 	*fwerr = 0;
+	if (ret_len) {
+		*ret_len = 0;
+		if (len > sizeof(bcdc->buf))
+			return -EMSGSIZE;
+	}
 	ret = brcmf_proto_bcdc_msg(drvr, ifidx, cmd, buf, len, false);
 	if (ret < 0) {
 		bphy_err(drvr, "brcmf_proto_bcdc_msg failed w/status %d\n",
@@ -180,6 +188,14 @@ retry:
 	if (ret < 0)
 		goto done;
 
+	if (ret_len) {
+		if (ret < sizeof(*msg)) {
+			ret = -EBADMSG;
+			goto done;
+		}
+		/* rxctl includes the DCMD header; only its payload is data. */
+		*ret_len = min_t(u32, len, ret - sizeof(*msg));
+	}
 	flags = le32_to_cpu(msg->flags);
 	id = (flags & BCDC_DCMD_ID_MASK) >> BCDC_DCMD_ID_SHIFT;
 
@@ -198,7 +214,9 @@ retry:
 
 	/* Copy info buffer */
 	if (buf) {
-		if (ret < (int)len)
+		if (ret_len)
+			len = *ret_len;
+		else if (ret < (int)len)
 			len = ret;
 		memcpy(buf, info, len);
 	}
@@ -210,6 +228,14 @@ retry:
 		*fwerr = le32_to_cpu(msg->status);
 done:
 	return ret;
+}
+
+static int
+brcmf_proto_bcdc_query_dcmd(struct brcmf_pub *drvr, int ifidx, uint cmd,
+			  void *buf, uint len, int *fwerr)
+{
+	return brcmf_proto_bcdc_query_dcmd_len(drvr, ifidx, cmd, buf, len,
+					     fwerr, NULL);
 }
 
 static int
@@ -456,6 +482,7 @@ int brcmf_proto_bcdc_attach(struct brcmf_pub *drvr)
 
 	drvr->proto->hdrpull = brcmf_proto_bcdc_hdrpull;
 	drvr->proto->query_dcmd = brcmf_proto_bcdc_query_dcmd;
+	drvr->proto->query_dcmd_len = brcmf_proto_bcdc_query_dcmd_len;
 	drvr->proto->set_dcmd = brcmf_proto_bcdc_set_dcmd;
 	drvr->proto->tx_queue_data = brcmf_proto_bcdc_tx_queue_data;
 	drvr->proto->txdata = brcmf_proto_bcdc_txdata;

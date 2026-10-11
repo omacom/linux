@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 
 BEGIN = '# >>> aurora-sep: persistent experimental M3 GPU'
 END = '# <<< aurora-sep: persistent experimental M3 GPU'
@@ -38,7 +39,8 @@ def atomic(path, data):
         if os.path.exists(name): os.unlink(name)
 
 @contextlib.contextmanager
-def locks(paths):
+def locks(paths, timeout=30.0):
+    deadline = time.monotonic() + timeout
     fds = []
     try:
         for path in paths:
@@ -46,7 +48,15 @@ def locks(paths):
             fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
             fds.append(fd)
             if not stat.S_ISREG(os.fstat(fd).st_mode): raise ValueError('nonregular boot lock')
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(f'boot partition locks remained busy for {timeout:g} seconds; retry this installer') from None
+                    time.sleep(min(0.05, remaining))
         yield
     finally:
         for fd in reversed(fds): os.close(fd)
@@ -95,8 +105,17 @@ def uki_path(esp, value):
     if m[2] and m[2] != digest: raise ValueError('UKI hash pin differs')
     return data, digest
 
+def same_esp_path(left, right):
+    # VFAT names ignore ASCII case and trailing dots in each component.
+    key = lambda path: tuple(part.rstrip('.').lower() for part in path.resolve().parts)
+    if key(left) == key(right): return True
+    try:
+        return os.path.samestat(left.stat(), right.stat())
+    except FileNotFoundError:
+        return False
+
 def limine(args):
-    with locks(args.lock):
+    with locks(args.lock, args.lock_timeout):
         loader = regular(args.esp / 'EFI/BOOT/BOOTAA64.EFI').read_bytes()
         if b'limine.conf' not in loader: raise ValueError('EFI loader is not Limine')
         sig = b'++CONFIG_B2SUM_SIGNATURE++'
@@ -111,9 +130,49 @@ def limine(args):
         text = regular(conf).read_text()
         clean = without_block(text)
         state_path = args.state / 'm3-known-entry.json'
+        if args.action in ('check-remove', 'remove'):
+            output = clean
+            retained = None
+            has_entry = re.search(r'^\s*/' + re.escape(FALLBACK) + r'\s*$', clean, re.M)
+            if state_path.exists() or state_path.is_symlink():
+                saved = json.loads(regular(state_path).read_text())
+                match = re.fullmatch(r'boot\(\):(/EFI/Linux/aurora-m3-previous-[0-9a-f]{16}\.efi)#([0-9a-f]{128})', saved['path'])
+                if not match or not match[1].endswith(match[2][:16] + '.efi'):
+                    raise ValueError('retained UKI name and hash pin differ')
+                retained = args.esp / match[1].lstrip('/')
+                # An edited or snapshot entry must not lose its kernel or modules.
+                if has_entry:
+                    lines, fields = entry(clean, FALLBACK, 1)
+                    if fields['path'][1] != saved['path'] or fields['cmdline'][1] != saved['cmdline']:
+                        raise ValueError('custom fallback differs from retained entry')
+                    start = next(i for i, line in enumerate(lines) if line.strip() == '/' + FALLBACK)
+                    end = start + 1
+                    while end < len(lines) and not lines[end].lstrip().startswith('/'): end += 1
+                    output = ''.join(lines[:start] + lines[end:]).rstrip() + '\n'
+                for value in re.findall(r'^\s*path:\s*(\S+)', output, re.M | re.I):
+                    reference = re.fullmatch(r'boot\(\):(/[^#]+)(?:#[0-9a-fA-F]{128})?', value)
+                    if reference and same_esp_path(args.esp / reference[1].lstrip('/'), retained):
+                        raise ValueError('another boot entry still uses the retained UKI; remove that entry first')
+                if retained.exists() or retained.is_symlink():
+                    uki_path(args.esp, saved['path'])
+                elif has_entry:
+                    raise ValueError('registered fallback UKI is missing')
+                else:
+                    retained = None
+            else:
+                owned_reference = any(re.fullmatch(r'aurora-m3-previous-[0-9a-f]{16}\.efi',
+                    Path(value.split('#', 1)[0]).name.rstrip('.').lower())
+                    for value in re.findall(r'^\s*path:\s*boot\(\):(/\S+)', clean, re.M | re.I))
+                if has_entry or owned_reference:
+                    raise ValueError('custom fallback has no saved ownership record')
+            if regular(conf).read_text() != text: raise ValueError('Limine configuration changed during remove')
+            if args.action == 'remove':
+                atomic(conf, output.encode())
+                if retained is not None: retained.unlink()
+            return
         args.state.mkdir(parents=True, exist_ok=True)
         if args.action == 'retain':
-            if state_path.exists():
+            if state_path.exists() or state_path.is_symlink():
                 saved = json.loads(regular(state_path).read_text())
                 uki_path(args.esp, saved['path'])
                 if not (args.state / ('modules-' + saved['release']) / 'modules.dep').is_file():
@@ -171,7 +230,7 @@ def limine(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=('retain', 'publish', 'disarm'))
+    p.add_argument('action', choices=('retain', 'publish', 'disarm', 'check-remove', 'remove'))
     p.add_argument('--esp', type=Path, required=True)
     p.add_argument('--state', type=Path, required=True)
     p.add_argument('--defaults', type=Path, default=Path('/etc/default/limine'))
@@ -179,7 +238,10 @@ def main():
     p.add_argument('--release', default=os.uname().release)
     p.add_argument('--modules', type=Path, default=Path('/usr/lib/modules'))
     p.add_argument('--lock', type=Path, action='append')
+    p.add_argument('--lock-timeout', type=float, default=30.0, help='total boot-lock wait, in seconds (0..30)')
     args = p.parse_args()
+    if not 0 <= args.lock_timeout <= 30:
+        p.error('lock timeout must be between 0 and 30 seconds')
     args.lock = args.lock or [Path('/run/lock/boot-partition.lock'), Path('/tmp/limine-global.lock')]
     try: limine(args)
     except (OSError, ValueError, KeyError) as e: p.exit(1, f'M3 boot profile refused: {e}\n')

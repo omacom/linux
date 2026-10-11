@@ -20,6 +20,9 @@ struct brcmf_proto {
 		       struct sk_buff *skb, struct brcmf_if **ifp);
 	int (*query_dcmd)(struct brcmf_pub *drvr, int ifidx, uint cmd,
 			  void *buf, uint len, int *fwerr);
+	/* ret_len is the number of response payload bytes copied into buf. */
+	int (*query_dcmd_len)(struct brcmf_pub *drvr, int ifidx, uint cmd,
+			      void *buf, uint len, int *fwerr, u32 *ret_len);
 	int (*set_dcmd)(struct brcmf_pub *drvr, int ifidx, uint cmd, void *buf,
 			uint len, int *fwerr);
 	int (*tx_queue_data)(struct brcmf_pub *drvr, int ifidx,
@@ -65,6 +68,16 @@ static inline int brcmf_proto_query_dcmd(struct brcmf_pub *drvr, int ifidx,
 					 int *fwerr)
 {
 	return drvr->proto->query_dcmd(drvr, ifidx, cmd, buf, len,fwerr);
+}
+static inline int brcmf_proto_query_dcmd_len(struct brcmf_pub *drvr, int ifidx,
+					     uint cmd, void *buf, uint len,
+					     int *fwerr, u32 *ret_len)
+{
+	*ret_len = 0;
+	if (!drvr->proto->query_dcmd_len)
+		return -EOPNOTSUPP;
+	return drvr->proto->query_dcmd_len(drvr, ifidx, cmd, buf, len,
+					 fwerr, ret_len);
 }
 static inline int brcmf_proto_set_dcmd(struct brcmf_pub *drvr, int ifidx,
 				       uint cmd, void *buf, uint len,

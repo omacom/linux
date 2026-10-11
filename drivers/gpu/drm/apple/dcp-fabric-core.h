@@ -37,6 +37,8 @@ struct dcp_fabric_route {
 	struct dcp_fabric_pipeline *pipeline;
 	bool tunnel;
 	unsigned int dpin;
+	/* DP IN adapters this source cannot clock; direct DP is unaffected. */
+	u8 tunnel_clock_blocked;
 };
 
 struct dcp_fabric_plan {
@@ -73,6 +75,7 @@ enum dcp_fabric_wiring {
 enum dcp_fabric_wiring dcp_fabric_wiring(bool dpin0, bool dpin1, bool legacy,
 					 unsigned int endpoints);
 bool dcp_fabric_t6020_flow(bool usb4, bool soc_support, bool connector_wired);
+u8 dcp_fabric_tunnel_clock_blocked(bool t6030, unsigned int source);
 
 enum dcp_fabric_capacity_action {
 	DCP_FABRIC_PROMOTE,
@@ -119,6 +122,7 @@ struct dcp_fabric_follow_ops {
 	int (*prepare)(void *ctx, unsigned int slot);
 	int (*validate)(void *ctx, unsigned int slot);
 	int (*detach)(void *ctx, unsigned int slot, bool destination);
+	bool (*retained)(void *ctx, unsigned int slot, bool destination);
 	int (*attach)(void *ctx, unsigned int slot, bool restore);
 	void (*publish)(void *ctx, unsigned int slot, bool restore);
 	void (*lost)(void *ctx, unsigned int slot);

@@ -952,6 +952,9 @@ static int add_dcp_components(struct device *dev,
 
 static int apple_platform_probe(struct platform_device *pdev)
 {
+	if (of_machine_is_compatible("apple,t8140"))
+		return -ENODEV;
+
 	struct device *mdev = &pdev->dev;
 	struct component_match *match = NULL;
 	int num_dcp;
@@ -1023,11 +1026,6 @@ static int __init appledrm_register(void)
 	int ret;
 	if (drm_firmware_drivers_only())
 		return -ENODEV;
-
-	/* A refused experimental profile keeps the boot framebuffer available. */
-	ret = apple_j613_25g83_coldplug();
-	if (ret)
-		pr_info("J613/25G83 display handoff refused: %d; keeping boot framebuffer\n", ret);
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
 	ret = dcp_audio_register();

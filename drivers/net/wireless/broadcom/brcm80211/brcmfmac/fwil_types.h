@@ -20,6 +20,8 @@
 
 #define	BRCMF_BSS_INFO_MIN_VERSION	109 /* min ver of brcmf_bss_info_le struct */
 #define	BRCMF_BSS_INFO_MAX_VERSION	112 /* max ver of brcmf_bss_info_le struct */
+#define BRCMF_BSS_INFO_VERSION_116	116
+#define BRCMF_BSS_INFO_V116_FIXED_SIZE	172
 #define BRCMF_BSS_RSSI_ON_CHANNEL	0x0004
 
 #define BRCMF_STA_BRCM			0x00000001	/* Running a Broadcom driver */
@@ -382,7 +384,7 @@ struct brcmf_bss_info_le {
 	u8		eht_txmcsmap[6];	/* EHT tx mcs code map */
 	/* Add new fields here */
 	/* variable length Information Elements */
-};
+} __packed;
 
 struct brcm_rateset_le {
 	/* # rates in this set */
@@ -581,7 +583,7 @@ struct brcmf_escan_result_le {
 	__le16 sync_id;
 	__le16 bss_count;
 	struct brcmf_bss_info_le bss_info_le;
-};
+} __packed;
 
 #define WL_ESCAN_RESULTS_FIXED_SIZE (sizeof(struct brcmf_escan_result_le) - \
 	sizeof(struct brcmf_bss_info_le))

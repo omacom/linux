@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 /*
- * J613 (M3 Air 13 inch) experimental internal display: macOS 26.6.2 (25G83) IOMFB over DCPLink
+ * J613 (M3 Air 13 inch) experimental internal display: macOS 26.6.2 (25G83) IOMFB over DCPLink.
+ * J615 uses its own panel size and requires the experimental chosen switch.
  *
  * Copyright The Asahi Linux Contributors
  * Based on the M3 Pro DCP lab client by Eryk Wieliczko.
@@ -66,7 +67,7 @@
 #include "dcp-lifecycle.h"
 #include "iomfb_internal.h"
 #include "iomfb_v26_6.h"
-#include "j613-25g83.h"
+#include <linux/soc/apple/j613-display.h>
 #include "iomfb_v26_6_link.h"
 #include "iomfb_v26_6_swap.h"
 #include "parser.h"
@@ -130,8 +131,20 @@ static const struct dcp_v26_board dcp_v26_board_j613 = {
 	.panel_width = 2560,
 	.panel_height = 1664,
 };
+/* Experimental J615 panel: own 2880x1864 geometry and DT brightness cap. */
+static const struct dcp_v26_board dcp_v26_board_j615 = {
+	.name = "J615/25G83 (experimental)",
+	.dcp_compatible = "apple,t8122-dcp",
+	.machine = "apple,j615",
+	.firmware_uuid = DCP_V26_J613_FIRMWARE_UUID,
+	.handoff = "apple,j613-25g83-mapping-handoff",
+	.max_nits = 525,
+	.panel_width = 2880,
+	.panel_height = 1864,
+};
 static const struct dcp_v26_board *const dcp_v26_boards[] = {
 	&dcp_v26_board_j613,
+	&dcp_v26_board_j615,
 };
 
 struct dcp_v26_property {
@@ -909,7 +922,7 @@ static int dcp_v26_cpu_running(struct device *dev, const char *name)
  */
 const struct dcp_v26_board *iomfb_v26_6_board(struct device *dev)
 {
-	const struct dcp_v26_board *board;
+	const struct dcp_v26_board *board, *known = NULL;
 	unsigned int i;
 
 	for (i = 0; i < ARRAY_SIZE(dcp_v26_boards); i++) {
@@ -917,11 +930,14 @@ const struct dcp_v26_board *iomfb_v26_6_board(struct device *dev)
 		if (!of_device_is_compatible(dev->of_node, board->dcp_compatible))
 			continue;
 		if (board->machine && !of_machine_is_compatible(board->machine)) {
-			dev_err(dev, "%s display not started: this machine is not a %s\n",
-				board->name, board->machine);
-			return ERR_PTR(-ENODEV);
+			known = board;
+			continue;
 		}
 		return board;
+	}
+	if (known) {
+		dev_err(dev, "25G83 display not started: this machine is none of the 25G83 boards\n");
+		return ERR_PTR(-ENODEV);
 	}
 	return NULL;
 }
@@ -977,7 +993,7 @@ int iomfb_v26_6_probe(struct apple_dcp *dcp)
 	    of_property_count_u32_elems(np, "apple,firmware-compat") != 3 ||
 	    of_property_read_u32_array(np, "apple,firmware-compat", version, 3) ||
 	    of_property_read_string(np, "apple,firmware-uuid", &uuid) ||
-	    !j613_25g83_identity(of_machine_is_compatible("apple,j613"), profile, version, 3, uuid))
+	    !j613_25g83_identity(apple_t8122_25g83_board(), profile, version, 3, uuid))
 		return -ENODEV;
 	if (IS_ERR_OR_NULL(board))
 		return -ENODEV;

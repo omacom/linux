@@ -31,7 +31,9 @@ def main():
 #include <stdbool.h>
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64;
 ''')
+        write(tmp, 'linux/kconfig.h', '#define IS_ENABLED(x) 0\n')
         write(tmp, 'linux/string.h', '#include <string.h>\n')
+        write(tmp, 'linux/of.h', '#pragma once\n#include <stdbool.h>\nstatic inline bool of_machine_is_compatible(const char *c) { (void)c; return false; }\n')
         write(tmp, 'linux/bitops.h', '#pragma once\n#define BIT(x) (1U << (x))\nstatic int fls(unsigned x){return x?32-__builtin_clz(x):0;}\n')
         write(tmp, 'linux/bits.h', '#include "bitops.h"\n#define GENMASK_ULL(h,l) ((~0ULL << (l)) & (~0ULL >> (63-(h))))\n')
         write(tmp, 'linux/unaligned.h', '''#include <string.h>
@@ -44,10 +46,19 @@ static u64 get_unaligned_le64(const void*p){const u8*b=p;u64 v=0;for(int i=0;i<8
 ''')
         write(tmp, 'profile.c', '''#include <assert.h>
 #include <stdio.h>
-#include "drivers/gpu/drm/apple/j613-25g83.h"
+#include "include/linux/soc/apple/j613-display.h"
 #include "drivers/gpu/drm/apple/iomfb_v26_6_swap.h"
 int main(void) {
  u32 v[]={26,6,2},c[]={1,345,416,712000000,0},m[]={1,1,1};
+ assert(t8122_25g83_board(true,false,NULL,0));
+ assert(!t8122_25g83_board(false,true,NULL,0));
+ assert(!t8122_25g83_board(false,true,"0",2));
+ assert(!t8122_25g83_board(false,true,"1",1));
+ assert(!t8122_25g83_board(false,true,"11",3));
+ assert(t8122_25g83_board(false,true,"1",2));
+ assert(!t8122_25g83_board(false,false,"1",2));
+ assert(!t8122_25g83_board(true,true,NULL,0));
+ assert(!t8122_25g83_board(true,true,"1",2));
  assert(j613_25g83_identity(true,1,v,3,J613_25G83_DCP_UUID));
  assert(!j613_25g83_identity(false,1,v,3,J613_25G83_DCP_UUID));
  assert(!j613_25g83_identity(true,0,v,3,J613_25G83_DCP_UUID));
@@ -182,6 +193,36 @@ def verify_dtbs(directory):
     proc=subprocess.run(['dtc','-I','dtb','-O','dts',str(old)],capture_output=True,text=True,check=True)
     assert 'apple,power-method = <0x02>;' not in proc.stdout
     print('compiled25/current14 profile/disabled topology/trackpad controls: PASS')
+    verify_j615_dtbs(directory)
+
+
+def verify_j615_dtbs(directory):
+    """The experimental J615 25G83 tree: the J615 board plus the same 25G83 profile."""
+    new = directory/'t8122-j615-25g83.dtb'
+    old = directory/'t8122-j615.dtb'
+    def get(path,node,prop,kind='s',required=True):
+        result=subprocess.run(['fdtget','-t',kind,str(path),node,prop],capture_output=True,text=True)
+        if required:
+            assert result.returncode==0,(node,prop,result.stderr)
+            return result.stdout.strip()
+        return result.returncode==0
+    assert get(new,'/','compatible').split()[0]=='apple,j615'
+    assert get(new,'/soc/dcp@28ec00000','apple,j613-25g83-profile','u')=='1'
+    assert get(new,'/soc/dcp@28ec00000','apple,firmware-compat','u')=='26 6 2'
+    for node in ['/soc/dcp@28ec00000','/soc/dcp@28ec00000/piodma','/soc/display-subsystem',
+                 '/soc/pmp@2d0500000','/soc/pmp-report@2d03c0000']:
+        assert get(new,node,'status')=='disabled'
+        assert not get(new,node,'apple,j613-25g83-mapping-handoff',required=False)
+    assert not get(old,'/soc/dcp@28ec00000','apple,j613-25g83-profile',required=False)
+    # The speakers are the J615 tree's own, unchanged: six amps, same addresses.
+    def speakers(path):
+        dts=subprocess.run(['dtc','-I','dtb','-O','dts',str(path)],capture_output=True,text=True,check=True).stdout
+        return sorted(line.strip() for line in dts.splitlines() if 'sound-name-prefix' in line)
+    amps=[s for s in speakers(new) if 'Woofer' in s or 'Tweeter' in s]
+    assert speakers(new)==speakers(old) and len(amps)==6, speakers(new)
+    proc=subprocess.run(['dtc','-I','dtb','-O','dts',str(new)],capture_output=True,text=True,check=True)
+    assert 'apple,power-method = <0x02>;' in proc.stdout
+    print('J615 25G83 (experimental) profile/disabled topology/unchanged speakers: PASS')
 
 
 if __name__=='__main__':

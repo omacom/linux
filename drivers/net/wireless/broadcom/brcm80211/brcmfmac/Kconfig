@@ -11,6 +11,16 @@ config BRCMFMAC
 config BRCMFMAC_PROTO_BCDC
 	bool
 
+config BRCMFMAC_KUNIT_TEST
+	tristate "KUnit tests for brcmfmac scan timeout" if !KUNIT_ALL_TESTS
+	depends on KUNIT && BRCMFMAC
+	default KUNIT_ALL_TESTS
+	help
+	  Test channel-based scan deadline calculation without Wi-Fi hardware.
+	  Covers passive and active scan budgets, all-band scans, minimum
+	  deadlines and saturation for oversized channel counts.
+	  These tests run under KUnit and are not needed for normal operation.
+
 config BRCMFMAC_PROTO_MSGBUF
 	bool
 
@@ -47,4 +57,3 @@ config BRCMFMAC_PCIE
 	  This option enables the PCIE bus interface support for Broadcom
 	  IEEE802.11ac embedded FullMAC WLAN driver. Say Y if you want to
 	  use the driver for an PCIE wireless card.
-

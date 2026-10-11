@@ -2306,6 +2306,11 @@ impl platform::Driver for SepDriver {
             return Err(EBUSY);
         }
 
+        if let Err(e) = pm::keep_domains(dev) {
+            dev_err!(dev, "could not keep the power domains on ({:?})\n", e);
+            return Err(e);
+        }
+
         let data = SepData::new(pdev)?;
 
         // As soon as the fixed facts are known, so a tool can watch the attach

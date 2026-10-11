@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
-/* Coldplug of the exact J613 25G83 display and its same-boot PMP supplier. */
+/*
+ * Coldplug of the exact 25G83 display and its same-boot PMP supplier: a J613,
+ * or (experimental) a J615 whose boot loader carries the J615 opt-in.
+ */
 #include <linux/bitfield.h>
 #include <linux/sizes.h>
 #include <linux/io.h>
@@ -10,9 +13,11 @@
 #include <linux/unaligned.h>
 #include <linux/uuid.h>
 
-#include "dcp.h"
-#include "j613-25g83.h"
-#include "../../../pmdomain/apple/pmp-report-validation.h"
+#include <linux/init.h>
+#include <linux/soc/apple/j613-display.h>
+#include <video/nomodeset.h>
+
+#include "../../pmdomain/apple/pmp-report-validation.h"
 
 static unsigned int display_clock_hz;
 static struct of_changeset gate;
@@ -21,6 +26,24 @@ unsigned int apple_j613_25g83_clock_hz(void)
 {
 	return display_clock_hz;
 }
+EXPORT_SYMBOL_GPL(apple_j613_25g83_clock_hz);
+
+/* Require one Air board identity and the explicit J615 experimental switch. */
+bool apple_t8122_25g83_board(void)
+{
+	struct device_node *chosen = of_find_node_by_path("/chosen");
+	const char *optin = NULL;
+	int len = 0;
+	bool ok;
+
+	if (chosen)
+		optin = of_get_property(chosen, J615_25G83_OPT_IN, &len);
+	ok = t8122_25g83_board(of_machine_is_compatible("apple,j613"),
+			       of_machine_is_compatible("apple,j615"), optin, len);
+	of_node_put(chosen);
+	return ok;
+}
+EXPORT_SYMBOL_GPL(apple_t8122_25g83_board);
 
 /* These are DT domain nodes, carrying the PMGR offsets, not copied registers. */
 static int j613_power_ready(void)
@@ -191,7 +214,7 @@ out:
 	return ret;
 }
 
-int __init apple_j613_25g83_coldplug(void)
+static int __init apple_j613_25g83_coldplug(void)
 {
 	static const char *const paths[] = {
 		"/soc/pmp-report@2d03c0000", "/soc/iommu@2d0300000",
@@ -207,12 +230,19 @@ int __init apple_j613_25g83_coldplug(void)
 	unsigned int i;
 	int ret = -EINVAL;
 
-	if (!of_machine_is_compatible("apple,j613"))
+	if (!of_machine_is_compatible("apple,j613") && !of_machine_is_compatible("apple,j615"))
 		return 0;
 	nodes[9] = of_find_node_by_path(paths[9]);
-	/* Ordinary 14.x J613 boot keeps the existing gate and report driver. */
+	/* Ordinary 14.x J613/J615 boot keeps the existing gate and report driver. */
 	if (!nodes[9] || !of_property_present(nodes[9], "apple,j613-25g83-profile")) {
 		ret = 0;
+		goto out;
+	}
+	/* A J615 25G83 device tree alone is not consent: the owner's opt-in is. */
+	if (!apple_t8122_25g83_board()) {
+		pr_info("J615/25G83 display handoff not admitted: no /chosen/%s = \"1\"\n",
+			J615_25G83_OPT_IN);
+		ret = -EPERM;
 		goto out;
 	}
 	if (of_property_count_u32_elems(nodes[9], "apple,j613-25g83-profile") != 1 ||
@@ -276,10 +306,27 @@ int __init apple_j613_25g83_coldplug(void)
 		of_changeset_destroy(&gate);
 	} else {
 		display_clock_hz = witness[3];
-		pr_info("J613/25G83 display handoff accepted; ADT clock %u Hz\n", display_clock_hz);
+		pr_info("%s/25G83 display handoff accepted; ADT clock %u Hz\n",
+			of_machine_is_compatible("apple,j615") ? "J615 (experimental)" : "J613",
+			display_clock_hz);
 	}
 out:
 	for (i = 0; i < ARRAY_SIZE(nodes); i++)
 		of_node_put(nodes[i]);
 	return ret;
 }
+
+/* Enable the admitted nodes before platform population, including modular DRM. */
+static int __init apple_j613_25g83_display_gate(void)
+{
+	int ret;
+
+	if (video_firmware_drivers_only() || !apple_t6030_display_gate_enabled())
+		return 0;
+	ret = apple_j613_25g83_coldplug();
+
+	if (ret)
+		pr_info("J613/25G83 display handoff refused: %d; keeping boot framebuffer\n", ret);
+	return 0;
+}
+arch_initcall(apple_j613_25g83_display_gate);

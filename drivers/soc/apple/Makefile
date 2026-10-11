@@ -39,3 +39,9 @@ apple-sep-y := sep.o hwrng_shim.o store_shim.o bio_shim.o sha_shim.o \
 
 obj-$(CONFIG_APPLE_PMP) += apple-pmp.o
 apple-pmp-y := pmp.o pmp-export.o
+
+obj-$(CONFIG_APPLE_MCC) += apple-mcc.o
+apple-mcc-y := mcc.o
+obj-$(CONFIG_APPLE_CLPC) += clpc.o
+
+obj-$(CONFIG_APPLE_J613_DISPLAY_GATE) += j613-display-gate.o

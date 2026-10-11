@@ -30,6 +30,8 @@ import time
 import unittest
 
 import test_m3_flow as flow
+import test_m3_pro_mesa as pro
+from test_m3_air_default import normalize_undo_label
 
 SRC = flow.SRC
 VERSION = flow.VERSION
@@ -978,7 +980,7 @@ class NextStepsTest(MaxBase):
                 self.assertLess(block.index("Reboot"), block.index("uname -r"))
                 self.assertLess(block.index("uname -r"), block.index("--m3-report"))
                 self.assertLess(block.index("--m3-report"), block.index("/issues"))
-                self.assertLess(out.index("To undo everything"), out.index(self.BLOCK))
+                self.assertLess(out.index("To undo the kernel install"), out.index(self.BLOCK))
 
     def test_other_macs_have_no_block(self):
         for board, try_ in (("j613", 0), ("j516s", 0), ("j514s", 0), ("j514s", 1), ("j314s", 0), ("j414s", 0),
@@ -1392,17 +1394,15 @@ class SameAs122Test(MaxBase):
         self.old = self.tmp / "install-12.2.sh"
         self.old.write_bytes(old.stdout)
         self.old_version = re.search(rb"^VERSION=(\S+)$", old.stdout, re.M).group(1).decode()
+        self.assertEqual(re.search(rb"^TAG=(\S+)$", old.stdout, re.M).group(1).decode(), "sep-" + self.old_version)
 
     def as_this_release(self, run):
         # 12.2's run with its release number read as this one's: a release names its own packages,
         # tag and boot.bin copy, and nothing else may differ.
         old, new = self.old_version, VERSION
-        if old == new:
-            return run
-        ob, nb = old.encode(), new.encode()
-        return {"codes": run["codes"], "log": run["log"].replace(old, new),
-                "tree": {k.replace(old, new): v.replace(ob, nb) for k, v in run["tree"].items()},
-                "out": [x.replace(old, new) if x else x for x in run["out"]]}
+        result = pro.as_this_release(run, old, new)
+        result["out"] = [pro.release_text(x, old, new) if x else x for x in run["out"]]
+        return result
 
     def boards(self):
         for board, compat in flow.BOARDS.items():
@@ -1460,16 +1460,12 @@ class SameAs122Test(MaxBase):
                 # The same commands: as a multiset, and in order among the $sudo lines and among
                 # the others. The two sides of a pipeline such as "pacman -Q ... | $sudo tee ..."
                 # log in either order (test_m3_pro_mesa.same_commands).
-                a, b = before["log"].splitlines(), after["log"].splitlines()
-                self.assertEqual(sorted(b), sorted(a))
-                self.assertEqual([l for l in b if l.startswith("sudo ")], [l for l in a if l.startswith("sudo ")])
-                self.assertEqual([l for l in b if not l.startswith("sudo ")],
-                                 [l for l in a if not l.startswith("sudo ")])
+                pro.same_commands(self, before["log"], after["log"])
                 self.assertEqual(sorted(after["tree"]), sorted(before["tree"]))
                 for path, data in before["tree"].items():
                     self.assertEqual(after["tree"][path], data, path)
-                # Only the end of the install's summary may differ: the next-steps block.
-                old_out, new_out = before["out"][0], after["out"][0]
+                # Only the undo label and the next-steps block may differ; commands stay exact.
+                old_out, new_out = (pro.refresh_notice(normalize_undo_label(run["out"][0])) for run in (before, after))
                 self.assertTrue(new_out.startswith(old_out), board)
                 extra = new_out[len(old_out):]
                 compat = flow.BOARDS[board]
@@ -1480,7 +1476,8 @@ class SameAs122Test(MaxBase):
                     self.assertTrue(extra.startswith("\n====="), extra)
                 else:
                     self.assertEqual(extra, "")
-                self.assertEqual(after["out"][1:], before["out"][1:])
+                self.assertEqual([pro.refresh_notice(x) if x else x for x in after["out"][1:]],
+                                 [pro.refresh_notice(x) if x else x for x in before["out"][1:]])
         # The M3 Airs get mesa-m3 from 12.4 on: test_m3_air_default compares them with 12.3.
         airs_have_mesa = "m3_mesa_mac() { is_m3_pro || is_m3_air; }" in SRC
         for board in ("j514c", "j516c", "j514m", "j516m", "j504", "j433", "j615", "j314s", "j700"):

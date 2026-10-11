@@ -147,9 +147,11 @@ pub(crate) static J613: Board = Board {
     firmware: FirmwareImage {
         text_size: 0x60000,
         data_size: 0x12c000,
+        // g16_firmware::TEXT_SHA256: carveouts checked against m1n1's
+        // reservations, then zeroed, so the RAM size is not pinned.
         text_sha256: [
-            0x3a, 0x6b, 0x8b, 0x5e, 0x83, 0x38, 0x4d, 0x5c, 0xc1, 0x92, 0x9d, 0x91, 0xb6, 0x36, 0x40, 0xfe,
-            0xe8, 0xf5, 0x52, 0xb5, 0x10, 0x8c, 0x4e, 0xa6, 0x20, 0xbe, 0xdb, 0x7b, 0xbc, 0xa0, 0x31, 0x64,
+            0x2d, 0x18, 0x02, 0x2c, 0xbc, 0xd2, 0x34, 0x3c, 0xd7, 0x47, 0xaa, 0xd0, 0x43, 0xd8, 0xdc, 0xdc,
+            0x4a, 0x3b, 0x7e, 0xd3, 0xec, 0x16, 0x58, 0x45, 0x23, 0x6d, 0x44, 0xd3, 0x67, 0x0f, 0x9e, 0x96,
         ],
         tlv_header: [0x4c, 0xce, 5, 0, 0x31, 2, 0, 0],
         gkts: 0x5ce4c,
@@ -186,6 +188,16 @@ pub(crate) static J613: Board = Board {
     compute_self_test: true,
 };
 
+/// Experimental J615 uses the T8122 MMIO and exact 25G83 firmware profile.
+/// OPPs, voltages and power limits come from this Mac's own ADT and fuses.
+/// Firmware carveouts must match this boot's reservations.
+#[cfg_attr(test, allow(dead_code))]
+fn j615(mut board: Board) -> Board {
+    board.name = "J615";
+    board.root_compatible = [b"apple,j615", b"apple,t8122"];
+    board
+}
+
 #[cfg(not(test))]
 static CURRENT: kernel::sync::SetOnce<Board> = kernel::sync::SetOnce::new();
 
@@ -207,7 +219,11 @@ pub(crate) fn initialize(pdev: &kernel::platform::Device<kernel::device::Core>) 
         points.push((hz, core[0], sram[0], power), GFP_KERNEL)?;
     }
     let tables = crate::g16_profile::performance_tables(&points).ok_or(EINVAL)?;
-    let mut board = J613.clone();
+    let root = kernel::of::root().ok_or(ENODEV)?;
+    let names = root.get_property::<KVec<u8>>(c_str!("compatible"))?;
+    let is_j615 = names.split(|b| *b == 0).any(|s| s == b"apple,j615");
+    // g16_profile::selected admitted only a J613 or an opted-in J615.
+    let mut board = if is_j615 { j615(J613.clone()) } else { J613.clone() };
     board.pstate_count = tables.count;
     board.frequencies_mhz = tables.primary;
     board.aux_frequencies_mhz = tables.secondary;

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install the aurora custom/sep kernel and Touch ID on an Omarchy Mac.
 #
-#   curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash
+#   curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash
 #   ... | bash -s -- --read-only      install, but never let the driver write to the enclave
 #   ... | bash -s -- --uninstall      go back to the kernel this Mac had before
 #   ... | bash -s -- --reset-touchid  start Touch ID over: new keybag, enrol again
@@ -12,8 +12,13 @@
 #                                         experiment's scripts with the kernel (arms nothing)
 #   ... | bash -s -- --m3-gpu-persistent   J613 on current14: install the matched stack and
 #                                         select experimental GPU acceleration for later boots
+#   ... | bash -s -- --m3-gpu              J613: detect the supported GPU profile and persist it
 #   ... | bash -s -- --m3-profile=j613-25g83   J613 already on exact25G83: select the matched
 #                                              experimental native OpenGL profile (no migration)
+#   ... | bash -s -- --m3-profile=j615-25g83   J615 on exact25G83: the same profile, EXPERIMENTAL
+#                                              and untested on a J615 (a release must list it)
+#   ... | bash -s -- --archive-esp-history  Archive old unreferenced EFI history before installing
+#   ... | bash -s -- --esp-history          Read-only EFI history inventory
 #   ... | bash -s -- --desktop-fixes  Optional matched stable desktop fixes; unsupported versions are preserved.
 #   ... | bash -s -- --no-m3-mesa     M3 Pro: leave out the M3 Pro's Mesa (installed by default)
 #
@@ -249,8 +254,8 @@ VERSION=7.1.12.aurora2-12.4
 TAG=sep-7.1.12.aurora2-12.4
 # Packages are fetched from this script's own tag, never from "latest": the
 # checksums below belong to this release and nothing else.
-PUBLIC_RELEASE_URL=https://github.com/omacom/linux/releases/download/$TAG
-PUBLIC_RELEASES_API=https://api.github.com/repos/omacom/linux/releases
+PUBLIC_RELEASE_URL=https://github.com/iconidentify/aurora-linux/releases/download/$TAG
+PUBLIC_RELEASES_API=https://api.github.com/repos/iconidentify/aurora-linux/releases
 # AURORA_RELEASE_URL and AURORA_RELEASES_API are a staging or mirror override
 # for these two (a file://, http:// or https:// URL; see release_source); the
 # checksums below still decide what is installed. The commands this script
@@ -260,7 +265,7 @@ PUBLIC_RELEASES_API=https://api.github.com/repos/omacom/linux/releases
 RELEASE_URL=${AURORA_RELEASE_URL:-$PUBLIC_RELEASE_URL}
 RELEASES_API=${AURORA_RELEASES_API:-$PUBLIC_RELEASES_API}
 # Where to always get the current script, whatever this copy turns out to be.
-LATEST_URL=https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh
+LATEST_URL=https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh
 PACKAGES=(
   "linux-aurora-$VERSION-aarch64.pkg.tar.zst fded7d73e13dbe7f82722b925a257835761584203c5189337a251abab298bbde"
   "linux-aurora-headers-$VERSION-aarch64.pkg.tar.zst a8da8cd00a40010ebe6096ae50c53b1ae461ae6570aa437f5b79a02f10b80cca"
@@ -344,26 +349,39 @@ release_source() {
 # A saved copy of this script keeps installing its own build forever. Tell the
 # operator - human or agent - when a newer one exists. Never fatal: no network,
 # rate limit or API change should stop an install that was going to work.
+release_order() {
+  local tag=$1 year month day limit increment
+  if [[ $tag =~ ^sep-([A-Za-z0-9._]+)-([0-9]+(\.[0-9]+)*)(-stable)?$ ]]; then
+    printf '0.%s%s\n' "${BASH_REMATCH[2]}" "${BASH_REMATCH[4]}"
+  elif [[ $tag =~ ^aurora-([0-9]{4})\.([0-9]{2})\.([0-9]{2})(\.([0-9]+))?$ ]]; then
+    year=${BASH_REMATCH[1]} month=${BASH_REMATCH[2]} day=${BASH_REMATCH[3]}
+    increment=${BASH_REMATCH[5]:-0}
+    (( 10#$year > 0 && 10#$month >= 1 && 10#$month <= 12 && 10#$day >= 1 )) || return 1
+    case $month in
+      04|06|09|11) limit=30 ;;
+      02) limit=28; (( 10#$year % 4 == 0 && (10#$year % 100 != 0 || 10#$year % 400 == 0) )) && limit=29 ;;
+      *) limit=31 ;;
+    esac
+    (( 10#$day <= limit )) || return 1
+    printf '1.%s.%s.%s.%s\n' "$year" "$month" "$day" "$increment"
+  else
+    return 1
+  fi
+}
+
 newer_release() {
-  # Explicitly non-fatal. The pipeline returns non-zero whenever there is no
-  # network, GitHub rate-limits, or the response is not what we expect, and
-  # whether set -e acts on that inside a command substitution is subtle enough
-  # that it should not be left to chance in a script that runs as root.
   local seen="" mine theirs
-  # Ask for the release marked Latest. Listing all releases is not ordered by
-  # version: they share a commit, so GitHub falls back to comparing tag names
-  # as text, and 11.9 sorts above 11.10. Only letters, digits, '.', '_' and
-  # '-' are taken as a tag, so a mirror's answer can't put terminal escapes
-  # into the notice.
+  # Only the Latest release and printable tag tokens are admitted. An unavailable
+  # API or an unknown tag must not stop installation or enter the terminal notice.
   seen=$(curl -fsSL --max-time 8 "$RELEASES_API/latest" 2>/dev/null |
-    LC_ALL=C grep -o '"tag_name"[[:space:]]*:[[:space:]]*"sep-[A-Za-z0-9._-]*"' |
-    head -1 | sed 's/.*"\(sep-[A-Za-z0-9._-]*\)"$/\1/') || true
-  # Only a higher release number counts, the part after the kernel version
-  # (sep-7.1.12.aurora2-12.0 is 12.0): a release staged before it is marked
-  # Latest must not be pointed at the older one.
-  mine=${TAG#sep-*-} theirs=${seen#sep-*-}
-  [[ $theirs == [0-9]* && $theirs != "$mine" &&
-    $(printf '%s\n' "$mine" "$theirs" | sort -V | tail -1) == "$theirs" ]] && echo "$seen"
+    LC_ALL=C grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[A-Za-z0-9._-]*"' |
+    head -1 | sed 's/.*"\([A-Za-z0-9._-]*\)"$/\1/') || true
+  mine=$(release_order "$TAG") || return 0
+  theirs=$(release_order "$seen") || return 0
+  # Calendar releases follow legacy releases; legacy ordering ignores the kernel
+  # version. Calendar ordering uses the date and optional numeric increment.
+  [[ $theirs != "$mine" &&
+    $(printf '%s\n' "$mine" "$theirs" | LC_ALL=C sort -V | tail -1) == "$theirs" ]] && echo "$seen"
   return 0
 }
 
@@ -568,15 +586,29 @@ M3_AIR_DEFAULT_VARIANT="air-handoff-12"
 # Mesa they run with is mesa-m3, which every M3 Air gets (see the M3's Mesa below).
 M3_GPU_EXPERIMENT=0
 M3_GPU_PERSISTENT=0
+M3_GPU_AUTO=0
+M3_GPU_EXPLICIT_PROFILE=0
+ESP_ARCHIVE_HISTORY=0
 M3_GPU_PROFILE=legacy
 M3_STACK_ID=""
+M3_PERSISTENT_BOARDS="j613"
+# J615 uses the shared 25G83 ABI with its own board identity and stage1 list.
+# Release capability and explicit owner intent are both required for activation.
+M3_NATIVE25_BOARDS="j613"
+M3_25_J615=0
 M3_STAGE1_25_VERSIONS=""
+M3_STAGE1_25_J615_VERSIONS=""
 M3_MESA_NATIVE_MARKER=/opt/mesa-m3/25g83/share/mesa-m3/profile
+# The boards whose 25G83 sessions the installed Mesa's hook admits (mesa-m3 26.1.4.m3.2-4 on);
+# a J615 needs j615-experimental there, or its sessions stop at profile-mismatch.
+M3_MESA_NATIVE25_BOARDS=/opt/mesa-m3/share/mesa-m3/native25-boards
 M3_PROFILE_SELECTOR=j613-25g83-hal200
 M3_BOOT_PROFILE_HELPER=/usr/local/libexec/aurora-m3-boot-profile
 M3_GPU_PROFILE_FILE=/etc/mesa-m3/t8122-profile
+M3_GPU_CHECK=/usr/local/bin/aurora-m3-gpu-check
 M3_GRUB_DEFAULTS=/etc/default/grub
 M3_LIMINE_DEFAULTS=/etc/default/limine
+M3_LIMINE_VENDOR_CONF=/usr/share/limine-entry-tool.d
 M3_PROFILE_HOOK=/etc/pacman.d/hooks/zzzz-aurora-m3-profile.hook
 M3_PROFILE_UPDATE=/usr/local/libexec/aurora-m3-profile-update
 M3_PERSISTENT_TRANSACTION_ACTIVE=0
@@ -838,7 +870,9 @@ m3_air_switches_off() {
 # The Air's switches before its owner's off switches.
 m3_air_switch_set() {
   if ((M3_GPU_PERSISTENT)); then
-    if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
+    if m3_25_j615; then
+      echo "chosen.asahi,t8122-dcp=1 chosen.asahi,t8122-gpu=1 chosen.asahi,j615-25g83-experimental=1"
+    elif [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
       echo "chosen.asahi,t8122-dcp=1 chosen.asahi,t8122-gpu=1"
     else
       echo "chosen.asahi,t8122-dcp=1 chosen.asahi,t8122-gpu=1 chosen.asahi,t8122-gpu-power-standin=1 chosen.asahi,t8122-gpu-fuse-leakage=1"
@@ -901,11 +935,13 @@ m1n1_for_this_mac() {
 m1n1_version() {
   local file=${M1N1_PACKAGE%% *}
   file=${file#m1n1-aurora-}
+  file=${file#m1n1-neo-}
   echo "${file%-aarch64.pkg.tar.zst}"
 }
 
 # What the handoff does on this Mac, for messages.
 m3_handoff_name() {
+  if ((M3_GPU_PERSISTENT)) && m3_25_j615; then echo "experimental J615 (untested) $M3_GPU_PROFILE GPU/display handoff"; return; fi
   if ((M3_GPU_PERSISTENT)); then echo "experimental J613 $M3_GPU_PROFILE GPU/display handoff"; return; fi
   if ! is_m3_air; then
     echo "M3 Pro display and GPU handoff"
@@ -945,13 +981,14 @@ m3_stub_problem() {
 # Why this Mac's m1n1 stage 1 isn't one the M3 m1n1 is checked with (see
 # M3_STAGE1_VERSIONS); nothing when it is.
 # Clean v1.6.1 has the same base/entry/BootArgs chainload ABI as aurora13.
-# This source-qualified exception is confined to the existing J613 14.8.3 path.
+# Both supported Air boards use the same T8122 chainload ABI and exact stub.
 m3_clean_stage1_14_qualified() {
   local fw target version
-  [[ $M3_GPU_PROFILE == legacy && $(this_board) == j613 && $(this_soc) == t8122 ]] || return 1
+  [[ $M3_GPU_PROFILE == legacy && ($(this_board) == j613 || $(this_board) == j615) && $(this_soc) == t8122 &&
+      " $M3_PERSISTENT_BOARDS " == *" $(this_board) "* ]] || return 1
   [[ ! -e $DT/$M3_OSLOG_OVERLAP ]] || return 1
   fw=$({ tr -d '\0' <"$DT/chosen/asahi,os-fw-version"; } 2>/dev/null) || return 1
-  [[ $fw == 14.8.3 && -z $(m3_stub_problem) ]] || return 1
+  [[ ($fw == 14.7 || $fw == 14.8.3) && -z $(m3_stub_problem) ]] || return 1
   target=$(esp_bootbin) || return 1
   version=$($sudo cat "${target%/m1n1/boot.bin}/asahi/stub_info.json" 2>/dev/null |
     grep -o '"ProductVersion": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/') || return 1
@@ -961,6 +998,8 @@ m3_clean_stage1_14_qualified() {
 m3_stage1_problem() {
   local stage1 allowed=$M3_STAGE1_VERSIONS
   [[ $M3_GPU_PROFILE != j613-25g83 ]] || allowed=$M3_STAGE1_25_VERSIONS
+  # The J613-only 25 stage 1 refuses a J615; a J615 has its own list.
+  ! m3_25_j615 || allowed=$M3_STAGE1_25_J615_VERSIONS
   stage1=$({ tr -d '\0' <"$DT/chosen/asahi,m1n1-stage1-version"; } 2>/dev/null) || stage1=""
   if [[ -z $stage1 ]]; then
     echo "its m1n1 reports no stage 1 version"
@@ -985,7 +1024,9 @@ m3_oslog_overlap_check() {
 
 # The sha256 of a downloaded m1n1-aurora package's m1n1.bin.
 m1n1_pkg_sha() {
-  { bsdtar -xOf "$1" usr/lib/asahi-boot/m1n1.bin | sha256sum | cut -d' ' -f1; } 2>/dev/null
+  local path=usr/lib/asahi-boot/m1n1.bin
+  if ((NEO_GPU)); then path=usr/lib/m1n1-neo/m1n1.bin; fi
+  { bsdtar -xOf "$1" "$path" | sha256sum | cut -d' ' -f1; } 2>/dev/null
 }
 
 # The sha256 of the first $2 bytes of boot.bin $1: the m1n1 at its start, when
@@ -1094,6 +1135,10 @@ m1n1_pkg_has_handoff() {
     for s in apple,j613-25g83-profile apple,j613-25g83-mapping-handoff apple,j613-25g83-gpu-handoff; do
       ((rc == 0)) && ! grep -qaxF "$s" "$bin" && rc=1
     done
+    # A J615 hands over only behind its own experimental switch, which this m1n1 must know.
+    if m3_25_j615; then
+      ((rc == 0)) && ! grep -qaxF asahi,j615-25g83-experimental "$bin" && rc=1
+    fi
   fi
   rm -f "$bin"
   return "$rc"
@@ -1239,11 +1284,14 @@ m3_kept_refusal() {
 # Decide the M3 path before anything is downloaded, so a Mac this release can't
 # set up as asked stops with nothing changed.
 m3_plan() {
+  if ((M3_GPU_AUTO)); then m3_gpu_auto_profile; fi
   if [[ -f $STATE/m3-gpu-persistent ]] && ((M3_GPU_PERSISTENT == 0)); then
     local saved
     saved=$(cat "$STATE/m3-gpu-persistent")
     if [[ $saved == legacy || $saved == j613-25g83 ]]; then
       M3_GPU_PERSISTENT=1; M3_GPU_PROFILE=$saved; M3_TRY=1
+      # Only --m3-profile=j615-25g83 records 25G83 on a J615; this release must still list it.
+      if [[ $saved == j613-25g83 && $(this_board) == j615 ]]; then M3_25_J615=1; fi
     fi
   fi
   local board problem failed variant again="run this again" air=0 kept=0
@@ -1333,6 +1381,7 @@ m3_plan() {
     return 0
   fi
   if ((M3_GPU_PERSISTENT)) && [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
+    m3_25_board_choice
     [[ -z $(m3_25_boot_problem) ]] || die "$(m3_25_boot_problem). Firmware migration is separate from a Linux package update."
   fi
   problem=$(m3_stub_problem)
@@ -1372,7 +1421,12 @@ m3_plan() {
     say "M3 ($board): this Mac has m1n1's display and GPU handoff from an earlier install; keeping it"
   fi
   if ((M3_GPU_PERSISTENT)); then
-    say "J613: installing matched experimental GPU profile $M3_GPU_PROFILE; current OS firmware is retained"
+    if m3_25_j615; then
+      say "J615: installing matched experimental GPU profile $M3_GPU_PROFILE; current OS firmware is retained"
+      m3_25_j615_warning
+    else
+      say "J613: installing matched experimental GPU profile $M3_GPU_PROFILE; current OS firmware is retained"
+    fi
   elif ((air)); then
     if m3_air_default; then
       say "M3 MacBook Air ($board, macOS $M3_STUB_VERSION stub): installing m1n1 with the $(m3_handoff_name)"
@@ -1482,8 +1536,13 @@ m3_gpu_install() {
     record+="script $file ${entry#* }"$'\n'
   done
   # air-gpu-job.sh runs its job through Python and the Vulkan loader.
-  $sudo pacman -S --needed --noconfirm python vulkan-icd-loader ||
-    warn "could not install python and vulkan-icd-loader; air-gpu-job.sh needs them"
+  if ((FROZEN_PACKAGES)); then
+    pacman -T python vulkan-icd-loader >/dev/null ||
+      die "the admitted frozen transaction did not satisfy the GPU job dependencies"
+  else
+    $sudo pacman -S --needed --noconfirm python vulkan-icd-loader ||
+      warn "could not install python and vulkan-icd-loader; air-gpu-job.sh needs them"
+  fi
   record+=$(m3_gpu_optin)
   if [[ -n $record && $record != *$'\n' ]]; then record+=$'\n'; fi
   printf '%s' "$record" | $sudo tee "$STATE/m3-gpu-experiment" >/dev/null
@@ -1536,7 +1595,9 @@ mesa_needs_too_old() {
 m3_gpu_notice() {
   if ((M3_GPU_PERSISTENT)); then
     say "Experimental GPU profile $M3_GPU_PROFILE is selected for subsequent boots with the matched kernel, Mesa and bootloader. The retained previous entry uses asahi.t8122_start=0 and mesa_m3=off."
+    say "Reboot, log into your desktop, then run: aurora-m3-gpu-check"
     [[ $M3_GPU_PROFILE != j613-25g83 ]] || say "25G83 native OpenGL is experimental; Vulkan hardware support is unavailable."
+    if m3_25_j615; then m3_25_j615_warning; fi
     return 0
   fi
   if ((M3_GPU_EXPERIMENT)); then
@@ -2475,7 +2536,7 @@ m3_pro_mesa_files() {
 
 # After the download loop: keep the package out of the kernel's pacman -U ("$work"/*.pkg.tar.zst).
 m3_pro_mesa_set_aside() {
-  ((M3_GPU_PERSISTENT)) && return 0
+  ((M3_GPU_PERSISTENT || FROZEN_PACKAGES)) && return 0
   local file
   file=$(m3_pro_mesa_file)
   [[ -n $M3_PRO_MESA_PACKAGE && -f $work/$file ]] || return 0
@@ -2512,7 +2573,7 @@ m3_pro_mesa_needs_unmet() {
 # warning, the kernel install stays as it is, and the summary and exit status say so.
 m3_pro_mesa_install() {
   local file old name
-  if ((M3_GPU_PERSISTENT)) && [[ $M3_PRO_MESA_RESULT == installed ]]; then return 0; fi
+  if ((M3_GPU_PERSISTENT || FROZEN_PACKAGES)) && [[ $M3_PRO_MESA_RESULT == installed ]]; then return 0; fi
   file=$work/m3-pro/$(m3_pro_mesa_file)
   [[ -n $M3_PRO_MESA_PACKAGE && -f $file ]] || return 0
   old=$(m3_pro_mesa_needs_unmet)
@@ -3306,6 +3367,7 @@ m1n1_update() {
 # $(...), so the pipeline must succeed even when grep matches nothing.)
 DTBS=$(pacman -Qlq linux-aurora 2>/dev/null | grep '/dtbs/[^/]*\.dtb$' || true)
 EOF
+  if ((NEO_GPU)); then echo "M1N1=/usr/lib/m1n1-neo/m1n1.bin" >>"$tmp"; fi
   $sudo install -m 644 "$tmp" "$conf"
   rm -f "$tmp"
   if [[ ! -f $STATE/boot.bin.saved ]] && target=$(esp_bootbin); then
@@ -3555,11 +3617,433 @@ packages_for_this_mac() {
   return 0
 }
 
+FROZEN_PACKAGES=0
+FROZEN_TRANSACTION_CONFIG=""
+FROZEN_TRANSACTION_FILES=()
+PACMAN_CONFIG=/etc/pacman.conf
+
+frozen_package_detection() {
+  local holds="" token
+  local -a held_words=()
+  FROZEN_PACKAGES=0
+  command -v pacman-conf >/dev/null || return 0
+  holds=$(pacman-conf --config "$PACMAN_CONFIG" IgnorePkg) ||
+    die "could not read package holds. Nothing was installed."
+  read -ra held_words <<<"${holds//$'\n'/ }"
+  for token in "${held_words[@]}"; do
+    if [[ $token == '*' ]]; then FROZEN_PACKAGES=1; fi
+  done
+}
+
+frozen_dependency_prepare() {
+  ((FROZEN_PACKAGES)) || return 0
+  local archive need
+  local -a args=(--config "$PACMAN_CONFIG" --work "$work" --require fprintd)
+  local -a mesa_needs=()
+  if [[ -n $M3_PRO_MESA_PACKAGE && -f $work/$(m3_pro_mesa_file) ]]; then
+    read -ra mesa_needs <<<"$M3_PRO_MESA_NEEDS"
+    for need in "${mesa_needs[@]}"; do args+=(--require "$need"); done
+  fi
+  if ((M3_GPU_EXPERIMENT)); then args+=(--require python --require vulkan-icd-loader); fi
+  for archive in "$@"; do args+=(--candidate "$archive"); done
+  args+=(--allow-remove linux-asahi --allow-remove linux-asahi-headers
+         --allow-remove m1n1 --allow-remove mesa-m3-g15g)
+  cat >"$work/frozen-dependencies.py" <<'FROZEN_DEPENDENCIES_PY'
+#!/usr/bin/env python3
+"""Admit missing repository dependencies without changing installed packages."""
+import argparse
+import ctypes
+import ctypes.util
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+NAME = re.compile(r"[A-Za-z0-9@_+][A-Za-z0-9@_.+:-]*\Z")
+DEPEND = re.compile(r"([^<>=\s]+)(>=|<=|=|>|<)?([^\s]*)\Z")
+FORMAT = "%n\t%v\t%h\t%l"
+
+
+def run(args, codes=(0,)):
+    result = subprocess.run(args, text=True, capture_output=True,
+                            env={**os.environ, "LC_ALL": "C"})
+    if result.returncode not in codes:
+        raise ValueError("Command failed: " + " ".join(args) + "\n" + result.stderr + result.stdout)
+    return result
+
+
+def metadata(text, pkginfo=False):
+    fields = {}
+    if pkginfo:
+        for line in text.splitlines():
+            if " = " in line:
+                key, value = line.split(" = ", 1)
+                fields.setdefault(key, []).append(value)
+    else:
+        key = None
+        for line in text.splitlines():
+            if line.startswith("%") and line.endswith("%"):
+                key = line.strip("%")
+                fields.setdefault(key, [])
+            elif line and key:
+                fields[key].append(line)
+    aliases = {"name": "pkgname" if pkginfo else "NAME",
+               "version": "pkgver" if pkginfo else "VERSION",
+               "arch": "arch" if pkginfo else "ARCH",
+               "depends": "depend" if pkginfo else "DEPENDS",
+               "provides": "provides" if pkginfo else "PROVIDES",
+               "conflicts": "conflict" if pkginfo else "CONFLICTS",
+               "replaces": "replaces" if pkginfo else "REPLACES"}
+    result = {key: fields.get(value, []) for key, value in aliases.items()}
+    for key in ("name", "version", "arch"):
+        if len(result[key]) != 1:
+            raise ValueError("Invalid package metadata " + key)
+        result[key] = result[key][0]
+    if not NAME.fullmatch(result["name"]):
+        raise ValueError("Invalid package name")
+    return result
+
+
+def archive(path):
+    result = run(["bsdtar", "-xOf", str(path), ".PKGINFO"])
+    return metadata(result.stdout, True)
+
+
+def sha(path):
+    with open(path, "rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def dependency(value):
+    match = DEPEND.fullmatch(value)
+    if not match or not NAME.fullmatch(match[1]) or (match[2] and not match[3]):
+        raise ValueError("Invalid dependency: " + value)
+    return match[1], match[2], match[3]
+
+
+_alpm = ctypes.CDLL(ctypes.util.find_library("alpm"))
+_alpm.alpm_pkg_vercmp.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+_alpm.alpm_pkg_vercmp.restype = ctypes.c_int
+
+
+def satisfies(pkg, requirement):
+    name, operator, version = dependency(requirement)
+    offers = [(pkg["name"], pkg["version"])]
+    for provide in pkg["provides"]:
+        pn, po, pv = dependency(provide)
+        if po not in (None, "="):
+            raise ValueError("Invalid versioned provider")
+        offers.append((pn, pv if po else None))
+    for offered, available in offers:
+        if offered != name:
+            continue
+        if not operator:
+            return True
+        if available is None:
+            continue
+        cmp = _alpm.alpm_pkg_vercmp(available.encode(), version.encode())
+        if {"=": cmp == 0, ">=": cmp >= 0, "<=": cmp <= 0,
+            ">": cmp > 0, "<": cmp < 0}[operator]:
+            return True
+    return False
+
+
+def database(root, repositories):
+    installed = []
+    for entry in sorted((root / "local").glob("*/desc")):
+        installed.append(metadata(entry.read_text()))
+    available = []
+    for repo in repositories:
+        if not NAME.fullmatch(repo):
+            raise ValueError("Invalid repository")
+        with tarfile.open(root / "sync" / (repo + ".db")) as db:
+            for entry in db:
+                if entry.isfile() and entry.name.endswith("/desc"):
+                    raw = db.extractfile(entry).read()
+                    if raw and not raw.strip(b"\0"):
+                        continue
+                    try:
+                        pkg = metadata(raw.decode())
+                    except (ValueError, UnicodeError) as error:
+                        raise ValueError(f"{repo}.db:{entry.name}: {error}") from error
+                    pkg["repo"] = repo
+                    available.append(pkg)
+    return installed, available
+
+
+def resolve(requirements, candidates, installed, available):
+    selected = []
+    pending = list(requirements) + [d for pkg in candidates for d in pkg["depends"]]
+    while pending:
+        req = pending.pop(0)
+        dependency(req)
+        if any(satisfies(pkg, req) for pkg in candidates + installed + selected):
+            continue
+        name = dependency(req)[0]
+        if any(satisfies(pkg, name) for pkg in installed + candidates):
+            raise ValueError("Installed or matched provider is too old for " + req + "; run the full updater")
+        matches = [pkg for pkg in available if satisfies(pkg, req)]
+        # Repository order wins for an exact package name; alternative providers must be unique.
+        exact = [pkg for pkg in matches if pkg["name"] == name]
+        if exact:
+            chosen = exact[0]
+        else:
+            unique = {pkg["name"] for pkg in matches}
+            if len(unique) != 1:
+                raise ValueError("No unique missing provider for " + req)
+            chosen = matches[0]
+        if any(pkg["name"] == chosen["name"] for pkg in installed + candidates + selected):
+            raise ValueError("Repository plan would replace an installed or matched package: " + chosen["name"])
+        if chosen["replaces"] or chosen["conflicts"]:
+            raise ValueError("Missing dependency declares replacements/conflicts: " + chosen["name"])
+        selected.append(chosen)
+        pending.extend(chosen["depends"])
+    return selected
+
+
+def parse_plan(output):
+    result = []
+    for line in output.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 4 or not NAME.fullmatch(parts[0]) or not re.fullmatch(r"[0-9a-f]{64}", parts[2]):
+            raise ValueError("Malformed repository transaction plan")
+        result.append(dict(zip(("name", "version", "sha256", "location"), parts)))
+    if len({p["name"] for p in result}) != len(result):
+        raise ValueError("Duplicate repository transaction package")
+    return result
+
+
+def local_snapshot(dbpath):
+    return {str(p.relative_to(dbpath / "local")): sha(p)
+            for p in sorted((dbpath / "local").glob("*/desc"))}
+
+
+def verify_plan(path, expected_hash=None):
+    if expected_hash is not None and sha(path) != expected_hash:
+        raise ValueError("Admitted transaction receipt changed")
+    receipt = json.loads(Path(path).read_text())
+    if local_snapshot(Path(receipt["dbpath"])) != receipt["database_sha256"]:
+        raise ValueError("Installed package database changed; rerun dependency admission")
+    files = dict(receipt["candidate_sha256"])
+    files.update({p["file"]: p["sha256"] for p in receipt["dependencies"]})
+    files.update({p["signature_file"]: p["signature_sha256"] for p in receipt["dependencies"]
+                  if "signature_file" in p})
+    files[receipt["transaction_config"]] = receipt["transaction_config_sha256"]
+    files[receipt["helper"]] = receipt["helper_sha256"]
+    for filename, expected in files.items():
+        if sha(filename) != expected:
+            raise ValueError("Admitted transaction input changed: " + filename)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", default="/etc/pacman.conf")
+    parser.add_argument("--work")
+    parser.add_argument("--verify-plan")
+    parser.add_argument("--plan-sha256")
+    parser.add_argument("--candidate", action="append", default=[])
+    parser.add_argument("--require", action="append", default=[])
+    parser.add_argument("--allow-remove", action="append", default=[])
+    args = parser.parse_args()
+    if args.verify_plan:
+        verify_plan(args.verify_plan, args.plan_sha256)
+        return
+    if not args.work:
+        raise ValueError("Work directory is required")
+    work = Path(args.work).resolve()
+    if not work.is_dir() or not args.candidate:
+        raise ValueError("Work directory and verified candidate archives are required")
+    initial_hashes = {str(Path(p).resolve()): sha(p) for p in args.candidate}
+    candidates = [archive(Path(p)) for p in args.candidate]
+    if len({p["name"] for p in candidates}) != len(candidates):
+        raise ValueError("Duplicate local candidate")
+    full = run(["pacman-conf", "--config", args.config]).stdout
+    lines = full.splitlines()
+    if not lines or lines[0] != "[options]":
+        raise ValueError("Cannot resolve pacman configuration")
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.startswith("[")), len(lines))
+    options = lines[:end]
+    dbpath = run(["pacman-conf", "--config", args.config, "DBPath"]).stdout.strip()
+    repos = run(["pacman-conf", "--config", args.config, "--repo-list"]).stdout.splitlines()
+    dbpath = Path(dbpath)
+    initial_database = local_snapshot(dbpath)
+    installed, available = database(dbpath, repos)
+    candidate_names = {p["name"] for p in candidates}
+    allowed_removals = set(args.allow_remove)
+    if not all(NAME.fullmatch(name) for name in allowed_removals):
+        raise ValueError("Invalid authorized removal name")
+    removed = set()
+    for current in installed:
+        if current["name"] in candidate_names:
+            continue
+        affected = any(satisfies(current, d) for p in candidates
+                       for d in p["conflicts"] + p["replaces"])
+        affected |= any(satisfies(p, d) for p in candidates for d in current["conflicts"])
+        if affected:
+            removed.add(current["name"])
+        if affected and current["name"] not in allowed_removals:
+            raise ValueError("Local candidates conflict with another installed package: " + current["name"])
+    remaining = [p for p in installed
+                 if p["name"] not in candidate_names | removed]
+    selected = resolve(args.require, candidates, remaining, available)
+    for current in remaining:
+        if any(
+                satisfies(p, d) for p in selected for d in current["conflicts"]):
+            raise ValueError("Installed package conflicts with a missing dependency: " + current["name"])
+    staging = Path(tempfile.mkdtemp(prefix=".dependencies-", dir=work))
+    # Only the private download cache and log change; holds, trust and repository order remain intact.
+    private_options = [line for line in options if not line.startswith(("CacheDir = ", "LogFile = "))]
+    private_options += ["CacheDir = " + str(staging), "LogFile = " + str(staging / "pacman.log")]
+    download_config = staging / "download.conf"
+    download_config.write_text("\n".join(private_options + lines[end:]) + "\n")
+    commit_config = staging / "transaction.conf"
+    hookdir = staging / "hooks"
+    hookdir.mkdir()
+    helper = Path(__file__).resolve()
+    receipt_path = work / "dependency-plan.json"
+    if any(c.isspace() for c in str(helper) + str(receipt_path)):
+        raise ValueError("Helper and work paths must not contain whitespace")
+    hook = hookdir / "00-aurora-frozen-dependencies.hook"
+
+    commit_config.write_text("\n".join(private_options + ["HookDir = " + str(hookdir)]) + "\n")
+    base = ["pacman", "--config", str(download_config), "--noconfirm"]
+    plan = []
+    if selected:
+        targets = [p["repo"] + "/" + p["name"] for p in selected]
+        plan = parse_plan(run(base + ["-Sp", "--print-format", FORMAT, *targets]).stdout)
+        expected = {(p["name"], p["version"]) for p in selected}
+        if {(p["name"], p["version"]) for p in plan} != expected:
+            raise ValueError("Repository resolver changed the missing-only plan")
+        if any(p["name"] in {x["name"] for x in installed + candidates} for p in plan):
+            raise ValueError("Repository resolver would change an installed package")
+        run(base + ["-Sw", *targets])
+    verified = []
+    for record in plan:
+        matches = [p for p in staging.iterdir() if p.is_file() and sha(p) == record["sha256"]]
+        if len(matches) != 1:
+            raise ValueError("Downloaded dependency hash does not match resolver: " + record["name"])
+        path = matches[0]
+        pkg = archive(path)
+        if (pkg["name"], pkg["version"]) != (record["name"], record["version"]):
+            raise ValueError("Downloaded dependency metadata does not match resolver")
+        selected_pkg = next(p for p in selected if p["name"] == pkg["name"])
+        if any(pkg[k] != selected_pkg[k] for k in ("arch", "depends", "provides", "conflicts", "replaces")):
+            raise ValueError("Downloaded dependency declarations differ from repository")
+        signature = Path(str(path) + ".sig")
+        if signature.exists():
+            record["signature_sha256"] = sha(signature)
+        verified.append((path, record))
+    # With no repositories, this final check cannot discover extra upgrades or dependencies.
+    paths = args.candidate + [str(path) for path, _ in verified]
+    check = run(["pacman", "--config", str(commit_config), "-Up", "--noconfirm",
+                 "--ask", "4", "--print-format", "%n\t%v", *paths]).stdout
+    final = [tuple(line.split("\t")) for line in check.splitlines()]
+    expected = {(p["name"], p["version"]) for p in candidates + selected}
+    if len(final) != len(expected) or set(final) != expected:
+        raise ValueError("Local transaction differs from admitted packages")
+    if initial_database != local_snapshot(dbpath):
+        raise ValueError("Installed package database changed during dependency admission")
+    if initial_hashes != {str(Path(p).resolve()): sha(p) for p in args.candidate}:
+        raise ValueError("Local candidate changed during dependency admission")
+    # Publish dependency files only once the complete offline transaction is admitted.
+    published = []
+    for path, record in verified:
+        target = work / path.name
+        if target.exists() or Path(str(target) + ".sig").exists():
+            raise ValueError("Dependency output already exists")
+        published.append((path, target, record))
+    for path, target, record in published:
+        path.rename(target)
+        record["file"] = str(target)
+        if "signature_sha256" in record:
+            signature_target = Path(str(target) + ".sig")
+            Path(str(path) + ".sig").rename(signature_target)
+            record["signature_file"] = str(signature_target)
+    receipt = {"dependencies": plan, "transaction_config": str(commit_config),
+               "transaction_config_sha256": sha(commit_config),
+               "hook": str(hook), "helper": str(helper), "helper_sha256": sha(helper),
+               "dbpath": str(dbpath), "database_sha256": initial_database,
+               "candidate_sha256": initial_hashes,
+               "installed": {p["name"]: p["version"] for p in installed}}
+    (work / "dependency-plan.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    hook.write_text("[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\n"
+                    "Type = Package\nTarget = *\n[Action]\nWhen = PreTransaction\n"
+                    "Exec = /usr/bin/python3 " + str(helper) + " --verify-plan " + str(receipt_path) +
+                    " --plan-sha256 " + sha(receipt_path) + "\nAbortOnFail\n")
+    print(json.dumps(receipt))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, tarfile.TarError, KeyError, TypeError) as error:
+        print("Frozen dependency admission refused: " + str(error), file=sys.stderr)
+        sys.exit(1)
+FROZEN_DEPENDENCIES_PY
+  say "Resolving only missing dependencies while preserving this image's package holds"
+  $sudo python3 "$work/frozen-dependencies.py" "${args[@]}" >"$work/dependency-result.json" ||
+    die "could not admit a missing-only dependency transaction. Nothing was installed. The package holds were preserved."
+  FROZEN_TRANSACTION_CONFIG=$(python3 - "$work/dependency-result.json" <<'FROZEN_CONFIG_PY'
+import json, sys
+print(json.load(open(sys.argv[1]))['transaction_config'])
+FROZEN_CONFIG_PY
+  )
+  $sudo test -f "$FROZEN_TRANSACTION_CONFIG" || die "missing admitted package transaction configuration"
+  python3 - "$work/dependency-result.json" >"$work/dependency-files" <<'FROZEN_FILES_PY'
+import json, sys
+plan = json.load(open(sys.argv[1]))
+for filename in list(plan['candidate_sha256']) + [p['file'] for p in plan['dependencies']]:
+    if '\n' in filename: raise SystemExit('invalid dependency archive path')
+    print(filename)
+FROZEN_FILES_PY
+  mapfile -t FROZEN_TRANSACTION_FILES <"$work/dependency-files"
+  ((${#FROZEN_TRANSACTION_FILES[@]})) || die "missing admitted package archives"
+}
+
+package_database_check() {
+  local pending errors status=0 row name
+  local -a unheld=()
+  say "Refreshing the package database"
+  $sudo pacman -Sy --noconfirm || die "could not refresh the package database. Nothing was installed. Fix the mirror/network error and retry."
+  errors=$(mktemp)
+  pending=$(LC_ALL=C pacman -Qu --color never 2>"$errors") || status=$?
+  # pacman returns 1 for an empty query as well as for a database error.
+  if [[ -s $errors ]] || ((status > 1)) || { ((status == 1)) && [[ -n $pending ]]; }; then
+    cat "$errors" >&2
+    rm -f "$errors"
+    die "could not check pending package upgrades. Nothing was installed. Fix pacman's error and retry."
+  fi
+  rm -f "$errors"
+  while IFS= read -r row; do
+    [[ -n $row ]] || continue
+    name=${row%% *}
+    # The release replaces its pins; Mac image packages keep their deliberate hold.
+    if [[ $row == *" [ignored]" ]]; then
+      if [[ ${1:-} == install ]] && ((FROZEN_PACKAGES)); then continue; fi
+      if [[ " $PINNED " == *" $name "* ]]; then continue; fi
+      case $name in omarchy|omarchy-mac|omarchy-mac-boot|omarchy-settings) continue ;; esac
+    fi
+    unheld+=("$name")
+  done <<<"$pending"
+  ((${#unheld[@]} == 0)) || die "this Mac has ${#unheld[@]} package upgrade(s) pending (pacman -Qu; first: ${unheld[*]:0:8}).
+    Run 'omarchy update', reboot, then retry. Installing repository dependencies before a full update would be a partial upgrade. Nothing was installed."
+}
+
 install_all() {
   local entry file sha kernel chain
-  local -a entries
+  local -a entries candidate_archives=()
   release_source
   require_supported_soc
+  if ((ESP_ARCHIVE_HISTORY)); then
+    ((!READ_ONLY)) || die "--archive-esp-history changes the EFI partition and cannot be combined with --read-only"
+    esp_history_run archive
+  fi
+  neo_gpu_plan
   version_notice
   sep_write_notice
   ane_dkms_notice
@@ -3570,18 +4054,25 @@ install_all() {
   m1n1_rollback_check
   m3_plan
   m3_gpu_plan
+  if ((M3_GPU_PERSISTENT)); then m3_gpu_check_plan; fi
   m3_pro_mesa_plan
+  frozen_package_detection
   if ((M3_GPU_PERSISTENT)); then
     [[ $M3_PRO_MESA_RESULT != current ]] || M3_PRO_MESA_RESULT=""
     [[ -z $M3_PRO_MESA_RESULT ]] || die "persistent GPU needs the matched Mesa package"
-    [[ -z $(m3_pro_mesa_needs_unmet) ]] || die "persistent GPU requires satisfied Mesa dependencies before installation"
+    if ((!FROZEN_PACKAGES)); then
+      [[ -z $(m3_pro_mesa_needs_unmet) ]] || die "persistent GPU requires satisfied Mesa dependencies before installation"
+    fi
   fi
   m1n1_keep_plan
+  # Repository dependencies must resolve against an up-to-date system.
+  # Install held release candidates together; update other packages first.
+  package_database_check install
   if ((!DESKTOP_FIXES)); then work=$(mktemp -d); fi
   trap 'm3_install_cleanup' EXIT
   if is_neo && ! m1n1_for_this_mac; then say "Keeping this MacBook Neo's own m1n1 (m1n1-aurora has no T8140 support)"; fi
   if [[ $M3_MODE == kernel ]]; then say "Keeping this M3's own m1n1 and boot.bin"; fi
-  mapfile -t entries < <(packages_for_this_mac; m3_gpu_files; m3_pro_mesa_files)
+  mapfile -t entries < <(packages_for_this_mac; m3_gpu_files; m3_pro_mesa_files; neo_gpu_files)
   for entry in "${entries[@]}"; do
     read -r file sha <<<"$entry"
     say "Downloading $file"
@@ -3597,10 +4088,17 @@ install_all() {
     Please report it with the file name above."
     fi
     [[ $(sha256sum "$work/$file" | cut -d' ' -f1) == "$sha" ]] || die "$file does not match its published checksum"
+    if [[ $file == *.pkg.tar.zst ]]; then candidate_archives+=("$work/$file"); fi
   done
+  neo_gpu_package_check
   desktop_fixes_verify "$work"
+  while read -r file sha; do
+    [[ -n $file ]] || continue
+    candidate_archives+=("$work/$file")
+  done < <(desktop_fixes_files)
   if ((M3_GPU_PERSISTENT)); then m3_persistent_package_check "$work/${M3_PRO_MESA_PACKAGE%% *}"; fi
   m3_pro_mesa_set_aside
+  frozen_dependency_prepare "${candidate_archives[@]}"
   if m1n1_for_this_mac; then
     sha=$(m1n1_pkg_sha "$work/${M1N1_PACKAGE%% *}")
     [[ $sha == "$M1N1_BIN_SHA" ]] ||
@@ -3621,6 +4119,7 @@ install_all() {
   bootbin_backup
   $sudo install -d "$STATE"
   snapshot_boot_state
+  neo_gpu_transaction_begin
   if [[ ! -f $STATE/previous && $chain == grub ]]; then
     keep_grub_fallback "$kernel"
   fi
@@ -3649,29 +4148,31 @@ install_all() {
     *) if ((M1N1_KEEP)); then M3_BOOTBIN_SHA=$(m3_bootbin_sha); fi ;;
   esac
 
-  # linux-aurora-headers pulls in pahole, and fprintd below comes from the
-  # repositories. On a Mac whose package database has gone stale, pacman
-  # resolves those to versions the mirror no longer carries and the whole
-  # transaction dies with a 404 after the packages are already downloaded.
-  say "Refreshing the package database"
-  $sudo pacman -Sy --noconfirm || warn "could not refresh the package database; continuing"
-
   say "Installing the aurora-sep kernel, libfprint with the Apple SEP driver, fprintd and aurora-touchid"
   # --ask 4 accepts replacing linux-asahi (and its headers), which linux-aurora conflicts with.
   m3_install_packages
-  $sudo pacman -S --needed --noconfirm fprintd
+  if ((!FROZEN_PACKAGES)); then $sudo pacman -S --needed --noconfirm fprintd; fi
   # linux-aurora carries the Apple video decoder, whose firmware linux-asahi
   # installs never needed; without it the decoder fails to load at boot.
-  $sudo pacman -S --needed --noconfirm avd-fw ||
-    warn "could not install avd-fw; hardware video decode will not work until it is installed"
+  if ((FROZEN_PACKAGES)); then
+    pacman -Q avd-fw >/dev/null 2>&1 ||
+      warn "avd-fw is absent; hardware video decode remains unavailable while this image is frozen"
+  else
+    $sudo pacman -S --needed --noconfirm avd-fw ||
+      warn "could not install avd-fw; hardware video decode will not work until it is installed"
+  fi
   # The VA-API bridge to that decoder. Without it, players fall back to
   # software decode with no error (reported on a 16" M1 Pro installed from the
   # Omarchy Mac ISO). Leave any other build of the bridge alone: the AUR
   # libva-v4l2_request packages conflict with it.
   if ! pacman -Qq libva-v4l2_request-avd libva-v4l2_request >/dev/null 2>&1 &&
     [[ ! -e /usr/lib/dri/v4l2_request_drv_video.so ]]; then
-    $sudo pacman -S --needed --noconfirm libva-v4l2_request-avd ||
-      warn "could not install libva-v4l2_request-avd; video players will decode in software until it is installed"
+    if ((FROZEN_PACKAGES)); then
+      warn "the VA-API bridge is absent; video players will decode in software while this image is frozen"
+    else
+      $sudo pacman -S --needed --noconfirm libva-v4l2_request-avd ||
+        warn "could not install libva-v4l2_request-avd; video players will decode in software until it is installed"
+    fi
   fi
   m3_gpu_install
   add_pin
@@ -3727,7 +4228,9 @@ install_all() {
   m3_pro_mesa_install
   m3_pro_mesa_render
   m3_pro_mesa_record
+  neo_gpu_activate
   pacman -Q linux-aurora libfprint aurora-touchid
+  if ((M3_GPU_PERSISTENT)); then m3_gpu_check_install; fi
   if ((M3_GPU_PERSISTENT)); then m3_persistent_transaction_commit; fi
   echo
   if ((M3_GPU_PERSISTENT)); then
@@ -3794,7 +4297,8 @@ install_all() {
 }
 
 uninstall_all() {
-  local previous=linux-asahi m3_mode=none
+  local previous=linux-asahi m3_mode=none neo_restore=0
+  if is_neo && [[ -f $STATE/neo-before.json ]]; then neo_restore=1; fi
   require_supported_soc "Uninstalling, which rebuilds boot.bin with the stock m1n1,"
   # Before anything changes: a boot left armed for the kernel being removed would fail Limine's
   # hash check at the next boot.
@@ -3816,6 +4320,10 @@ uninstall_all() {
   else
     m3_mode=none
   fi
+  if [[ $(boot_chain) == limine ]] && m3_limine_cleanup_needed; then
+    m3_limine_remove_check
+  fi
+  package_database_check
   command -v aurora-touchid-setup >/dev/null && aurora-touchid-setup --remove || true
   $sudo systemctl disable apple-sep.path apple-sep.service 2>/dev/null || true
   remove_pin
@@ -3836,12 +4344,12 @@ uninstall_all() {
   $sudo pacman -Rdd --noconfirm aurora-touchid 2>/dev/null || true
   # The stock m1n1 has no M3 handoff; drop the switches before its rebuild.
   m3_switches_remove
-  $sudo pacman -Sy --noconfirm --ask 4 "$previous" "$previous-headers" libfprint $m1n1
+  $sudo pacman -S --noconfirm --ask 4 "$previous" "$previous-headers" libfprint $m1n1
   # Restore the stock update-m1n1 configuration on either chain before the
   # rebuild below, so boot.bin goes back to the packaged m1n1 and DTBs.
   # A kernel-only M3's boot.bin and update-m1n1 configuration were never
   # changed; only this script's freeze comes off, at the end.
-  if [[ $(boot_chain) != grub && $m3_mode != kernel ]]; then
+  if [[ $(boot_chain) != grub && $m3_mode != kernel ]] && ((!neo_restore)); then
     if [[ -f $STATE/update-m1n1.default.saved ]]; then
       $sudo cp "$STATE/update-m1n1.default.saved" "$UPDATE_M1N1_CONF"
     else
@@ -3855,7 +4363,7 @@ uninstall_all() {
       $sudo mv "$STATE/linux-asahi.preset.saved" /etc/mkinitcpio.d/linux-asahi.preset
     [[ -f $STATE/grub.default.saved ]] && $sudo cp "$STATE/grub.default.saved" /etc/default/grub
     m3_persistent_remove
-    if [[ $m3_mode != kernel ]]; then
+    if [[ $m3_mode != kernel ]] && ((!neo_restore)); then
       if [[ -f $STATE/update-m1n1.default.saved ]]; then
         $sudo cp "$STATE/update-m1n1.default.saved" "$UPDATE_M1N1_CONF"
       else
@@ -3873,9 +4381,24 @@ uninstall_all() {
     handoff) m3_restore_bringup ;;
   esac
   $sudo rm -f "$MODPROBE_CONF"
+  # Keep recovery state and modules if the checked entry cannot be removed.
+  if [[ $(boot_chain) == limine ]] && m3_limine_cleanup_needed; then
+    m3_limine_remove_check remove
+    $sudo systemctl disable aurora-sep-fallback-modules.service 2>/dev/null || true
+    $sudo rm -f /etc/systemd/system/aurora-sep-fallback-modules.service
+  fi
   m3_persistent_remove
   m3_gpu_remove
   m3_pro_mesa_remove
+  m3_gpu_check_remove
+  if ((neo_restore)); then
+    neo_gpu_restore "$STATE/neo-before.json"
+    $sudo update-m1n1 || {
+      neo_gpu_restore "$STATE/neo-before.json"
+      warn "stock boot.bin rebuild failed; this Neo's original boot.bin was restored"
+    }
+    say "Restored this Neo's original stage 2 and configuration; native Neo GPU selection removed"
+  fi
   # The m1n1 builds that failed on this Mac stay recorded, so a later install
   # never puts one of them back.
   local failed=""
@@ -5565,7 +6088,7 @@ SAFETY, NON-NEGOTIABLE
     keybag and writes to the enclave's anti-replay store (xART) -- before
     anyone enrols a finger. If the owner cannot DFU-restore, install with
     --read-only instead, before the first reboot:
-      curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --read-only
+      curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --read-only
     A 'blacklist apple_sep' line does not prevent this on its own; the
     installer detects one and leaves the driver off.
   - Do not run any enrol/delete/re-provision loop unless the owner asks for
@@ -5601,13 +6124,13 @@ fingerprint.
    every install and prints either "<tag> is the current release" or a warning
    naming the newer one. To check without installing:
 
-     curl -fsSL https://api.github.com/repos/omacom/linux/releases/latest \
+     curl -fsSL https://api.github.com/repos/iconidentify/aurora-linux/releases/latest \
        | grep -m1 '"tag_name"' 
 
    Always fetch the script from the "latest" URL rather than a tag you were
    handed, so you get the current one automatically:
 
-     curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash
+     curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash
 
    State the tag you installed in your report. If you were given a specific
    older tag on purpose, say so and say why.
@@ -5660,7 +6183,7 @@ fingerprint.
    Updating macOS from 26.2 or earlier to a later release after enrolling
    loses the enrolments: Touch ID then needs a new keybag. Say so if that
    is what happened. With the owner's agreement, start Touch ID over:
-     curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --reset-touchid
+     curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --reset-touchid
    then reboot and enrol again.
    The sensor itself: "sudo dmesg | grep apple-mesa" should say the power line
    came "from the device node". Quote it if it says anything else.
@@ -5873,7 +6396,7 @@ fingerprint.
         - The installer itself refuses unless the Mac has the macOS 14.8.3
           system-firmware stub that the Omarchy installer gives every M3.
         - Run:
-            curl -fsSL https://github.com/omacom/linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-handoff
+            curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-handoff
           Keep the restore steps it prints (they name this Mac's EFI
           partition). It must end with "m1n1's boot.bin is this release's
           m1n1 with the M3 Pro handoff switches"; if it stops with an error
@@ -5923,17 +6446,27 @@ fingerprint.
       A plain J613 install keeps the ordinary display handoff and GPU
       activation policy. A plain J615 install keeps the kernel-only path;
       --m3-handoff remains its optional display/diagnostic handoff.
-      Explicit acceleration below currently supports J613 only.
+      A new matched bundle supports current14 GPU acceleration on both
+      J613 and J615; older bundles remain J613-only.
 
-      J613 experimental acceleration with the matched installer:
-      Current14 and exact25G83 are separate profiles. On a J613 already
-      using the supported current14 firmware, run the matched installer:
+      Experimental Air acceleration with the matched installer:
+      To select the supported profile from this boot's GPU firmware:
+        bash install-aurora-sep.sh --m3-gpu
+      This is an explicit persistent opt-in. A diagnostics-only current14
+      boot may omit the GPU descriptor; the exact stub/iBoot checks still
+      apply. The system-firmware version never selects the GPU profile.
+      For the command, prerequisites and recovery steps, see M3-GPU.md.
+      Current14 and exact25G83 are separate profiles. On a supported Air
+      already using current14 firmware, run the matched installer:
         bash install-aurora-sep.sh --m3-gpu-persistent
       This installs the matching kernel, Mesa and unified bootloader
       together, retains a reachable GPU-off previous entry, and selects
       the experimental GPU for subsequent boots. It does not require a
-      firmware migration or a separate one-shot arming command.
-      On a J613 already booted from its own exact26.6.2/25G83 volume group,
+      firmware migration or a separate one-shot arming command. After
+      reboot and normal desktop login, run:
+        aurora-m3-gpu-check
+      It checks actual Apple GPU OpenGL/Vulkan readback, not just packages.
+      Native25 is qualified on J613. On a J613 already booted from its own exact26.6.2/25G83 volume group,
       with the source-qualified stage1 named by the matched installer:
         bash install-aurora-sep.sh --m3-profile=j613-25g83
       This selects native experimental OpenGL under /opt/mesa-m3/25g83;
@@ -5941,6 +6474,16 @@ fingerprint.
       /etc/mesa-m3/t8122-profile=j613-25g83-hal200. Firmware and loaded
       GPU identity checks must pass. Linux14 cannot select this profile;
       neither command migrates stage1 or macOS firmware.
+      J615 on 26.6.2 is EXPERIMENTAL and has not been booted on a J615.
+      It needs a J615 booted from its own 26.6.2 volume group with the
+      J615-capable stage1 v1.6.1-m3air25.stage1, and a matched installer
+      whose release lists j615 for 25G83. Then:
+        bash install-aurora-sep.sh --m3-profile=j615-25g83
+      It is the same 25G83 profile plus m1n1's
+      chosen.asahi,j615-25g83-experimental=1 switch; --m3-gpu and
+      --m3-profile=j613-25g83 never select it on a J615. Any identity
+      mismatch leaves the GPU off on the boot framebuffer. Send
+      aurora-m3-gpu-check --details and --m3-report output either way.
       A refusal leaves activation unchanged. If installation fails,
       use 'Aurora previous (GPU off)' in Limine, or the retained previous
       kernel in GRUB. Quote the failure and keep the boot report.
@@ -6009,33 +6552,372 @@ PROMPT
 }
 
 # A reset needs none of the kernel and boot checks; it checks for itself.
-preflight_needed() { case ${1:-} in --agent-prompt | --reset-touchid | --m3-report | --m3-power-survey) return 1 ;; *) return 0 ;; esac; }
+preflight_needed() { case ${1:-} in --agent-prompt | --reset-touchid | --m3-report | --m3-power-survey) return 1 ;; --m3-gpu-check) return 1 ;; *) return 0 ;; esac; }
 
 # Exact stack pins are filled when the installer is assembled from its manifest.
+m3_gpu_firmware_compat() {
+  python3 - "$DT" <<'M3_GPU_FIRMWARE'
+import pathlib
+import struct
+import sys
+
+try:
+    root = pathlib.Path(sys.argv[1]).resolve()
+    alias = root / 'aliases/gpu'
+    if not alias.exists():
+        print('absent')
+        sys.exit(0)
+    raw = alias.read_bytes()
+    if not raw.endswith(b'\0') or b'\0' in raw[:-1]:
+        raise ValueError('malformed GPU alias')
+    name = raw[:-1].decode('ascii')
+    if not name.startswith('/') or '..' in name.split('/'):
+        raise ValueError('invalid GPU alias path')
+    node = (root / name.lstrip('/')).resolve()
+    if not node.is_relative_to(root) or not node.is_dir():
+        raise ValueError('GPU alias does not resolve inside the device tree')
+    prop = node / 'apple,firmware-compat'
+    if not prop.exists():
+        print('absent')
+    else:
+        raw = prop.read_bytes()
+        if len(raw) != 12:
+            raise ValueError('GPU firmware compatibility must contain three cells')
+        print('.'.join(map(str, struct.unpack('>III', raw))))
+except (OSError, UnicodeError, ValueError) as error:
+    print(str(error), file=sys.stderr)
+    sys.exit(1)
+M3_GPU_FIRMWARE
+}
+
+# GPU firmware is independent of the Mac's system-firmware version. An
+# unarmed current14 boot can omit the GPU descriptor; its stub and iBoot
+# must still pass the existing legacy checks before that profile is used.
+m3_gpu_auto_profile() {
+  local compat problem
+  [[ ($(this_board) == j613 || $(this_board) == j615) && " $M3_PERSISTENT_BOARDS " == *" $(this_board) "* && $(this_soc) == t8122 ]] ||
+    die "--m3-gpu requires a matched bundle supporting this M3 MacBook Air"
+  compat=$(m3_gpu_firmware_compat) || die "--m3-gpu cannot read this boot's GPU firmware description. Nothing was installed.
+    Run this installer with --m3-report and include the error above."
+  case $compat in
+    14.8.3) M3_GPU_PROFILE=legacy ;;
+    26.6.2)
+      # --m3-gpu never selects the untested J615 25G83 path by itself.
+      [[ $(this_board) == j613 ]] || die "--m3-gpu selects native 25G83 OpenGL on a J613 only. On a J615 it is experimental:
+    with a release that lists J615 for 25G83, choose it explicitly with --m3-profile=j615-25g83.
+    Nothing was installed."
+      M3_GPU_PROFILE=j613-25g83 ;;
+    absent)
+      M3_GPU_PROFILE=legacy
+      problem=$(m3_stub_problem)
+      [[ -z $problem ]] || die "--m3-gpu has no GPU firmware descriptor and the supported current14 stub checks failed: $problem.
+    Nothing was installed. Run this installer with --m3-report. The system-firmware version does not select a GPU profile."
+      ;;
+    *) die "--m3-gpu does not support GPU firmware compatibility $compat. Nothing was installed.
+    Run this installer with --m3-report. This installer does not migrate macOS firmware." ;;
+  esac
+  say "$(this_board): selected experimental GPU profile $M3_GPU_PROFILE; bootloader and matched-package checks still apply"
+}
+
 m3_25_boot_problem() {
   local osfw
   osfw=$({ tr -d '\0' <"$DT/chosen/asahi,os-fw-version"; } 2>/dev/null) || osfw=""
+  if [[ $(this_board) == j615 ]]; then
+    # Experimental: both the release (M3_NATIVE25_BOARDS) and the owner (M3_25_J615) opt in.
+    if ((M3_25_J615 == 0)); then
+      echo "25G83 on a J615 is experimental and needs --m3-profile=j615-25g83"
+    elif [[ " $M3_NATIVE25_BOARDS " != *" j615 "* ]]; then
+      echo "experimental J615 25G83 needs a release that lists j615 for 25G83 (this one lists: $M3_NATIVE25_BOARDS)"
+    elif [[ $(this_soc) != t8122 || $osfw != 26.6.2 ]]; then
+      echo "experimental J615 25G83 requires a J615 booted from its own 26.6.2 volume group; this boot is $(this_board) / $osfw"
+    fi
+    return 0
+  fi
+  if ((M3_25_J615)); then
+    echo "--m3-profile=j615-25g83 is for a J615; this boot is $(this_board) (a J613 uses --m3-profile=j613-25g83)"
+    return 0
+  fi
   [[ $(this_board) == j613 && $(this_soc) == t8122 && $osfw == 26.6.2 ]] ||
     echo "25G83 requires a J613 booted from its own 26.6.2 volume group; this boot is $(this_board) / $osfw"
 }
 
+# The 25G83 firmware ABI profile on a J615: experimental, behind its own switch and stage 1 list.
+m3_25_j615() {
+  [[ $M3_GPU_PROFILE == j613-25g83 && $(this_board) == j615 ]]
+}
+
+# The installed Mesa's session hook admits a J615 on the 25G83 profile (its experimental switch).
+m3_mesa_admits_j615() {
+  grep -qxF j615-experimental "$M3_MESA_NATIVE25_BOARDS" 2>/dev/null
+}
+
+# The board and the 25G83 option must agree before any firmware check.
+m3_25_board_choice() {
+  if ((M3_25_J615)) && [[ $(this_board) != j615 ]]; then
+    die "--m3-profile=j615-25g83 is for the 15-inch M3 MacBook Air (J615), and this Mac is $(this_board).
+    On a J613 use --m3-profile=j613-25g83. Nothing was installed."
+  fi
+  if ((M3_25_J615 == 0)) && [[ $(this_board) == j615 ]]; then
+    die "--m3-profile=j613-25g83 does not select 25G83 on a J615. J615 support is experimental and
+    untested: with a release that lists J615 for 25G83, choose --m3-profile=j615-25g83. Nothing was installed."
+  fi
+  return 0
+}
+
+m3_25_j615_warning() {
+  warn "J615 native OpenGL on macOS 26.6.2 (25G83) is EXPERIMENTAL and has not been qualified on a J615.
+    Only the explicit J615 profile selects this path. Firmware, board and per-Mac resource checks
+    remain required. Vulkan hardware support is unavailable for this profile.
+    'Aurora previous (GPU off)' stays in the boot menu. Speakers are unchanged by this profile.
+    Please send aurora-m3-gpu-check --details and --m3-report output, working or not."
+}
+
 m3_persistent_preflight() {
-  [[ $(this_board) == j613 && $(this_soc) == t8122 ]] || die "persistent GPU activation currently supports J613 only"
+  local boards=$M3_PERSISTENT_BOARDS s required="chosen.asahi,t8122-gpu=1 chosen.asahi,t8122-dcp=1"
+  # A J615's legacy profile is pinned to its own kernel and m1n1 pair; its 25G83 profile is a
+  # separate release capability, so it is checked against M3_NATIVE25_BOARDS alone.
+  if m3_25_j615; then
+    boards=$M3_NATIVE25_BOARDS
+    required+=" chosen.asahi,j615-25g83-experimental=1"
+  fi
+  [[ ($(this_board) == j613 || $(this_board) == j615) && " $boards " == *" $(this_board) "* && $(this_soc) == t8122 ]] || die "persistent GPU activation requires a matched bundle supporting this M3 MacBook Air"
   [[ $M3_STACK_ID =~ ^[0-9a-f]{64}$ ]] || die "persistent GPU requires an installer assembled from an exact matched stack manifest"
   ((M3_PRO_MESA)) || die "persistent GPU activation requires matching Mesa"
   [[ $M3_MODE == handoff ]] || die "persistent GPU requires a validated bootloader handoff"
   if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
+    m3_25_board_choice
     [[ -z $(m3_25_boot_problem) ]] || die "$(m3_25_boot_problem). Firmware migration is separate from a Linux package update."
   elif [[ $M3_GPU_PROFILE != legacy ]]; then
     die "unknown M3 GPU profile"
   fi
-  for s in chosen.asahi,t8122-gpu=1 chosen.asahi,t8122-dcp=1; do
+  for s in $required; do
     ! m3_air_switch_off "$s" || die "persistent GPU conflicts with an explicit owner switch-off: $s"
   done
+  m3_esp_space_check
+}
+
+# The persistent route writes to the ESP: a kept copy of boot.bin (keep_bootbin_on_esp)
+# next to the rebuilt one and, on Limine, the retained GPU-off UKI and the new
+# linux-aurora UKI. Asahi ESPs are 500 MB and often hold snapshot UKIs too; refuse
+# before anything changes rather than fail mid-transaction with ENOSPC. GRUB keeps its
+# kernels in /boot, which boot_space checks.
+esp_history_builtin() {
+  cat <<'ESP_HISTORY_PY'
+#!/usr/bin/env python3
+"""Archive unreferenced EFI history while retaining boot and recovery entries."""
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import tempfile
+
+LIMIT = 32 * 1024 * 1024
+
+
+def regular(path):
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError(f'not a regular file: {path}')
+    return path
+
+
+def checked_tree(root):
+    root = root.absolute()
+    for path in (root, *root.parents):
+        if path.is_symlink():
+            raise ValueError(f'symlink in directory path: {path}')
+    if not root.is_dir():
+        raise ValueError(f'directory missing: {root}')
+    files = []
+    for directory, dirs, names in os.walk(root):
+        for name in dirs + names:
+            path = Path(directory) / name
+            if path.is_symlink():
+                raise ValueError(f'symlink in boot metadata: {path}')
+        files.extend(Path(directory) / name for name in names)
+        if len(files) > 20000:
+            raise ValueError('too many boot metadata files')
+    return files
+
+
+def digest(path):
+    with regular(path).open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def references(esp, state):
+    refs = ''
+    total = 0
+    for path in checked_tree(esp) + (checked_tree(state) if state.exists() else []):
+        if path.suffix.lower() not in ('.conf', '.cfg', '.json', '.var', '.env') and path.name not in ('BOOTAA64.EFI', 'm1n1-good', 'm1n1-failed'):
+            continue
+        total += regular(path).stat().st_size
+        if total > LIMIT:
+            raise ValueError('boot metadata exceeds read limit')
+        data = path.read_bytes()
+        refs += '\n' + data.decode('utf-8', errors='ignore').lower()
+        refs += '\n' + data.decode('utf-16-le', errors='ignore').lower()
+    if not any((esp / p).is_file() for p in ('EFI/BOOT/limine.conf', 'boot/limine/limine.conf', 'boot/limine.conf', 'limine/limine.conf', 'limine.conf')):
+        raise ValueError('Limine configuration missing; history cannot be classified')
+    return refs
+
+
+def inventory(esp, state):
+    esp, state = esp.absolute(), state.absolute()
+    refs = references(esp, state)
+    groups = [[], []]
+    for path in checked_tree(esp):
+        relative = path.relative_to(esp)
+        if len(relative.parts) == 2 and relative.parts[0] == 'm1n1' and re.fullmatch(r'boot\.bin\.before-[A-Za-z0-9._+-]+', relative.name):
+            groups[0].append(path)
+        elif 'limine_history' in relative.parts[:-1] and re.fullmatch(r'[A-Za-z0-9._+-]+\.efi', relative.name, re.I):
+            groups[1].append(path)
+    records = []
+    for group in groups:
+        newest = set(sorted(group, key=lambda p: (regular(p).stat().st_mtime_ns, p.name), reverse=True)[:2])
+        for path in sorted(group):
+            reason = 'referenced' if path.name.lower() in refs else ('recent' if path in newest else '')
+            records.append({'file':str(path.relative_to(esp)), 'bytes':regular(path).stat().st_size,
+                            'sha256':digest(path), 'protected':reason})
+    return records
+
+
+@contextlib.contextmanager
+def lock(paths):
+    fds = []
+    try:
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            fds.append(fd)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError('nonregular boot lock')
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+def archive(esp, state, destination, lock_paths=None):
+    esp, state, destination = esp.absolute(), state.absolute(), destination.absolute()
+    destination.mkdir(parents=True, exist_ok=True)
+    checked_tree(destination)
+    if destination.resolve().is_relative_to(esp.resolve()) or os.stat(destination).st_dev == os.stat(esp).st_dev:
+        raise ValueError('archive must be on a different filesystem from the EFI partition')
+    with lock(lock_paths or [Path('/run/lock/boot-partition.lock'), Path('/tmp/limine-global.lock')]):
+        planned = inventory(esp, state)
+        moved = []
+        for item in planned:
+            if item['protected']:
+                continue
+            source = esp / item['file']
+            target = destination / (item['sha256'] + '.bin')
+            if target.exists():
+                if digest(target) != item['sha256']:
+                    raise ValueError('archive hash collision or damaged archive')
+            else:
+                fd, name = tempfile.mkstemp(prefix='.esp-history-', dir=destination)
+                try:
+                    with os.fdopen(fd, 'wb') as stream, regular(source).open('rb') as incoming:
+                        while chunk := incoming.read(1024 * 1024):
+                            stream.write(chunk)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if digest(Path(name)) != item['sha256']:
+                        raise ValueError('history file changed during copy')
+                    os.replace(name, target)
+                finally:
+                    if os.path.exists(name):
+                        os.unlink(name)
+            # A verified pre-existing archive may still have dirty data pages.
+            with regular(target).open('rb') as stream:
+                os.fsync(stream.fileno())
+            path_key = hashlib.sha256(item['file'].encode()).hexdigest()[:16]
+            receipt = destination / (item['sha256'] + '-' + path_key + '.receipt')
+            entry = {'original':item['file'], 'sha256':item['sha256'], 'bytes':item['bytes'], 'archive':target.name}
+            # Persist restore information before removing the FAT copy.
+            fd, name = tempfile.mkstemp(prefix='.esp-receipt-', dir=destination)
+            try:
+                with os.fdopen(fd, 'w') as stream:
+                    json.dump(entry, stream, sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+                os.replace(name, receipt)
+            finally:
+                if os.path.exists(name):os.unlink(name)
+            directory = os.open(destination, os.O_RDONLY | os.O_DIRECTORY)
+            try:os.fsync(directory)
+            finally:os.close(directory)
+            # Re-read references and contents immediately before unlinking.
+            current = next((x for x in inventory(esp, state) if x['file'] == item['file']), None)
+            if current is None or current['protected'] or current['sha256'] != item['sha256']:
+                raise ValueError('boot state changed during archive; original retained')
+            source.unlink()
+            directory = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:os.fsync(directory)
+            finally:os.close(directory)
+            moved.append(entry)
+        return moved
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=('report', 'archive'))
+    parser.add_argument('--esp', type=Path, required=True)
+    parser.add_argument('--state', type=Path, default=Path('/var/lib/aurora-sep'))
+    parser.add_argument('--archive', type=Path, default=Path('/var/lib/aurora-sep/esp-history'))
+    args = parser.parse_args()
+    try:
+        if args.action == 'report':
+            result = inventory(args.esp, args.state)
+        else:
+            result = archive(args.esp, args.state, args.archive)
+        print(json.dumps(result, indent=2))
+    except (OSError, ValueError) as error:
+        parser.exit(1, f'EFI history: {error}\n')
+
+
+if __name__ == '__main__':
+    main()
+ESP_HISTORY_PY
+}
+
+esp_history_run() {
+  local target code
+  [[ $(boot_chain) == limine ]] || die "EFI history archiving is available only with Limine"
+  target=$(esp_bootbin) || die "could not find the mounted FAT boot partition"
+  code=$(esp_history_builtin)
+  $sudo python3 -c "$code" "$1" --esp "${target%/m1n1/boot.bin}" --state "$STATE" \
+    --archive "$STATE/esp-history" || die "EFI history was retained where archive checks failed; retry after checking the error"
+}
+
+m3_esp_space_check() {
+  local target esp uki=0 bootbin need free
+  target=$(esp_bootbin) || die "could not find the mounted FAT boot partition. Nothing was installed."
+  esp=${target%/m1n1/boot.bin}
+  bootbin=$($sudo stat -c %s "$target") || die "could not measure boot.bin. Nothing was installed."
+  [[ $bootbin =~ ^[0-9]+$ ]] || die "invalid boot.bin size. Nothing was installed."
+  if [[ $(boot_chain) == limine ]]; then
+    # The largest UKI there stands for the running kernel's; 100 MB when there is none.
+    uki=$($sudo find "$esp" -maxdepth 3 -name '*.efi' -size +8M -printf '%s\n' 2>/dev/null | sort -n | tail -1) || die "could not measure existing EFI kernels. Nothing was installed."
+    uki=${uki:-100000000}
+    [[ $uki =~ ^[0-9]+$ ]] || die "invalid EFI kernel size. Nothing was installed."
+  fi
+  need=$(( (2 * uki + 2 * bootbin) / 1048576 + 16 ))
+  free=$($sudo df -m --output=avail "$esp" 2>/dev/null | tail -1 | tr -d ' ') || free=""
+  [[ $free =~ ^[0-9]+$ ]] || die "could not read the free space on $esp. Nothing was installed."
+  ((free >= need)) || die "the EFI partition ($esp) has ${free} MB free and the persistent GPU route needs
+    about ${need} MB (a kept boot.bin, the retained GPU-off kernel and the new one). Free space there
+    first, or rerun this command with --archive-esp-history to archive unreferenced old history
+    outside the EFI partition. Active entries and recent recovery backups are retained. Nothing was installed."
 }
 
 m3_install_cleanup() {
   local status=$?
+  if ((NEO_GPU_PREPARED && !NEO_GPU_COMMITTED)); then neo_gpu_restore "$STATE/neo-transaction.json" || warn "could not restore Neo boot state"; fi
   if ((M3_PERSISTENT_TRANSACTION_ACTIVE)); then
     m3_persistent_transaction_rollback || warn "could not restore experimental activation settings; use the retained GPU-off entry"
     if ((M3_PERSISTENT_MAIN_ARMED)); then
@@ -6046,7 +6928,8 @@ m3_install_cleanup() {
       fi
     fi
   fi
-  rm -rf "${work:-}"
+  if ((FROZEN_PACKAGES)); then $sudo rm -rf "${work:-}"
+  else rm -rf "${work:-}"; fi
   return "$status"
 }
 
@@ -6056,7 +6939,7 @@ m3_persistent_transaction_begin() {
   target=$(esp_bootbin) || die "persistent GPU requires the mounted boot.bin"
   $sudo python3 - "$STATE/m3-persistent-transaction.json" "$defaults" "$M1N1_CONF" "$target" \
     "$M3_GPU_OPTIN" "$M3_GPU_PROFILE_FILE" "$STATE/m3-gpu-persistent" "$STATE/m3-mode" \
-    "$M3_PROFILE_HOOK" "$M3_PROFILE_UPDATE" <<'M3_TRANSACTION_BEGIN'
+    "$M3_PROFILE_HOOK" "$M3_PROFILE_UPDATE" "$M3_GPU_CHECK" "$STATE/m3-gpu-check" <<'M3_TRANSACTION_BEGIN'
 import base64, json, os, stat, sys
 from pathlib import Path
 snapshot=Path(sys.argv[1])
@@ -6109,12 +6992,23 @@ m3_persistent_transaction_commit() {
 m3_install_packages() {
   # The generated main UKI remains unarmed until the matched transaction has
   # succeeded. The custom GPU-off entry was registered before this call.
-  $sudo pacman -U --noconfirm --ask 4 "$work"/*.pkg.tar.zst
+  if ((M3_GPU_PERSISTENT)) && [[ $chain == limine ]]; then m3_persistent_cmdline "$chain" 0; fi
+  if ((FROZEN_PACKAGES)); then
+    $sudo test -f "$FROZEN_TRANSACTION_CONFIG" || die "missing admitted frozen package transaction"
+    $sudo pacman -U --config "$FROZEN_TRANSACTION_CONFIG" --noconfirm --ask 4 "${FROZEN_TRANSACTION_FILES[@]}"
+    if [[ -n $M3_PRO_MESA_PACKAGE && -f $work/$(m3_pro_mesa_file) ]]; then
+      M3_PRO_MESA_RESULT=installed
+    fi
+  else
+    $sudo pacman -U --noconfirm --ask 4 "$work"/*.pkg.tar.zst
+  fi
   if ((M3_GPU_PERSISTENT)); then
     M3_PRO_MESA_RESULT=installed
     if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
       [[ $(cat "$M3_MESA_NATIVE_MARKER" 2>/dev/null) == j613-25g83-gl-only ]] ||
         die "matched Mesa native profile marker is missing; activation was not published"
+      ! m3_25_j615 || m3_mesa_admits_j615 ||
+        die "matched Mesa does not admit the J615 to the 25G83 profile ($M3_MESA_NATIVE25_BOARDS); activation was not published"
     fi
     m3_persistent_cmdline "$chain"
     if [[ $chain == grub ]]; then
@@ -6128,23 +7022,66 @@ m3_install_packages() {
 }
 
 m3_persistent_cmdline() {
-  local chain=$1 path
+  local chain=$1 path armed=${2:-1}
   if [[ $chain == grub ]]; then path=$M3_GRUB_DEFAULTS
   else path=$M3_LIMINE_DEFAULTS; fi
   [[ -f $STATE/m3-defaults.saved ]] || $sudo cp -p "$path" "$STATE/m3-defaults.saved"
-  $sudo python3 - "$path" "$chain" <<'M3_CMDLINE_PY'
+  $sudo python3 - "$path" "$chain" "$armed" "$M3_LIMINE_VENDOR_CONF" "$M3_PROCFS/cmdline" <<'M3_CMDLINE_PY'
 import os, re, sys, tempfile
 from pathlib import Path
 path, chain = Path(sys.argv[1]), sys.argv[2]
+armed = sys.argv[3]
+if armed not in ('0', '1'): raise SystemExit('invalid M3 activation setting')
 text = path.read_text()
 begin, end = '# >>> aurora-sep: M3 GPU cmdline', '# <<< aurora-sep: M3 GPU cmdline'
 if text.count(begin) != text.count(end) or text.count(begin) > 1:
     raise SystemExit('malformed owned M3 cmdline block')
 text = re.sub(re.escape(begin) + r'\n.*?' + re.escape(end) + r'\n?', '', text, flags=re.S)
 if chain == 'grub':
-    setting = 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} asahi.t8122_start=1"'
+    setting = 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} asahi.t8122_start=' + armed + '"'
 else:
-    setting = 'KERNEL_CMDLINE[linux-aurora]="${KERNEL_CMDLINE[linux-aurora]:-${KERNEL_CMDLINE[default]}} asahi.t8122_start=1"'
+    # Limine reads literal assignments; it does not expand shell variables.
+    values = {}
+    def read_config(data):
+        for line in data.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'): continue
+            assignment = re.match(r'^KERNEL_CMDLINE(?:\[[^\]]*\])?\s*(?:\+=|=)(.*)$', line)
+            if assignment and '+=' in assignment[1]:
+                raise SystemExit('Limine cannot preserve += inside command-line arguments; fix ' + str(path) + ' before retrying')
+            if '+=' in line: key, value = line.split('+=', 1); append = True
+            elif '=' in line: key, value = line.split('=', 1); append = False
+            else: continue
+            key, value = key.strip(), value.strip()
+            if key == 'KERNEL_CMDLINE': target = 'default'
+            elif key.startswith('KERNEL_CMDLINE[') and ']' in key:
+                target = key[len('KERNEL_CMDLINE['):key.index(']')].strip()
+            else: continue
+            if len(target) >= 2 and target.startswith('"') and target.endswith('"'): target = target[1:-1]
+            target = target or 'default'
+            if len(value) >= 2 and value.startswith('"') and value.endswith('"'): value = value[1:-1]
+            values[target] = value + ' ' + values[target] if append and target in values else value
+    etc = path.parent.parent
+    vendor = Path(sys.argv[4])
+    sources = sorted(vendor.glob('*.conf')) if vendor.is_dir() else []
+    sources += [etc / 'limine-entry-tool.conf']
+    directory = etc / 'limine-entry-tool.d'
+    if directory.is_dir(): sources += sorted(directory.glob('*.conf'))
+    for source in sources:
+        if source.is_file(): read_config(source.read_text())
+    read_config(text)
+    value = values.get('linux-aurora', '').strip() or values.get('default', '').strip()
+    if not value:
+        fallback = etc / 'kernel/cmdline'
+        value = fallback.read_text().replace('\n', ' ').strip() if fallback.is_file() else ''
+        if not value: value = Path(sys.argv[5]).read_text().strip()
+    if any(c in value for c in ('"', "'", '\n', '\r', '`', '${', '$(', '+=')) or not any(w.startswith('root=') for w in value.split()):
+        raise SystemExit('Limine command line must contain literal root= arguments without quotes, shell expressions or += inside arguments; fix ' + str(path) + ' before retrying')
+    words = [w for w in value.split() if not re.match(r'asahi\.t8122[_-]start(?:=|$)', w)
+             and not w.startswith(('mesa_m3=', 'air_gpu.oneshot=', 'BOOT_IMAGE='))]
+    words += ['asahi.t8122_start=' + armed]
+    if armed == '0': words += ['mesa_m3=off']
+    setting = 'KERNEL_CMDLINE[linux-aurora]="' + ' '.join(words) + '"'
 data = text.rstrip() + '\n\n' + begin + '\n' + setting + '\n' + end + '\n'
 fd, name = tempfile.mkstemp(dir=path.parent, prefix=path.name+'.')
 with os.fdopen(fd, 'w') as out:
@@ -6182,6 +7119,7 @@ import re
 import shutil
 import stat
 import tempfile
+import time
 
 BEGIN = '# >>> aurora-sep: persistent experimental M3 GPU'
 END = '# <<< aurora-sep: persistent experimental M3 GPU'
@@ -6209,7 +7147,8 @@ def atomic(path, data):
         if os.path.exists(name): os.unlink(name)
 
 @contextlib.contextmanager
-def locks(paths):
+def locks(paths, timeout=30.0):
+    deadline = time.monotonic() + timeout
     fds = []
     try:
         for path in paths:
@@ -6217,7 +7156,15 @@ def locks(paths):
             fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
             fds.append(fd)
             if not stat.S_ISREG(os.fstat(fd).st_mode): raise ValueError('nonregular boot lock')
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(f'boot partition locks remained busy for {timeout:g} seconds; retry this installer') from None
+                    time.sleep(min(0.05, remaining))
         yield
     finally:
         for fd in reversed(fds): os.close(fd)
@@ -6266,8 +7213,17 @@ def uki_path(esp, value):
     if m[2] and m[2] != digest: raise ValueError('UKI hash pin differs')
     return data, digest
 
+def same_esp_path(left, right):
+    # VFAT names ignore ASCII case and trailing dots in each component.
+    key = lambda path: tuple(part.rstrip('.').lower() for part in path.resolve().parts)
+    if key(left) == key(right): return True
+    try:
+        return os.path.samestat(left.stat(), right.stat())
+    except FileNotFoundError:
+        return False
+
 def limine(args):
-    with locks(args.lock):
+    with locks(args.lock, args.lock_timeout):
         loader = regular(args.esp / 'EFI/BOOT/BOOTAA64.EFI').read_bytes()
         if b'limine.conf' not in loader: raise ValueError('EFI loader is not Limine')
         sig = b'++CONFIG_B2SUM_SIGNATURE++'
@@ -6282,9 +7238,49 @@ def limine(args):
         text = regular(conf).read_text()
         clean = without_block(text)
         state_path = args.state / 'm3-known-entry.json'
+        if args.action in ('check-remove', 'remove'):
+            output = clean
+            retained = None
+            has_entry = re.search(r'^\s*/' + re.escape(FALLBACK) + r'\s*$', clean, re.M)
+            if state_path.exists() or state_path.is_symlink():
+                saved = json.loads(regular(state_path).read_text())
+                match = re.fullmatch(r'boot\(\):(/EFI/Linux/aurora-m3-previous-[0-9a-f]{16}\.efi)#([0-9a-f]{128})', saved['path'])
+                if not match or not match[1].endswith(match[2][:16] + '.efi'):
+                    raise ValueError('retained UKI name and hash pin differ')
+                retained = args.esp / match[1].lstrip('/')
+                # An edited or snapshot entry must not lose its kernel or modules.
+                if has_entry:
+                    lines, fields = entry(clean, FALLBACK, 1)
+                    if fields['path'][1] != saved['path'] or fields['cmdline'][1] != saved['cmdline']:
+                        raise ValueError('custom fallback differs from retained entry')
+                    start = next(i for i, line in enumerate(lines) if line.strip() == '/' + FALLBACK)
+                    end = start + 1
+                    while end < len(lines) and not lines[end].lstrip().startswith('/'): end += 1
+                    output = ''.join(lines[:start] + lines[end:]).rstrip() + '\n'
+                for value in re.findall(r'^\s*path:\s*(\S+)', output, re.M | re.I):
+                    reference = re.fullmatch(r'boot\(\):(/[^#]+)(?:#[0-9a-fA-F]{128})?', value)
+                    if reference and same_esp_path(args.esp / reference[1].lstrip('/'), retained):
+                        raise ValueError('another boot entry still uses the retained UKI; remove that entry first')
+                if retained.exists() or retained.is_symlink():
+                    uki_path(args.esp, saved['path'])
+                elif has_entry:
+                    raise ValueError('registered fallback UKI is missing')
+                else:
+                    retained = None
+            else:
+                owned_reference = any(re.fullmatch(r'aurora-m3-previous-[0-9a-f]{16}\.efi',
+                    Path(value.split('#', 1)[0]).name.rstrip('.').lower())
+                    for value in re.findall(r'^\s*path:\s*boot\(\):(/\S+)', clean, re.M | re.I))
+                if has_entry or owned_reference:
+                    raise ValueError('custom fallback has no saved ownership record')
+            if regular(conf).read_text() != text: raise ValueError('Limine configuration changed during remove')
+            if args.action == 'remove':
+                atomic(conf, output.encode())
+                if retained is not None: retained.unlink()
+            return
         args.state.mkdir(parents=True, exist_ok=True)
         if args.action == 'retain':
-            if state_path.exists():
+            if state_path.exists() or state_path.is_symlink():
                 saved = json.loads(regular(state_path).read_text())
                 uki_path(args.esp, saved['path'])
                 if not (args.state / ('modules-' + saved['release']) / 'modules.dep').is_file():
@@ -6342,7 +7338,7 @@ def limine(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=('retain', 'publish', 'disarm'))
+    p.add_argument('action', choices=('retain', 'publish', 'disarm', 'check-remove', 'remove'))
     p.add_argument('--esp', type=Path, required=True)
     p.add_argument('--state', type=Path, required=True)
     p.add_argument('--defaults', type=Path, default=Path('/etc/default/limine'))
@@ -6350,7 +7346,10 @@ def main():
     p.add_argument('--release', default=os.uname().release)
     p.add_argument('--modules', type=Path, default=Path('/usr/lib/modules'))
     p.add_argument('--lock', type=Path, action='append')
+    p.add_argument('--lock-timeout', type=float, default=30.0, help='total boot-lock wait, in seconds (0..30)')
     args = p.parse_args()
+    if not 0 <= args.lock_timeout <= 30:
+        p.error('lock timeout must be between 0 and 30 seconds')
     args.lock = args.lock or [Path('/run/lock/boot-partition.lock'), Path('/tmp/limine-global.lock')]
     try: limine(args)
     except (OSError, ValueError, KeyError) as e: p.exit(1, f'M3 boot profile refused: {e}\n')
@@ -6358,6 +7357,30 @@ def main():
 if __name__ == '__main__': main()
 M3_BOOT_PROFILE_PY
   $sudo chmod 0755 "$M3_BOOT_PROFILE_HELPER"
+}
+
+m3_limine_cleanup_needed() {
+  local target conf status
+  [[ ! -e $STATE/m3-known-entry.json && ! -L $STATE/m3-known-entry.json ]] || return 0
+  target=$(esp_bootbin) || return 1
+  for conf in EFI/BOOT/limine.conf boot/limine/limine.conf boot/limine.conf limine/limine.conf limine.conf; do
+    conf=${target%/m1n1/boot.bin}/$conf
+    [[ -e $conf || -L $conf ]] || continue
+    status=0
+    $sudo grep -qiE '^[[:space:]]*/Aurora previous \(GPU off\)[[:space:]]*$|^[[:space:]]*path:[[:space:]]*boot\(\):/[^[:space:]]*aurora-m3-previous-[[:xdigit:]]{16}\.efi\.*([#][^[:space:]]*)?[[:space:]]*$' "$conf" || status=$?
+    ((status <= 1)) || die "could not inspect the Limine recovery entry; nothing was uninstalled"
+    return "$status"
+  done
+  return 1
+}
+
+m3_limine_remove_check() {
+  local target
+  target=$(esp_bootbin) || die "cannot check the retained Limine entry without its mounted FAT boot partition; recovery state was kept"
+  m3_boot_profile_install
+  $sudo python3 "$M3_BOOT_PROFILE_HELPER" "${1:-check-remove}" --esp "${target%/m1n1/boot.bin}" --state "$STATE" ||
+    die "could not safely remove the retained Limine entry; its recovery state and modules were kept"
+  if [[ ${1:-} == remove ]]; then $sudo rm -f "$M3_BOOT_PROFILE_HELPER"; fi
 }
 
 m3_keep_limine_entry() {
@@ -6482,6 +7505,8 @@ m3_persistent_select() {
   if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
     [[ $(cat "$M3_MESA_NATIVE_MARKER" 2>/dev/null) == j613-25g83-gl-only ]] ||
       die "matched Mesa native profile marker is missing; experimental intent remains unchanged"
+    ! m3_25_j615 || m3_mesa_admits_j615 ||
+      die "matched Mesa does not admit the J615 to the 25G83 profile ($M3_MESA_NATIVE25_BOARDS); experimental intent remains unchanged"
   fi
   $sudo install -d -m 0755 "$dir"
   if [[ $M3_GPU_PROFILE == j613-25g83 ]]; then
@@ -6496,7 +7521,293 @@ m3_persistent_select() {
   [[ ! -f $M3_GPU_PROFILE_FILE ]] || $sudo chmod 0644 "$M3_GPU_PROFILE_FILE"
 }
 
-# Optional desktop packages enter the same pacman transaction as the kernel.
+# The desktop GPU checker is owned by its recorded content hash.
+m3_gpu_check_plan() {
+  local recorded="" current=""
+  if [[ -e $M3_GPU_CHECK || -L $M3_GPU_CHECK ]]; then
+    [[ -f $M3_GPU_CHECK && ! -L $M3_GPU_CHECK ]] || die "$M3_GPU_CHECK is not an installer-owned regular file; it was left unchanged"
+    [[ -f $STATE/m3-gpu-check && ! -L $STATE/m3-gpu-check ]] || die "$M3_GPU_CHECK already exists without an ownership record; it was left unchanged"
+    # An explicit matching selection can restore an empty helper/record pair.
+    if [[ ! -s $M3_GPU_CHECK && ! -s $STATE/m3-gpu-check && $M3_GPU_PERSISTENT == 1 &&
+          -f $STATE/m3-gpu-persistent && ! -L $STATE/m3-gpu-persistent ]]; then
+      case $M3_GPU_PROFILE in
+        legacy|j613-25g83)
+          if [[ $(cat "$STATE/m3-gpu-persistent") == "$M3_GPU_PROFILE" ]]; then
+            say "Restoring the empty GPU checker and ownership record for this selected profile"
+            return 0
+          fi
+          ;;
+      esac
+    fi
+    recorded=$(cat "$STATE/m3-gpu-check")
+    current=$(sha256sum "$M3_GPU_CHECK" | cut -d' ' -f1)
+    [[ $recorded =~ ^[0-9a-f]{64}$ && $current == "$recorded" ]] || die "$M3_GPU_CHECK was changed outside this installer; it was left unchanged"
+  elif [[ -e $STATE/m3-gpu-check || -L $STATE/m3-gpu-check ]]; then
+    [[ -f $STATE/m3-gpu-check && ! -L $STATE/m3-gpu-check ]] || die "GPU check ownership record is not a regular file"
+    [[ $(cat "$STATE/m3-gpu-check") =~ ^[0-9a-f]{64}$ ]] || die "GPU check ownership record is invalid"
+  fi
+}
+
+m3_gpu_check_install() {
+  local sha
+  m3_gpu_check_plan
+  m3_gpu_check_builtin >"$work/aurora-m3-gpu-check"
+  sha=$(sha256sum "$work/aurora-m3-gpu-check" | cut -d' ' -f1)
+  $sudo python3 - "$work/aurora-m3-gpu-check" "$M3_GPU_CHECK" "$STATE/m3-gpu-check" "$sha" <<'M3_CHECK_INSTALL_PY'
+import hashlib, os, stat, sys, tempfile
+from pathlib import Path
+source, helper, record = map(Path, sys.argv[1:4])
+data = source.read_bytes()
+if not data or hashlib.sha256(data).hexdigest() != sys.argv[4]:
+    raise SystemExit('GPU checker source is empty or changed')
+compile(data, str(helper), 'exec')
+staged = []
+try:
+    for path, content, mode in ((helper, data, 0o755),
+                               (record, (sys.argv[4] + '\n').encode(), 0o644)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() or path.is_symlink():
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise SystemExit('GPU checker destination is not a regular file: ' + str(path))
+        fd, name = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+        staged.append((name, path))
+        with os.fdopen(fd, 'wb') as output:
+            os.fchmod(output.fileno(), mode)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+    # Publish complete files; persist the helper before its ownership record.
+    for name, path in staged:
+        os.replace(name, path)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+finally:
+    for name, path in staged:
+        if os.path.exists(name):
+            os.unlink(name)
+M3_CHECK_INSTALL_PY
+}
+
+m3_gpu_check_remove() {
+  [[ -f $STATE/m3-gpu-check && ! -L $STATE/m3-gpu-check ]] || return 0
+  if [[ -e $M3_GPU_CHECK || -L $M3_GPU_CHECK ]]; then
+    if [[ ! -f $M3_GPU_CHECK || -L $M3_GPU_CHECK ||
+          $(sha256sum "$M3_GPU_CHECK" | cut -d' ' -f1) != "$(cat "$STATE/m3-gpu-check")" ]]; then
+      warn "Keeping $M3_GPU_CHECK: it was changed outside this installer"
+      return 0
+    fi
+    $sudo rm -f "$M3_GPU_CHECK"
+  fi
+  $sudo rm -f "$STATE/m3-gpu-check"
+}
+
+m3_gpu_check_run() {
+  ((EUID != 0)) || die "run --m3-gpu-check in your desktop terminal, without sudo"
+  local code
+  code=$(m3_gpu_check_builtin)
+  if [[ -n ${MESA_M3_HOOK_RUN_ID:-} ]]; then
+    python3 -c "$code" --session "$@"
+  else
+    systemd-run --user --pipe --wait --collect --quiet --slice=app-graphical.slice \
+      python3 -c "$code" --session "$@"
+  fi
+}
+
+m3_gpu_check_builtin() {
+  cat <<'AURORA_M3_GPU_CHECK_PY'
+#!/usr/bin/python3
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+
+
+class CheckError(Exception):
+    def __init__(self, message, remedy, details=''):
+        super().__init__(message)
+        self.remedy = remedy
+        self.details = details
+
+
+def reject(message, remedy='Run the matched installer with --m3-report and include this error.', details=''):
+    raise CheckError(message, remedy, details)
+
+
+def fields(text):
+    values = {}
+    for line in text.splitlines():
+        if '=' not in line:
+            reject('The GPU session record is incomplete.', 'Log out and log in again, then retry.')
+        key, value = line.split('=', 1)
+        if key in values:
+            reject('The GPU session record has duplicate fields.', 'Log out and log in again, then retry.')
+        values[key] = value
+    return values
+
+
+def verify(root, env, uid, run=subprocess.run):
+    if uid == 0:
+        reject('The GPU check needs your desktop session.', 'Run aurora-m3-gpu-check without sudo after login.')
+    state_path = root / f'run/user/{uid}/mesa-m3-session.state'
+    try:
+        info = state_path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_size > 16384:
+            raise ValueError('invalid session record')
+        state = fields(state_path.read_text())
+    except (OSError, ValueError):
+        reject('No current GPU session was found.', 'Reboot and log into your desktop, then retry.')
+    if state.get('schema') != 'aurora.mesa-m3-session/2':
+        reject('The GPU session record is unsupported.', 'Install the matched Mesa package and log in again.')
+    if state.get('decision') != 'active' or state.get('reason') != 'active':
+        reason = state.get('reason', 'unknown')
+        remedy = {
+            'experimental': 'Run the matched installer with --m3-gpu, then reboot and log in.',
+            'no-access': 'Log out and log in again so render-group membership takes effect.',
+            'no-gpu': "Check this boot's GPU startup: journalctl -b -k -g 'asahi|M3 G15G'; report the error with --m3-report in issue #35.",
+            'opt-out': 'Review your GPU opt-out setting; this check does not change it.',
+            'previous-failed': 'Use the retained GPU-off entry and report the previous failed login.',
+        }.get(reason, 'Run the matched installer with --m3-report and include this error.')
+        reject(f'Apple GPU is inactive ({reason}).', remedy)
+    boot = (root / 'proc/sys/kernel/random/boot_id').read_text().strip()
+    if (state.get('uid') != str(uid) or state.get('boot_id') != boot or
+            not state.get('hook_run_id') or state['hook_run_id'] != env.get('MESA_M3_HOOK_RUN_ID') or
+            (env.get('XDG_SESSION_ID') and state.get('session_id') != env['XDG_SESSION_ID'])):
+        reject('The GPU session does not match this login.', 'Log out and log in again, then retry.')
+    selector_path = root / 'etc/mesa-m3/t8122-profile'
+    selector = selector_path.read_text().rstrip('\n') if selector_path.exists() else ''
+    native = selector == 'j613-25g83-hal200'
+    if selector not in ('', 'j613-25g83-hal200'):
+        reject('The installed GPU profile is unknown.')
+    prefix = '/opt/mesa-m3/25g83' if native else '/opt/mesa-m3'
+    profile = selector if native else 'legacy'
+    if state.get('prefix') != prefix or env.get('MESA_M3_SESSION') != prefix:
+        reject('The desktop and installed GPU profile differ.', 'Reboot and log in again after the matched installation.')
+    if state.get('fallback') != 'none' or env.get('MESA_M3_FALLBACK') or env.get('LIBGL_ALWAYS_SOFTWARE', '0') not in ('', '0'):
+        reject('This login is using software rendering.', 'Reboot and log in again; if unchanged, run --m3-report.')
+    compatible = (root / 'proc/device-tree/compatible').read_bytes().split(b'\0')
+    soc = 't8122' if b'apple,t8122' in compatible else 't6030' if b'apple,t6030' in compatible else ''
+    if not soc:
+        reject('This Mac has no supported M3 GPU profile.')
+    if soc == 't8122' and not (root / 'etc/mesa-m3/t8122-gpu-experiment').is_file():
+        reject('The Air GPU experimental opt-in is absent.', 'Run the matched installer with --m3-gpu, then reboot and log in.')
+    nodes = list((root / 'sys/class/drm').glob('renderD*'))
+    if len(nodes) != 1:
+        reject('The kernel has no unique M3 render node.', "Check this boot's GPU startup: journalctl -b -k -g 'asahi|M3 G15G'; report the error with --m3-report in issue #35.")
+    node = nodes[0]
+    of_node = node / 'device/of_node'
+    if ((node / 'device/driver').resolve().name != 'asahi' or
+            f'apple,agx-{soc}'.encode() not in (of_node / 'compatible').read_bytes().split(b'\0')):
+        reject('The render node is not this Mac\'s Asahi GPU.')
+    device = root / f'dev/dri/{node.name}'
+    if not os.access(device, os.R_OK | os.W_OK):
+        reject('The GPU render node is not accessible.', 'Log out and log in again so render-group membership takes effect.')
+    if native:
+        # The J615 runs the same 25G83 firmware ABI only behind m1n1's experimental switch.
+        try:
+            j615_opt_in = (root / 'proc/device-tree/chosen/asahi,j615-25g83-experimental').read_bytes() == b'1\0'
+        except OSError:
+            j615_opt_in = False
+        j613 = b'apple,j613' in compatible
+        j615 = b'apple,j615' in compatible
+        board = j613 != j615 and (j613 or j615_opt_in)
+        if (soc != 't8122' or not board or
+                (of_node / 'apple,firmware-compat').read_bytes() != bytes.fromhex('0000001a0000000600000002') or
+                (of_node / 'apple,j613-25g83-gpu-handoff').read_bytes() != bytes.fromhex('00000001') or
+                (root / prefix.lstrip('/') / 'share/mesa-m3/profile').read_text().rstrip('\n') != 'j613-25g83-gl-only'):
+            reject('Native OpenGL requires the exact 25G83 handoff on a J613, or J615 with the experimental opt-in.')
+    elif (of_node / 'apple,j613-25g83-gpu-handoff').exists():
+        reject('The native HAL200 handoff cannot use legacy Mesa.')
+    abi = run([str(root / 'opt/mesa-m3/libexec/mesa-m3-abi-check'), profile, str(device)],
+              capture_output=True, text=True, timeout=10)
+    expected_hal = 'HAL200' if native else 'HAL0'
+    if (abi.returncode or 'match=1' not in abi.stdout.split() or
+            expected_hal not in abi.stdout.split() or 'USC3' not in abi.stdout.split()):
+        reject('The running GPU ABI does not match the installed profile.', details=abi.stdout + abi.stderr)
+    probe = run([str(root / prefix.lstrip('/') / 'bin/mesa-m3-probe')],
+                capture_output=True, text=True, timeout=95)
+    text = probe.stdout
+    def value(key):
+        matches = [line[len(key) + 1:] for line in text.splitlines() if line.startswith(key + '=')]
+        if len(matches) != 1:
+            reject('The GPU readback report is incomplete.', details=text + probe.stderr)
+        return matches[0]
+    if probe.returncode or value('result') != 'pass' or value('exit') != '0':
+        reject('The Apple GPU readback did not pass.', details=text + probe.stderr)
+    identities = [line for line in text.splitlines() if line.startswith('pid=')]
+    if (len(identities) != 1 or not re.fullmatch(r'pid=[1-9][0-9]* starttime=[1-9][0-9]* boot_id=' + re.escape(boot), identities[0]) or
+            value('env.MESA_M3_HOOK_RUN_ID') != state['hook_run_id'] or value('env.MESA_M3_SESSION') != prefix):
+        reject('The readback does not match this GPU session.', details=text)
+    renderer = value('gl.renderer')
+    if 'apple m3' not in renderer.lower() or any(name in renderer.lower() for name in ('llvmpipe', 'softpipe', 'lavapipe', 'swrast', 'software')):
+        reject('OpenGL is not using the Apple M3 GPU.', details=text)
+    if native and (not renderer.startswith('Apple M3') or 'zink' in renderer.lower()):
+        reject('The native profile is not using native Apple OpenGL.', details=text)
+    if value('gl.platform') != 'wayland' or value('gl.swap') != 'pass':
+        reject('The GPU probe could not render through your desktop.', 'Run the check after normal desktop login.', text)
+    render = value('gl.render')
+    if not re.fullmatch(r'pass left=255,0,0,\d+ right=0,0,255,\d+ glerror=0x0', render):
+        reject('OpenGL red/blue pixel readback failed.', details=text)
+    if f'node=/dev/dri/{node.name}' not in [part for line in text.splitlines() if line.startswith('fd.dri ') for part in line.split()]:
+        reject('The readback process did not open the admitted GPU node.', details=text)
+    maps = [dict(part.split('=', 1) for part in line.split()[1:] if '=' in part)
+            for line in text.splitlines() if line.startswith('map class=implementation ')]
+    if not maps or any(m.get('same_file') != '1' or m.get('deleted') != '0' or
+                       not m.get('path', '').startswith(prefix + '/') or
+                       (not native and m['path'].startswith('/opt/mesa-m3/25g83/')) for m in maps):
+        reject('The readback loaded a different or replaced Mesa profile.', 'Reboot and log in again after the matched installation.', text)
+    if native:
+        if value('vk.capability') != 'unavailable profile=j613-25g83':
+            reject('The native profile reported an unsupported Vulkan capability.', details=text)
+        vk = 'Vulkan unavailable in the experimental 25G83 profile.'
+    else:
+        if ('apple m3' not in value('vk.device').lower() or value('vk.device_type') != 'integrated-gpu' or
+                value('vk.job') != 'pass words=65536 wrong=0'):
+            reject('Apple GPU Vulkan compute readback failed.', details=text)
+        vk = 'PASS Apple GPU Vulkan (compute readback).'
+    return ['PASS Apple GPU OpenGL (red/blue readback).', vk], text
+
+
+def main():
+    args = sys.argv[1:]
+    if any(arg not in ('--session', '--details') for arg in args):
+        print('usage: aurora-m3-gpu-check [--details]', file=sys.stderr)
+        return 2
+    if '--session' not in args and not os.environ.get('MESA_M3_HOOK_RUN_ID') and os.geteuid() != 0:
+        command = ['systemd-run', '--user', '--pipe', '--wait', '--collect', '--quiet',
+                   '--slice=app-graphical.slice', sys.executable, __file__, '--session']
+        if '--details' in args:
+            command.append('--details')
+        try:
+            return subprocess.run(command).returncode
+        except OSError:
+            print('FAIL: No desktop session launcher was found. Run this check in your desktop terminal.')
+            return 1
+    try:
+        messages, details = verify(Path('/'), os.environ, os.geteuid())
+        print('\n'.join(messages))
+        if '--details' in args:
+            print(details, end='')
+        return 0
+    except CheckError as error:
+        print('FAIL: ' + str(error))
+        print('Next: ' + error.remedy)
+        if '--details' in args and error.details:
+            print(error.details, end='')
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        print('FAIL: GPU check could not complete. Run --m3-report and include this error.')
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+AURORA_M3_GPU_CHECK_PY
+}
+
 desktop_fixes_manifest() { printf '%s' "$DESKTOP_FIXES_DATA" | base64 --decode; }
 desktop_fixes_run() {
   python3 <(desktop_fixes_builtin) "$1" <(desktop_fixes_manifest) "${@:2}"
@@ -6864,6 +8175,155 @@ if __name__ == '__main__':
 AURORA_DESKTOP_FIXES_PY
 }
 
+# A separate T8140 profile keeps the G17 ABI and bootloader out of M3 sessions.
+NEO_GPU=0
+NEO_GPU_PREPARED=0
+NEO_GPU_COMMITTED=0
+NEO_GPU_CONFIG=/etc/mesa-neo
+NEO_MESA_PREFIX=/opt/mesa-neo
+NEO_GPU_PROFILE=j700-g17p-hal200
+NEO_MESA_PACKAGE=""
+NEO_M1N1_PACKAGE=""
+NEO_M1N1_BIN_SHA=""
+
+neo_gpu_plan() {
+  if is_neo && [[ -f $STATE/neo-gpu && -e $NEO_GPU_CONFIG/gpu-experiment ]] &&
+     [[ $(cat "$NEO_GPU_CONFIG/profile" 2>/dev/null) == "$NEO_GPU_PROFILE" ]]; then NEO_GPU=1; fi
+  ((NEO_GPU)) || return 0
+  is_neo && [[ $(this_board) == j700 ]] || die "--neo-gpu requires a MacBook Neo (J700/T8140); nothing was installed"
+  ((M3_GPU_PERSISTENT == 0 && M3_GPU_EXPERIMENT == 0 && M3_TRY == 0)) || die "Neo and M3 GPU options cannot be combined"
+  local pin
+  for pin in "$NEO_MESA_PACKAGE" "$NEO_M1N1_PACKAGE"; do
+    [[ $pin =~ ^[a-zA-Z0-9._+-]+\.pkg\.tar\.zst\ [0-9a-f]{64}$ ]] || die "this installer has no frozen Neo package pair; nothing was installed"
+  done
+  [[ $NEO_M1N1_BIN_SHA =~ ^[0-9a-f]{64}$ ]] || die "this installer has no frozen Neo bootloader; nothing was installed"
+  update_m1n1_frozen && die "update-m1n1 is disabled in $UPDATE_M1N1_CONF; keep that owner setting or remove it before --neo-gpu"
+  command -v update-m1n1 >/dev/null || die "update-m1n1 is required for the Neo profile"
+  esp_bootbin >/dev/null || die "the Neo's existing boot.bin must be mounted before installation"
+  M1N1_PACKAGE=$NEO_M1N1_PACKAGE
+  M1N1_BIN_SHA=$NEO_M1N1_BIN_SHA
+  M1N1_BIN=/usr/lib/m1n1-neo/m1n1.bin
+  NEO_AURORA_M1N1=1
+  PINNED="$PINNED mesa-neo m1n1-neo"
+  say "Installing the matched Neo native OpenGL/Honeykrisp Vulkan profile; preserving this Neo's U-Boot and firmware"
+}
+
+neo_gpu_files() {
+  ((NEO_GPU)) && printf '%s\n' "$NEO_MESA_PACKAGE"
+  return 0
+}
+
+# Both ESP spellings select the same release boot= payload path.
+neo_gpu_stage2_config_check() {
+  local config=$1
+  grep -Eq '^#define (J700_ESP_STAGE2|ESP_STAGE2)$' <<<"$config" &&
+    grep -qx '#define CHAINLOADING' <<<"$config" &&
+    grep -qx '#define RELEASE' <<<"$config" &&
+    ! grep -Eq '^#define (T8140_KIS_PROXY|J700_CDC_PROXY|J613_ESP_STAGE1)$' <<<"$config"
+}
+
+neo_gpu_package_check() {
+  ((NEO_GPU)) || return 0
+  local mesa=$work/${NEO_MESA_PACKAGE%% *} boot=$work/${NEO_M1N1_PACKAGE%% *}
+  [[ $(bsdtar -xOf "$mesa" opt/mesa-neo/share/mesa-neo/profile) == "$NEO_GPU_PROFILE" ]] || die "Neo Mesa profile marker differs; nothing was installed"
+  [[ $(bsdtar -xOf "$boot" usr/share/m1n1-neo/profile) == "$NEO_GPU_PROFILE" ]] || die "Neo bootloader profile marker differs; nothing was installed"
+  local config
+  config=$(bsdtar -xOf "$boot" usr/share/m1n1-neo/build-config.h) || die "Neo bootloader build configuration is missing; nothing was installed"
+  neo_gpu_stage2_config_check "$config" || die "Neo bootloader is not an ESP release stage 2; nothing was installed"
+  local path
+  for path in opt/mesa-neo/libexec/mesa-neo-abi-check opt/mesa-neo/libexec/mesa-neo-loadcheck \
+    opt/mesa-neo/share/vulkan/icd.d/asahi_icd.aarch64.json opt/mesa-neo/bin/mesa-neo-probe; do
+    bsdtar -tf "$mesa" | grep -qx "$path" || die "Neo Mesa lacks $path; nothing was installed"
+  done
+}
+
+neo_gpu_transaction_begin() {
+  ((NEO_GPU)) || return 0
+  local target original_m1n1
+  target=$(esp_bootbin) || die "the Neo's boot.bin disappeared"
+  # Keep the original binary as well as boot.bin: its package may be replaced.
+  original_m1n1=$($sudo bash -c 'M1N1=/usr/lib/asahi-boot/m1n1.bin; [[ ! -f $1 ]] || source "$1"; printf "%s" "$M1N1"' _ "$UPDATE_M1N1_CONF")
+  [[ $original_m1n1 == /* && -f $original_m1n1 && ! -L $original_m1n1 ]] || die "cannot preserve this Neo's original M1N1 binary: $original_m1n1"
+
+  $sudo install -d "$STATE"
+  $sudo python3 - "$STATE/neo-transaction.json" "$UPDATE_M1N1_CONF" "$target" \
+    "$NEO_GPU_CONFIG/profile" "$NEO_GPU_CONFIG/gpu-experiment" "$STATE/neo-gpu" "$original_m1n1" <<'NEO_SNAPSHOT'
+import base64,json,stat,sys
+from pathlib import Path
+rows=[]
+for name in sys.argv[2:]:
+ p=Path(name)
+ if p.exists() or p.is_symlink():
+  info=p.lstat()
+  if not stat.S_ISREG(info.st_mode): raise SystemExit('Neo transaction needs regular files: '+name)
+  rows.append({'path':name,'mode':stat.S_IMODE(info.st_mode),'data':base64.b64encode(p.read_bytes()).decode()})
+ else: rows.append({'path':name,'data':None})
+p=Path(sys.argv[1]);p.write_text(json.dumps(rows));p.chmod(0o600)
+NEO_SNAPSHOT
+  [[ -f $STATE/neo-before.json ]] || $sudo cp "$STATE/neo-transaction.json" "$STATE/neo-before.json"
+  NEO_GPU_PREPARED=1
+  neo_gpu_boot_config
+}
+
+neo_gpu_boot_config() {
+  local tmp
+  tmp=$(mktemp)
+  if [[ -f $UPDATE_M1N1_CONF ]]; then
+    $sudo sed '/^# >>> aurora-sep: Neo stage2$/,/^# <<< aurora-sep: Neo stage2$/d' "$UPDATE_M1N1_CONF" > "$tmp"
+  fi
+  cat >>"$tmp" <<'NEO_BOOT_CONFIG'
+# >>> aurora-sep: Neo stage2
+M1N1=/usr/lib/m1n1-neo/m1n1.bin
+DTBS=$(pacman -Qlq linux-aurora 2>/dev/null | grep '/dtbs/[^/]*\.dtb$' || true)
+# <<< aurora-sep: Neo stage2
+NEO_BOOT_CONFIG
+  $sudo install -Dm644 "$tmp" "$UPDATE_M1N1_CONF"
+  rm -f "$tmp"
+}
+
+neo_gpu_restore() {
+  local snapshot=$1
+  [[ -f $snapshot ]] || return 0
+  $sudo python3 - "$snapshot" <<'NEO_RESTORE'
+import base64,json,os,tempfile,sys
+from pathlib import Path
+for row in json.loads(Path(sys.argv[1]).read_text()):
+ p=Path(row['path'])
+ if row['data'] is None: p.unlink(missing_ok=True);continue
+ p.parent.mkdir(parents=True,exist_ok=True)
+ fd,name=tempfile.mkstemp(prefix='.'+p.name+'.neo-',dir=p.parent)
+ try:
+  with os.fdopen(fd,'wb') as f:
+   f.write(base64.b64decode(row['data']));f.flush();os.fsync(f.fileno())
+  os.chmod(name,row['mode']);os.replace(name,p)
+ finally:
+  if os.path.exists(name):os.unlink(name)
+NEO_RESTORE
+  sync
+}
+
+neo_gpu_activate() {
+  ((NEO_GPU)) || return 0
+  [[ $(cat "$NEO_MESA_PREFIX/share/mesa-neo/profile") == "$NEO_GPU_PROFILE" ]] || die "installed Neo Mesa marker differs"
+  update_m1n1_frozen && die "Neo boot.bin was not rebuilt: update-m1n1 is disabled"
+  m1n1_check_and_record
+  local name uid gid home shell password
+  getent group render >/dev/null || $sudo groupadd --system render
+  while IFS=: read -r name password uid gid password home shell; do
+    [[ $uid =~ ^[0-9]+$ ]] || continue
+    ((uid >= 1000 && uid < 60000)) || continue
+    [[ $shell != */nologin && $shell != */false ]] || continue
+    $sudo usermod -aG render "$name"
+  done < <(getent passwd)
+  $sudo install -d "$NEO_GPU_CONFIG"
+  printf '%s\n' "$NEO_GPU_PROFILE" | $sudo tee "$NEO_GPU_CONFIG/profile" >/dev/null
+  printf '# Experimental Neo GPU selected by the matched installer. Remove this file to use software rendering.\n' | $sudo tee "$NEO_GPU_CONFIG/gpu-experiment" >/dev/null
+  printf '%s\n' "$NEO_GPU_PROFILE" | $sudo tee "$STATE/neo-gpu" >/dev/null
+  NEO_GPU_COMMITTED=1
+  $sudo rm -f "$STATE/neo-transaction.json"
+  say "Neo GPU profile installed. Reboot, then run: /opt/mesa-neo/bin/mesa-neo-probe"
+}
+
 # Tests source this file for its functions only.
 if [[ ${AURORA_SEP_SOURCE_ONLY:-} == 1 ]]; then return 0; fi
 
@@ -6872,16 +8332,30 @@ if [[ ${AURORA_SEP_SOURCE_ONLY:-} == 1 ]]; then return 0; fi
 args=()
 for a in "$@"; do
   case $a in
+    --archive-esp-history) ESP_ARCHIVE_HISTORY=1 ;;
+    --neo-gpu) NEO_GPU=1 ;;
     --m3-handoff) M3_TRY=1 ;;
     --m3-gpu-experiment) M3_GPU_EXPERIMENT=1 ;;
-    --m3-gpu-persistent) M3_GPU_PERSISTENT=1; M3_TRY=1 ;;
-    --m3-profile=j613-25g83) M3_GPU_PROFILE=j613-25g83; M3_GPU_PERSISTENT=1; M3_TRY=1 ;;
+    --m3-gpu) M3_GPU_AUTO=1; M3_GPU_PERSISTENT=1; M3_TRY=1 ;;
+    --m3-gpu-persistent) M3_GPU_EXPLICIT_PROFILE=1; M3_GPU_PERSISTENT=1; M3_TRY=1 ;;
+    --m3-profile=j613-25g83) M3_GPU_EXPLICIT_PROFILE=1; M3_GPU_PROFILE=j613-25g83; M3_GPU_PERSISTENT=1; M3_TRY=1; M3_25_J615=0 ;;
+    # The same 25G83 firmware ABI profile, admitted on a J615 as an experiment.
+    --m3-profile=j615-25g83) M3_GPU_EXPLICIT_PROFILE=1; M3_GPU_PROFILE=j613-25g83; M3_GPU_PERSISTENT=1; M3_TRY=1; M3_25_J615=1 ;;
     --no-m3-mesa) M3_PRO_MESA=0 ;;
     --desktop-fixes) DESKTOP_FIXES=1 ;;
     *) args+=("$a") ;;
   esac
 done
 set -- "${args[@]}"
+if ((ESP_ARCHIVE_HISTORY)) && [[ -n ${1:-} ]]; then
+  die "--archive-esp-history goes with an install; use --esp-history for a read-only inventory"
+fi
+if ((NEO_GPU)) && [[ -n ${1:-} && $1 != --read-only ]]; then
+  die "--neo-gpu goes with an install, not with $1"
+fi
+if ((M3_GPU_AUTO && M3_GPU_EXPLICIT_PROFILE)); then
+  die "use --m3-gpu by itself to detect the profile, or choose one explicit GPU profile"
+fi
 if ((DESKTOP_FIXES)) && [[ -n ${1:-} && $1 != --read-only ]]; then
   die "--desktop-fixes goes with an install (alone or with --read-only), not with $1"
 fi
@@ -6889,13 +8363,13 @@ if ((M3_TRY)) && [[ -n ${1:-} && $1 != --read-only ]]; then
   die "--m3-handoff goes with an install (alone or with --read-only), not with $1"
 fi
 if ((M3_GPU_EXPERIMENT || M3_GPU_PERSISTENT)) && [[ -n ${1:-} && $1 != --read-only ]]; then
-  die "--m3-gpu-experiment goes with an install (alone, with --m3-handoff or with --read-only), not with $1"
+  die "M3 GPU options go with an install (alone, with --m3-handoff or with --read-only), not with $1"
 fi
 if ((!M3_PRO_MESA)) && [[ -n ${1:-} && $1 != --read-only ]]; then
   die "--no-m3-mesa goes with an install (alone, with another install option or with --read-only), not with $1"
 fi
-# One option at a time; only --reset-touchid takes arguments of its own.
-if (($# > 1)) && [[ $1 != --reset-touchid ]]; then
+# One option at a time; these two commands take arguments of their own.
+if (($# > 1)) && [[ $1 != --reset-touchid && $1 != --m3-gpu-check ]]; then
   die "unexpected arguments after $1: ${*:2}"
 fi
 
@@ -6905,8 +8379,10 @@ case ${1:-} in
   --read-only) READ_ONLY=1; install_all ;;
   --uninstall) uninstall_all ;;
   --reset-touchid) shift; reset_touchid "$@" ;;
+  --esp-history) esp_history_run report ;;
   --m3-report) m3_report ;;
   --m3-power-survey) m3_power_survey ;;
+  --m3-gpu-check) shift; m3_gpu_check_run "$@" ;;
   --agent-prompt) release_source >&2; prompt_notice; agent_prompt ;;
-  *) die "unknown option $1 (--read-only, --uninstall, --reset-touchid, --agent-prompt, --m3-report, --m3-power-survey, --m3-handoff, --m3-gpu-experiment, --m3-gpu-persistent, --m3-profile=j613-25g83, --no-m3-mesa or --desktop-fixes)" ;;
+  *) die "unknown option $1 (--read-only, --uninstall, --reset-touchid, --agent-prompt, --m3-report, --m3-power-survey, --neo-gpu, --m3-handoff, --m3-gpu, --m3-gpu-check, --m3-gpu-experiment, --m3-gpu-persistent, --m3-profile=j613-25g83, --m3-profile=j615-25g83, --no-m3-mesa, --archive-esp-history, --esp-history or --desktop-fixes)" ;;
 esac

@@ -79,7 +79,7 @@ void dcp_external_sink_irq(struct apple_dcp *dcp);
 void dcp_queue_typec_reconnect(struct apple_dcp *dcp, unsigned long delay);
 int dcp_dptx_disconnect_drained(struct apple_dcp *dcp, u32 port);
 int dcp_dptx_recover_irq(struct apple_dcp *dcp);
-void dcp_dptx_park(struct apple_dcp *dcp);
+int dcp_dptx_park(struct apple_dcp *dcp);
 int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port);
 
 int iomfb_start_rtkit(struct apple_dcp *dcp);
@@ -99,8 +99,5 @@ void __exit dcp_unregister(void);
 
 int __init dcp_audio_register(void);
 void __exit dcp_audio_unregister(void);
-
-int apple_j613_25g83_coldplug(void);
-unsigned int apple_j613_25g83_clock_hz(void);
 
 #endif

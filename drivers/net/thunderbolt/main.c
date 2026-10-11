@@ -172,6 +172,7 @@ struct tbnet_ring {
  *		     teardown and NAPI enable state.
  * @login_retries: Number of login retries currently done
  * @login_work: Worker to send ThunderboltIP login packets
+ * @rx_refill_work: Worker to reschedule Rx polling after a refill failure
  * @connected_work: Worker that finalizes the ThunderboltIP connection
  *		    setup and enables DMA paths for high speed data
  *		    transfers
@@ -204,6 +205,7 @@ struct tbnet {
 	struct mutex connection_lock;
 	int login_retries;
 	struct delayed_work login_work;
+	struct delayed_work rx_refill_work;
 	struct work_struct connected_work;
 	struct work_struct disconnect_work;
 	struct thunderbolt_ip_frame_header rx_hdr;
@@ -383,6 +385,7 @@ static void tbnet_disable_napi(struct tbnet *net)
 		spin_unlock_bh(&net->poll_lock);
 		net->napi_enabled = false;
 	}
+	cancel_delayed_work_sync(&net->rx_refill_work);
 }
 
 static void tbnet_tear_down(struct tbnet *net, bool send_logout)
@@ -835,6 +838,13 @@ static bool tbnet_check_frame(struct tbnet *net, const struct tbnet_frame *tf,
 	return true;
 }
 
+static void tbnet_rx_refill_work(struct work_struct *work)
+{
+	struct tbnet *net = container_of(work, struct tbnet, rx_refill_work.work);
+
+	napi_schedule(&net->napi);
+}
+
 static int tbnet_poll(struct napi_struct *napi, int budget)
 {
 	struct tbnet *net = container_of(napi, struct tbnet, napi);
@@ -845,7 +855,7 @@ static int tbnet_poll(struct napi_struct *napi, int budget)
 	if (!budget)
 		return 0;
 
-	cleaned_count = tbnet_available_buffers(&net->rx_ring);
+	cleaned_count = TBNET_RING_SIZE - tbnet_available_buffers(&net->rx_ring);
 	dma_dev = tb_ring_dma_device(net->rx_ring.ring);
 
 	while (rx_packets < budget) {
@@ -939,6 +949,11 @@ static int tbnet_poll(struct napi_struct *napi, int budget)
 
 	if (cleaned_count)
 		tbnet_alloc_rx_buffers(net, cleaned_count);
+
+	/* An empty Rx ring cannot interrupt when memory becomes available. */
+	if (tbnet_available_buffers(&net->rx_ring) < TBNET_RING_SIZE)
+		queue_delayed_work(system_wq, &net->rx_refill_work,
+				   msecs_to_jiffies(100));
 
 	if (rx_packets >= budget)
 		return budget;
@@ -1431,6 +1446,7 @@ static int tbnet_probe(struct tb_service *svc, const struct tb_service_id *id)
 
 	net = netdev_priv(dev);
 	INIT_DELAYED_WORK(&net->login_work, tbnet_login_work);
+	INIT_DELAYED_WORK(&net->rx_refill_work, tbnet_rx_refill_work);
 	INIT_WORK(&net->connected_work, tbnet_connected_work);
 	INIT_WORK(&net->disconnect_work, tbnet_disconnect_work);
 	mutex_init(&net->connection_lock);

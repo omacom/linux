@@ -230,7 +230,7 @@ class AirMesaTest(flow.M3FlowBase):
 class M3ProAs123Test(flow.M3FlowBase):
     """The M3 Pro with 12.3's script and with this one: the same commands and files (test_m3_air_
     default.SameAs123Test), and an install's output differs in the recovery text's reason names
-    only. The package version is the fake release's in both, as the release cut's fill sets it."""
+    and undo label only. The package version is the fake release's in both, as the release cut's fill sets it."""
 
     RUN = re.compile(r"run_id=[0-9a-f-]{36}")
 
@@ -247,8 +247,9 @@ class M3ProAs123Test(flow.M3FlowBase):
                     finally:
                         self.installer = flow.INSTALLER
                     out = self.RUN.sub("run_id=<id>", pro.MKTEMP.sub("<tmp>", proc.stdout))
+                    out = pro.refresh_notice(air_default.normalize_undo_label(out))
                     # 12.3's release number read as this one's (its packages, tag and boot.bin copy).
-                    outs.append(out.replace(old_version, flow.VERSION).splitlines())
+                    outs.append(pro.release_text(out, old_version, flow.VERSION).splitlines())
                 changed = [l for l in difflib.unified_diff(outs[0], outs[1], lineterm="", n=0)
                            if l[:1] in "+-" and not l.startswith(("+++", "---"))]
                 self.assertEqual(changed, ["-" + l for l in air_default.REASONS_123.splitlines()]
