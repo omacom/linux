@@ -20,7 +20,7 @@ def regular(path):
     return path
 
 
-def checked_tree(root):
+def checked_tree(root, *, state_metadata=False):
     root = root.absolute()
     for path in (root, *root.parents):
         if path.is_symlink():
@@ -29,6 +29,11 @@ def checked_tree(root):
         raise ValueError(f'directory missing: {root}')
     files = []
     for directory, dirs, names in os.walk(root):
+        if state_metadata and Path(directory) == root:
+            # Saved modules contain header symlinks; archives hold payload bytes.
+            # Neither directory supplies boot-reference metadata.
+            dirs[:] = [name for name in dirs
+                       if not name.startswith('modules-') and name != 'esp-history']
         for name in dirs + names:
             path = Path(directory) / name
             if path.is_symlink():
@@ -47,7 +52,8 @@ def digest(path):
 def references(esp, state):
     refs = ''
     total = 0
-    for path in checked_tree(esp) + (checked_tree(state) if state.exists() else []):
+    for path in checked_tree(esp) + (checked_tree(state, state_metadata=True)
+                                    if state.exists() or state.is_symlink() else []):
         if path.suffix.lower() not in ('.conf', '.cfg', '.json', '.var', '.env') and path.name not in ('BOOTAA64.EFI', 'm1n1-good', 'm1n1-failed'):
             continue
         total += regular(path).stat().st_size
