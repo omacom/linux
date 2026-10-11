@@ -132,7 +132,11 @@ static long run(void) {cases++;return dma_heap_ioctl(&heapfile,DMA_HEAP_IOCTL_AL
 static void no_resources(void) {assert(!refs);for(int i=0;i<32;i++)assert(!slots[i]);assert(!installs);}
 static void success(void) {assert(run()==0);assert(user.fd==4);assert(refs==1);assert(installs==1);assert(traces==1);assert(copy_done);assert(slots[4]==2);}
 int main(int argc,char **argv) {
-    (void)argv;reset();
+    reset();
+    if(argc>1 && !strcmp(argv[1],"published-reuse")) {
+        race_after_install=1;assert(run()==0);assert(slots[4]==3);
+        assert(!foreign_closes&&!refs);assert(installs==1&&traces==1);return 0;
+    }
     if(argc>1) {copy_out_fail=1;assert(run()==-EFAULT);no_resources();return 0;}
     int flags[]={0,O_RDONLY,O_WRONLY,O_RDWR,O_CLOEXEC,O_CLOEXEC|O_WRONLY,O_CLOEXEC|O_RDWR};
     for(unsigned i=0;i<ARRAY_SIZE(flags);i++){reset();user.fd_flags=flags[i];success();assert(allocated_len==PAGE_SIZE);}
@@ -212,7 +216,8 @@ def main():
             binary=source.with_suffix('')
             command=[args.cc,'-std=gnu11','-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer',f'-DPAGE_SIZE={page}',str(source),'-o',str(binary)]
             subprocess.run(command,check=True)
-            run=subprocess.run([str(binary)]+(['old-negative'] if name=='original' else []),capture_output=True,text=True)
+            mode=['old-negative'] if name=='original' else ['published-reuse'] if name=='close-reused-fd' else []
+            run=subprocess.run([str(binary)]+mode,capture_output=True,text=True)
             (args.out/f'{name}-{page}.log').write_text(run.stdout+run.stderr)
             assert (run.returncode==0)==(name=='positive'),(name,page,run.returncode)
             results[f'{name}-{page}']={'exit':run.returncode,'compiled_source_sha256':digest(source.read_text()),'stdout':run.stdout.strip()}
