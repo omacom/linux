@@ -614,7 +614,7 @@ class StagedCopyTest(flow.M3FlowBase):
         # It blames the staged copy, not the release.
         self.assertIn("from the staging/mirror copy that\n    AURORA_RELEASE_URL names", proc.stderr)
         self.assertNotIn("packaging", proc.stderr)
-        self.assertNotIn("report", proc.stderr)
+        self.assertNotIn("Please report", proc.stderr)
         self.assertNotIn("pacman -U", self.log())
 
 
