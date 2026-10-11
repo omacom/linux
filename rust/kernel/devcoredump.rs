@@ -187,8 +187,8 @@ pub fn dev_coredump<'a, T, D>(
     gfp: alloc::Flags,
     timeout: Jiffies,
 ) where
-    // The dump outlives the caller and gets dropped from a workqueue.
-    T: ForeignOwnable<Borrowed<'a>: Deref<Target = D>> + Send + 'static,
+    // The owner is borrowed concurrently and dropped later from a workqueue.
+    T: ForeignOwnable<Borrowed<'a>: Deref<Target = D>> + Send + Sync + 'static,
     D: DevCoreDump + Sync,
 {
     // SAFETY: `dev` and `module` are valid, and the core takes its own references to them. The
