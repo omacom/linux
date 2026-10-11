@@ -810,6 +810,7 @@ fn build_images(
         timestamp_base: Some(crate::agx_memory::TIMESTAMP_RANGE.start),
         reference_ppm: true,
         runtime_hwdata_b: Some(runtime_hwdata_b),
+        per_cluster_voltages: soc.per_cluster_voltages,
     };
     let c = initdata::InitDataBuilderG15V14_8_3::g15_contents(cfg, &dyncfg, &g15).inspect_err(|e| {
         dev_err!(dev, "M3: cannot build InitData from the device tree ({:?})\n", e)

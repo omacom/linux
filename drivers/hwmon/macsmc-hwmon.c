@@ -89,6 +89,23 @@ static const struct macsmc_hwmon_board {
 		.die_keys = "Tf04,Tf09,Tf0A,Tf0B,Tf0D,Tf0E,Tf14,Tf18,Tf19,Tf1A,Tf24,Tf25,Tf2A,Tf2B",
 		.pressure_key = "mTPL",
 	},
+	/*
+	 * MacBook Pro (14-inch and 16-inch, M3 Max): the same key family in
+	 * five groups. On a J516C every one of these keys read a die
+	 * temperature (47-62 C at idle); the keys ending in D and E repeated
+	 * the one ending in 4 and are left out. The J514C list is assumed to
+	 * be the same; keys the SMC does not have are skipped.
+	 */
+	{
+		.compatible = "apple,j516c",
+		.die_keys = "Tf04,Tf06,Tf09,Tf0A,Tf0B,Tf14,Tf16,Tf19,Tf1A,Tf1B,Tf24,Tf26,Tf29,Tf2A,Tf2B,"
+			    "Tf34,Tf36,Tf39,Tf3A,Tf3B,Tf44,Tf46,Tf49,Tf4A,Tf4B",
+	},
+	{
+		.compatible = "apple,j514c",
+		.die_keys = "Tf04,Tf06,Tf09,Tf0A,Tf0B,Tf14,Tf16,Tf19,Tf1A,Tf1B,Tf24,Tf26,Tf29,Tf2A,Tf2B,"
+			    "Tf34,Tf36,Tf39,Tf3A,Tf3B,Tf44,Tf46,Tf49,Tf4A,Tf4B",
+	},
 };
 
 static bool macsmc_hwmon_is_m3(void)

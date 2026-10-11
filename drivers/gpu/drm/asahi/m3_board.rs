@@ -30,18 +30,30 @@ pub(crate) fn runtime_validated_board(soc: &Soc) -> bool {
     soc.validated_boards.iter().any(|board| board_is(board))
 }
 
-/// Whether the fused core-enable mask (SGX+0xe01500) describes a usable GPU of `soc`: at least
-/// one core, and no core outside its core slots (2 x 10 on T6030). The mask varies with the SKU
-/// (0x6f5fc on a 14-core T6030, 0x7fdff on an 18-core one); absent cores must never be enabled.
-pub(crate) fn core_mask_valid(soc: &Soc, mask: u32) -> bool {
-    mask != 0 && mask >> (soc.cores_per_cluster * soc.clusters) == 0
+/// The number of core slots of `soc` (2 x 10 on T6030, 4 x 10 on T6031).
+pub(crate) fn core_slots(soc: &Soc) -> u32 {
+    soc.cores_per_cluster * soc.clusters
 }
 
-/// Per-cluster UAPI core masks for a core-enable mask of `soc`.
-pub(crate) fn core_masks(soc: &Soc, mask: u32) -> [u32; uapi::DRM_ASAHI_MAX_CLUSTERS as usize] {
+/// Whether the core-enable mask describes a usable GPU of `soc`: at least one core, and no core
+/// outside its core slots. The mask is the fused core-enable words from SGX+0xe01500, the second
+/// word as bits 32..63 when the SoC has more than 32 core slots. It varies with the SKU (0x6f5fc
+/// on a 14-core T6030, 0x7fdff on an 18-core one); absent cores must never be enabled.
+pub(crate) fn core_mask_valid(soc: &Soc, mask: u64) -> bool {
+    let slots = core_slots(soc);
+    mask != 0 && slots <= 64 && (slots == 64 || mask >> slots == 0)
+}
+
+/// Per-cluster UAPI core masks for a core-enable mask of `soc`: consecutive fields of
+/// `cores_per_cluster` bits, cluster 0 lowest, across the word boundary (the packing the
+/// identification code uses for every multi-word mask, `regs.rs`).
+pub(crate) fn core_masks(soc: &Soc, mask: u64) -> [u32; uapi::DRM_ASAHI_MAX_CLUSTERS as usize] {
     let mut masks = [0; uapi::DRM_ASAHI_MAX_CLUSTERS as usize];
+    let width = soc.cores_per_cluster.min(32);
+    let field = (1u64 << width) - 1;
     for (cluster, slot) in masks.iter_mut().enumerate().take(soc.clusters as usize) {
-        *slot = (mask >> (cluster as u32 * soc.cores_per_cluster)) & ((1 << soc.cores_per_cluster) - 1);
+        let shift = cluster as u32 * soc.cores_per_cluster;
+        *slot = mask.checked_shr(shift).map_or(0, |m| (m & field) as u32);
     }
     masks
 }
@@ -61,8 +73,10 @@ pub(crate) fn max_frequency_khz(pdev: &platform::Device<Core>) -> Option<u32> {
 }
 
 /// The shape of the performance-state table the device tree's operating points give: states
-/// above the off state and the highest frequency in MHz (`t8122_admission::opp_table_shape`,
-/// with the highest `opp-microvolt` cell of each point). None without a readable OPP table.
+/// above the off state and the highest frequency in MHz (`t8122_admission::opp_table_shape`).
+/// Every cluster of a point must have the same voltage, except on a SoC with per-cluster
+/// voltages, where the highest `opp-microvolt` cell orders the point. None without a readable
+/// OPP table.
 pub(crate) fn opp_table_shape(pdev: &platform::Device<Core>, soc: &Soc) -> Option<(u32, u32)> {
     let node = pdev.as_ref().of_node()?;
     let opps = node.parse_phandle(c_str!("operating-points-v2"), 0)?;
@@ -72,11 +86,18 @@ pub(crate) fn opp_table_shape(pdev: &platform::Device<Core>, soc: &Soc) -> Optio
         let microvolt = opp.get_property::<KVec<u32>>(c_str!("opp-microvolt")).ok()?;
         let mv = microvolt.first()?.div_ceil(1000);
         if microvolt.len() != soc.clusters as usize
-            || microvolt.iter().any(|uv| uv.div_ceil(1000) != mv)
+            || (!soc.per_cluster_voltages && microvolt.iter().any(|uv| uv.div_ceil(1000) != mv))
         {
             return None;
         }
-        points.push((hz, *microvolt.first()?), GFP_KERNEL).ok()?;
+        // With per-cluster voltages a point is ordered by its highest cluster voltage, as the
+        // published tables are (`initdata::PStateTables`).
+        let uv = if soc.per_cluster_voltages {
+            *microvolt.iter().max()?
+        } else {
+            *microvolt.first()?
+        };
+        points.push((hz, uv), GFP_KERNEL).ok()?;
     }
     crate::t8122_admission::opp_table_shape(points)
 }

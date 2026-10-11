@@ -7,7 +7,8 @@
 //! states indices of the published performance-state table.
 
 /// Required thermal-zone bits: SMC die (bit 0), PMP hotspot (bit 1).
-/// A missing or malformed compatible list requires both zones.
+/// A missing or malformed compatible list requires both zones. The M3 Max MacBook Pros (J514C,
+/// J516C) require the SMC die zone: their PMP does not run, so it has no hotspot zone.
 pub(crate) fn required_zones(compatible: &[u8]) -> u32 {
     if compatible.is_empty() || compatible.last() != Some(&0) {
         return 3;
@@ -16,6 +17,8 @@ pub(crate) fn required_zones(compatible: &[u8]) -> u32 {
     if has(b"apple,j514s") || has(b"apple,j516s") {
         3
     } else if has(b"apple,t8122") || has(b"apple,j613") || has(b"apple,j615") {
+        1
+    } else if has(b"apple,j514c") || has(b"apple,j516c") {
         1
     } else {
         0
@@ -269,6 +272,17 @@ mod zone_tests {
         }
         assert_eq!(required_zones(b"apple,j613\0"), 1);
         assert_eq!(required_zones(b"apple,j615\0"), 1);
+    }
+
+    #[test]
+    fn m3_max_boards_require_the_die_zone() {
+        for board in ["j514c", "j516c"] {
+            let compatible = format!("apple,{board}\0apple,t6031\0apple,arm-platform\0");
+            assert_eq!(required_zones(compatible.as_bytes()), 1);
+        }
+        // The 14-core M3 Max (T6034) boards have no entry yet.
+        assert_eq!(required_zones(b"apple,j516m\0apple,t6034\0apple,arm-platform\0"), 0);
+        assert_eq!(required_zones(b"apple,j516c"), 3);
     }
 
     #[test]

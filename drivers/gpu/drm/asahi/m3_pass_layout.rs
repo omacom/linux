@@ -60,6 +60,19 @@ pub(crate) struct Allocation {
 pub(crate) enum Error {Slot,Address,Clusters}
 /// GPU clusters of the qualified layout (G15S, two clusters).
 pub(crate) const QUALIFIED_CLUSTERS:u32=2;
+/// The most GPU clusters the layout holds: four (G15C, T6031). Only the three preemption buffers
+/// grow with the clusters. Their start addresses stay the qualified ones, so with more than two
+/// clusters each grows past the end of its 16 KiB page into the next page of the same pass slot:
+/// slot `s` (stride 0x118000) holds, with four clusters,
+/// - Preemption0: 0x1006083580 + s * 0x118000, 0x1500 bytes (pages 0x1006080000..0x1006088000);
+/// - Preemption1: 0x100609bb00 + s * 0x118000, 0xa00 bytes (pages 0x1006098000..0x10060a0000);
+/// - Preemption2: 0x10060b3f80 + s * 0x118000, 0x100 bytes (pages 0x10060b0000..0x10060b8000).
+///
+/// Each stays below the next field of its slot (Preemption1, Preemption2, TPC at 0x10060c8000),
+/// and every pass slot stays inside the 128 MiB render-graph aperture at 0x1000000000 that
+/// userspace reserves for the M3 runtime (`m3_runtime::Runtime::new_vm`), so no userspace
+/// reservation changes with the cluster count.
+pub(crate) const MAX_CLUSTERS:u32=4;
 /// Per-cluster sizes of the three tiler preemption buffers: the qualified sizes (2688, 1280,
 /// 128) are two clusters of the T6030 preempt1/2/3 sizes. The start addresses are kept, so
 /// fewer clusters use a prefix of the same page.
@@ -74,14 +87,14 @@ pub(crate) fn allocation(slot:usize,field:Field)->Result<Allocation,Error> {
 }
 /// Preserve all fixed virtual addresses, sizes, permission bits and aliases.
 /// The caller controls allocation order and lifetime; the layout owns no memory.
-/// Only the preemption buffers scale with the GPU cluster count (1 or 2); every other
-/// allocation is the qualified two-cluster one.
+/// Only the preemption buffers scale with the GPU cluster count (1 to [`MAX_CLUSTERS`]); every
+/// other allocation is the qualified two-cluster one.
 pub(crate) fn board_allocation(slot:usize,field:Field,clusters:u32)->Result<Allocation,Error> {
     use Field::*;
     use Space::*;
     use Access::*;
     if slot>=SLOTS {return Err(Error::Slot);}
-    if clusters==0 || clusters>QUALIFIED_CLUSTERS {return Err(Error::Clusters);}
+    if clusters==0 || clusters>MAX_CLUSTERS {return Err(Error::Clusters);}
     let preemption=|i:usize|PREEMPTION_PER_CLUSTER[i]*clusters as usize;
     let (base,stride,size,space,access,alias)=match field {
         FragmentStart=>(0xfffffc20700f3ff8,0x74000,8,Firmware,GpuFirmwareUncachedRw,None),
@@ -124,4 +137,81 @@ pub(crate) fn board_allocation(slot:usize,field:Field,clusters:u32)->Result<Allo
     // Both roots must retain matching 16-KiB page offsets for coherent backing.
     if gpu_alias.is_some_and(|alias|alias&0x3fff!=address&0x3fff) {return Err(Error::Address);}
     Ok(Allocation {address,space,size,access,gpu_alias})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn span(a:&Allocation)->(u64,u64) {(a.address,a.address+a.size as u64)}
+
+    #[test]
+    fn one_and_two_clusters_are_the_qualified_layout() {
+        for slot in 0..SLOTS {
+            for field in FIELDS {
+                let two=board_allocation(slot,field,2).unwrap();
+                assert_eq!(allocation(slot,field).unwrap(),two);
+                let one=board_allocation(slot,field,1).unwrap();
+                assert_eq!(one.address,two.address);
+                match field {
+                    Field::Preemption0|Field::Preemption1|Field::Preemption2=>assert_eq!(one.size*2,two.size),
+                    _=>assert_eq!(one,two),
+                }
+            }
+        }
+        // The qualified sizes and the page ends they reach.
+        let p=|f|board_allocation(0,f,2).unwrap();
+        assert_eq!(span(&p(Field::Preemption0)),(0x1006083580,0x1006084000));
+        assert_eq!(span(&p(Field::Preemption1)),(0x100609bb00,0x100609c000));
+        assert_eq!(span(&p(Field::Preemption2)),(0x10060b3f80,0x10060b4000));
+    }
+
+    #[test]
+    fn four_clusters_only_grow_the_preemption_buffers() {
+        let p=|s,f|board_allocation(s,f,4).unwrap();
+        assert_eq!(span(&p(0,Field::Preemption0)),(0x1006083580,0x1006084a80));
+        assert_eq!(span(&p(0,Field::Preemption1)),(0x100609bb00,0x100609c500));
+        assert_eq!(span(&p(0,Field::Preemption2)),(0x10060b3f80,0x10060b4080));
+        assert_eq!(span(&p(15,Field::Preemption0)),(0x1006083580+15*0x118000,0x1006084a80+15*0x118000));
+        for slot in 0..SLOTS {
+            for field in FIELDS {
+                let four=p(slot,field);
+                let two=board_allocation(slot,field,2).unwrap();
+                assert_eq!(four.address,two.address);
+                assert_eq!(four.gpu_alias,two.gpu_alias);
+                assert_eq!(four.access,two.access);
+                match field {
+                    Field::Preemption0|Field::Preemption1|Field::Preemption2=>assert_eq!(four.size,2*two.size),
+                    _=>assert_eq!(four.size,two.size),
+                }
+            }
+        }
+        assert_eq!(board_allocation(0,Field::Tpc,5),Err(Error::Clusters));
+        assert_eq!(board_allocation(0,Field::Tpc,0),Err(Error::Clusters));
+    }
+
+    #[test]
+    fn four_cluster_client_pages_never_overlap() {
+        // Every client-GPU allocation of every slot, as the 16 KiB pages it is mapped with.
+        let mut pages=Vec::new();
+        for slot in 0..SLOTS {
+            for field in FIELDS {
+                let a=board_allocation(slot,field,MAX_CLUSTERS).unwrap();
+                if a.space!=Space::ClientGpu {continue;}
+                let start=a.address&!0x3fff;
+                let end=(a.address+a.size as u64+0x3fff)&!0x3fff;
+                pages.push((start,end,slot,field));
+            }
+        }
+        pages.sort_by_key(|p|(p.0,p.1));
+        for w in pages.windows(2) {
+            assert!(w[0].1<=w[1].0,"{:?} overlaps {:?}",w[0],w[1]);
+        }
+        // The render-graph slots stay inside the aperture userspace reserves.
+        for &(start,end,_,field) in &pages {
+            if (0x10_0000_0000..0x10_0800_0000).contains(&start) {
+                assert!(end<=0x10_0800_0000,"{:?}",field);
+            }
+        }
+    }
 }
