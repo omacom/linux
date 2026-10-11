@@ -142,9 +142,9 @@ pub(crate) static T8122_LAYOUT: Layout = Layout {
 
 /// The T6031 firmware-compat 14.8.3 segment sizes and VAs, from the J516C ADT (iop-gfx-nub0
 /// segment-ranges: TEXT 0x64000 and DATA 0x140000 at the VAs both other layouts use). Neither
-/// existing layout matches them. Groundwork only, read by nothing: the boot-entropy tag offset
-/// and the version of the loaded image are not known yet (0 and "unknown" stand for them).
-#[allow(dead_code)]
+/// existing layout matches them. The boot-entropy tag offset is not known (0 stands for it);
+/// an armed start searches the loaded text for the tag. The loaded image's version string is
+/// not known ("unknown" stands for it).
 pub(crate) const T6031_LAYOUT: Layout = Layout {
     text_size: 0x64000,
     data_size: 0x14_0000,
@@ -198,6 +198,7 @@ pub(crate) fn identify_loaded(
     soc: &'static crate::m3_soc::Soc,
     resources: agx_resources::Resources,
     experiment: Option<&crate::t8122_start::Experiment>,
+    t6031: Option<&crate::t6031_start::Experiment>,
 ) -> kernel::error::Result<Firmware> {
     use kernel::{
         bindings, c_str,
@@ -219,6 +220,21 @@ pub(crate) fn identify_loaded(
     let bytes = unsafe { core::slice::from_raw_parts(mapping.ptr(), mapping.size()) };
     let mut canonical = KVec::new();
     canonical.extend_from_slice(bytes, GFP_KERNEL)?;
+    // An armed T6031 searches the loaded text for its boot-entropy tag. The layout's offset is
+    // a placeholder, so the T8122 image table must not see this image.
+    if let Some(experiment) = t6031 {
+        experiment.normalize_text(&mut canonical)?;
+        let mut digest = [0u8; 32];
+        // SAFETY: the initialized private copy and distinct digest live for the synchronous
+        // SHA-256 call. Normalization never writes the loaded firmware.
+        unsafe { bindings::sha256(canonical.as_ptr(), canonical.len(), digest.as_mut_ptr()) };
+        experiment.admit_image(pdev.as_ref(), bytes, &digest)?;
+        return Ok(Firmware {
+            resources,
+            initdata_magic: experiment.initdata_version(),
+            layout,
+        });
+    }
     if !normalize_boot_entropy(layout, &mut canonical) {
         return Err(ENODEV);
     }

@@ -279,24 +279,33 @@ impl Contents {
     /// any GPU register is touched.
     ///
     /// `experiment` is the T8122 start experiment's values (`t8122_start`), on an armed T8122
-    /// only; it then stands in for the SoC table's missing ones.
+    /// only; it then stands in for the SoC table's missing ones. `t6031` is the same for an
+    /// armed T6031 (`t6031_start`).
     pub(crate) fn select(
         pdev: &platform::Device<Core>,
         firmware: &Firmware,
         soc: &Soc,
         experiment: Option<&Experiment>,
+        t6031: Option<&crate::t6031_start::Experiment>,
     ) -> Result<Self> {
         let dev = pdev.as_ref();
         let param = m3_params::initdata_param();
-        check_version(dev, firmware, experiment)?;
+        check_version(dev, firmware, experiment, t6031)?;
         let iomaps = match experiment {
             Some(e) => e.iomaps(),
-            None => soc.iomaps.ok_or(ENODEV)?,
+            None => match t6031 {
+                Some(e) => e.iomaps(),
+                None => soc.iomaps.ok_or(ENODEV)?,
+            },
         };
         storage::validate_iomaps(iomaps).map_err(|_| EINVAL)?;
-        let images = build_images(dev, firmware, soc, experiment, iomaps)?;
+        let images = build_images(dev, firmware, soc, experiment, t6031, iomaps)?;
         let hwdata = images.get(HWDATA).and_then(|i| i.as_deref()).ok_or(EINVAL)?;
-        let pstates = PstatePolicy::new(dev, hwdata, experiment.map(|e| e.pstate_cap()))?;
+        let pstates = PstatePolicy::new(
+            dev,
+            hwdata,
+            experiment.map(|e| e.pstate_cap()).or_else(|| t6031.map(|e| e.pstate_cap())),
+        )?;
         let table = match soc.pstates {
             PstateTable::Fixed { states, top_mhz } => (states, top_mhz),
             PstateTable::DeviceTree => crate::m3_board::opp_table_shape(pdev, soc).ok_or_else(|| {
@@ -351,8 +360,15 @@ impl Contents {
             pstates.max,
             pstates.max_mhz
         );
-        let read_only_slots = experiment.map_or(0, |e| e.read_only_slots());
-        Ok(Contents { images, pstates, iomaps, table, read_only_slots, hwdata_object: soc.hwdata_object })
+        let read_only_slots = experiment
+            .map(|e| e.read_only_slots())
+            .or_else(|| t6031.map(|e| e.read_only_slots()))
+            .unwrap_or(0);
+        let hwdata_object = match t6031 {
+            Some(e) => e.hwdata_object(),
+            None => soc.hwdata_object,
+        };
+        Ok(Contents { images, pstates, iomaps, table, read_only_slots, hwdata_object })
     }
 
     /// Check the contents before they are uploaded.
@@ -398,12 +414,26 @@ pub(crate) fn constructed_version() -> Result<u64> {
 /// Refuse to go on when the InitData root the runtime constructs carries another version than
 /// the loaded firmware expects. The T8122 start experiment gives the firmware the version of
 /// `asahi.t8122_initdata_version` instead (`m3_config::Config::new` writes it into the root).
-fn check_version(dev: &device::Device, firmware: &Firmware, experiment: Option<&Experiment>) -> Result {
+fn check_version(
+    dev: &device::Device,
+    firmware: &Firmware,
+    experiment: Option<&Experiment>,
+    t6031: Option<&crate::t6031_start::Experiment>,
+) -> Result {
     let version = constructed_version()?;
     if version != firmware.initdata_magic && experiment.is_some() {
         dev_warn!(
             dev,
             "M3 G15G start: InitData version {:#x} (asahi.t8122_initdata_version) replaces the constructed {:#x}\n",
+            firmware.initdata_magic,
+            version
+        );
+        return Ok(());
+    }
+    if version != firmware.initdata_magic && t6031.is_some() {
+        dev_warn!(
+            dev,
+            "M3 G15C start: InitData version {:#x} replaces the constructed {:#x}\n",
             firmware.initdata_magic,
             version
         );
@@ -437,14 +467,18 @@ pub(crate) fn stop_before_asc(dev: &device::Device) -> bool {
 /// The GPU identity the runtime backend admits for `soc` (its SGX ID words, checked in
 /// `m3_device` before the firmware starts): on T6030, G15, variant S, revision B1, one die with
 /// two clusters of ten core slots.
-fn soc_identity(soc: &Soc, cfg: &'static hw::HwConfig) -> hw::GpuIdConfig {
+fn soc_identity(
+    soc: &Soc,
+    cfg: &'static hw::HwConfig,
+    rev_id: Option<hw::GpuRevisionID>,
+) -> hw::GpuIdConfig {
     hw::GpuIdConfig {
         gpu_gen: hw::GpuGen::G15,
         gpu_variant: soc.gpu_variant,
         usc_generation: 3,
         gpu_hal_generation: hw::GpuHalGeneration::Legacy,
         gpu_rev: soc.gpu_revision,
-        gpu_rev_id: soc.gpu_revision_id,
+        gpu_rev_id: rev_id.unwrap_or(soc.gpu_revision_id),
         num_dies: cfg.num_dies,
         num_clusters: cfg.max_num_clusters,
         num_cores: cfg.max_num_cores,
@@ -521,6 +555,7 @@ fn fill_io_mappings(
     dev: &device::Device,
     cfg: &'static hw::HwConfig,
     experiment: Option<&Experiment>,
+    t6031: Option<&crate::t6031_start::Experiment>,
     mappings: &[IoMapping],
     iomaps: &[storage::IoMap],
     hwdata: &mut [u8],
@@ -533,7 +568,11 @@ fn fill_io_mappings(
         let virt = entry + offset_of!(raw::IOMapping, virt_addr);
         // The same register block as the manager's table.
         let same_block = cfg.io_mappings.get(slot).and_then(|m| m.as_ref()).is_some_and(|m| {
-            let base = experiment.map_or(m.base as u64, |e| e.io_block(slot, m.base as u64));
+            let base = match (experiment, t6031) {
+                (Some(e), _) => e.io_block(slot, m.base as u64),
+                (None, Some(e)) => e.io_block(slot, m.base as u64),
+                (None, None) => m.base as u64,
+            };
             base & !0x3fff == phys & !0x3fff && m.writable == writable
         });
         let covered = iomaps.iter().any(|io| {
@@ -734,19 +773,29 @@ fn build_images(
     firmware: &Firmware,
     soc: &Soc,
     experiment: Option<&Experiment>,
+    t6031: Option<&crate::t6031_start::Experiment>,
     iomaps: &[storage::IoMap],
 ) -> Result<KVec<Option<KVVec<u8>>>> {
     check_layout().inspect_err(|_| {
         dev_err!(dev, "M3: the constructed InitData records do not match the G15 InitData structures\n")
     })?;
-    let cfg: &'static hw::HwConfig = soc.hwcfg.ok_or(ENODEV)?;
+    let cfg: &'static hw::HwConfig = match t6031 {
+        Some(e) => e.hwcfg(),
+        None => soc.hwcfg.ok_or(ENODEV)?,
+    };
     let io_mappings = match experiment {
         Some(e) => e.io_mappings(),
-        None => soc.io_mappings.ok_or(ENODEV)?,
+        None => match t6031 {
+            Some(e) => e.io_mappings(),
+            None => soc.io_mappings.ok_or(ENODEV)?,
+        },
     };
     let runtime_hwdata_b = match experiment {
         Some(e) => e.hwdata_b(),
-        None => soc.hwdata_b.ok_or(ENODEV)?,
+        None => match t6031 {
+            Some(e) => e.hwdata_b(),
+            None => soc.hwdata_b.ok_or(ENODEV)?,
+        },
     };
     let mut pwr = hw::PwrConfig::load(dev, cfg).inspect_err(|e| {
         dev_err!(dev, "M3: cannot read the GPU power configuration from the device tree ({:?})\n", e)
@@ -775,7 +824,11 @@ fn build_images(
     }
     // A SoC whose power model is still a stand-in caps the power target: every operating point's
     // power is scaled by the same factor, so the relative powers stay the boot loader's.
-    if let Some(cap) = soc.power_target_cap_mw {
+    let power_cap_mw = match t6031 {
+        Some(e) => Some(e.power_cap_mw()),
+        None => soc.power_target_cap_mw,
+    };
+    if let Some(cap) = power_cap_mw {
         let max = pwr.max_power_mw;
         if max > cap {
             for ps in pwr.perf_states.iter_mut() {
@@ -793,7 +846,7 @@ fn build_images(
     let node = dev.of_node().ok_or(ENODEV)?;
     let dyncfg = hw::DynConfig {
         uat_ttb_base: firmware.resources.regions[0].base,
-        id: soc_identity(soc, cfg),
+        id: soc_identity(soc, cfg, t6031.and_then(|e| e.revision_id())),
         pwr,
         firmware_version: node
             .get_property::<KVec<u32>>(c_str!("apple,firmware-version"))
@@ -852,6 +905,12 @@ fn build_images(
         write(&mut hwdata, offset_of!(B, unit_mask_a), &a.to_le_bytes())?;
         write(&mut hwdata, offset_of!(B, unit_mask_b), &b.to_le_bytes())?;
         dev_info!(dev, "M3 G15G start: HwDataB unit masks +0x17c0 {:#x}, +0x17c8 {:#x}\n", a, b);
+    } else if let Some(e) = t6031 {
+        type B = raw::HwDataBG15V14_8_3;
+        let (a, b) = e.unit_masks();
+        write(&mut hwdata, offset_of!(B, unit_mask_a), &a.to_le_bytes())?;
+        write(&mut hwdata, offset_of!(B, unit_mask_b), &b.to_le_bytes())?;
+        dev_info!(dev, "M3 G15C start: HwDataB unit masks +0x17c0 {:#x}, +0x17c8 {:#x}\n", a, b);
     }
     write(&mut hwdata, HWDATA_A, initdata::raw_bytes(&*c.hwdata_a))?;
     // The system counter value at InitData creation, the base of the firmware's first power and
@@ -877,6 +936,14 @@ fn build_images(
             m.fast_die,
             m.alarm
         );
+    } else if let Some(e) = t6031 {
+        let (fast, alarm) = e.mtr_masks(dev)?;
+        type A = raw::HwDataAG15V14_8_3;
+        for at in [offset_of!(A, fast_die0_sensor_mask), offset_of!(A, fast_die0_sensor_mask_2)] {
+            write(&mut hwdata, HWDATA_A + at, &fast.to_le_bytes())?;
+        }
+        write(&mut hwdata, HWDATA_A + offset_of!(A, fast_die0_sensor_mask_alt), &alarm.to_le_bytes())?;
+        dev_info!(dev, "M3: MTR sensor masks: fast-die {:#x}, alarm {:#x}\n", fast, alarm);
     }
     // The second leakage fuse value: the first entry of HwDataA's third leakage table (the first
     // table holds the core coefficient, from the builder).
@@ -885,8 +952,17 @@ fn build_images(
         let at = HWDATA_A + offset_of!(A, cluster_tables) + 2 * size_of::<[u32; 8]>();
         write(&mut hwdata, at, &second.to_bits().to_le_bytes())?;
     }
-    // The SoC's own values for words the shared builder writes otherwise.
-    for &(at, value) in soc.hwdata_words {
+    // The SoC's own values for words the shared builder writes otherwise. An armed T6031 copies
+    // the T8122 words only when asahi.t6031_fw_words=t8122.
+    let (hwdata_words, globals_words): (&[(usize, u32)], &[(usize, u32)]) = match t6031 {
+        Some(e) if e.fw_words() => (
+            &crate::m3_soc::T8122_HWDATA_WORDS,
+            &crate::m3_soc::T8122_GLOBALS_WORDS,
+        ),
+        Some(_) => (&[], &[]),
+        None => (soc.hwdata_words, soc.globals_words),
+    };
+    for &(at, value) in hwdata_words {
         write(&mut hwdata, at, &value.to_le_bytes())?;
     }
     // On T8122, log and require the two HwDataB words the firmware's power management depends
@@ -904,7 +980,7 @@ fn build_images(
             return Err(EINVAL);
         }
     }
-    fill_io_mappings(dev, cfg, experiment, io_mappings, iomaps, &mut hwdata)?;
+    fill_io_mappings(dev, cfg, experiment, t6031, io_mappings, iomaps, &mut hwdata)?;
     images[HWDATA] = Some(hwdata);
 
     let mut globals = zeroed(GLOBALS)?;
@@ -912,15 +988,15 @@ fn build_images(
     // The gate of the firmware's frequency-feedback cap, per SoC.
     let (ut, given) = m3_params::ut_engagement(soc);
     write(&mut globals, offset_of!(raw::GlobalsG15V14_8_3, ut_engagement), &ut.to_le_bytes())?;
-    for &(at, value) in soc.globals_words {
+    for &(at, value) in globals_words {
         write(&mut globals, at, &value.to_le_bytes())?;
     }
-    if !soc.hwdata_words.is_empty() || !soc.globals_words.is_empty() {
+    if !hwdata_words.is_empty() || !globals_words.is_empty() {
         dev_info!(
             dev,
             "M3: {} HwData and {} Globals words set from the {} table\n",
-            soc.hwdata_words.len(),
-            soc.globals_words.len(),
+            hwdata_words.len(),
+            globals_words.len(),
             soc.name
         );
     }

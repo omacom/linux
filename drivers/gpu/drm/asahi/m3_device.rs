@@ -37,9 +37,10 @@ pub(crate) struct Device {
 
 impl Device {
     /// `experiment` is the T8122 start experiment's values, on an armed T8122 only: it decides
-    /// the SGX setup write, which the T8122 table lacks.
+    /// the SGX setup write, which the T8122 table lacks. `t6031` is the same for an armed T6031.
     pub(crate) fn new(pdev: &platform::Device<Core>, firmware: Firmware, soc: &'static Soc,
-        experiment: Option<&crate::t8122_start::Experiment>) -> Result<Self> {
+        experiment: Option<&crate::t8122_start::Experiment>,
+        t6031: Option<&crate::t6031_start::Experiment>) -> Result<Self> {
         // Map ASC before taking a vote. The larger SGX aperture contains
         // this control window and the separate mailbox provider, so it is
         // mapped without a conflicting claim over those child resources.
@@ -62,7 +63,8 @@ impl Device {
         dev_info!(pdev.as_ref(), "M3: SGX aperture mapped\n");
         let pmp = crate::m3_board::has_pmp_link(pdev);
         let t8122 = crate::t8122_start::is_t8122(soc);
-        if pmp && !t8122 {
+        let t6031_soc = crate::t6031_start::is_t6031(soc);
+        if pmp && !t8122 && !t6031_soc {
             dev_err!(pdev.as_ref(), "M3: optional apple,pmp GPU link is unsupported\n");
             return Err(ENOTSUPP);
         }
@@ -101,7 +103,11 @@ impl Device {
             // failed acquisition releases it only after the ASC-stopped check in Drop.
             device.power_vote = true;
             to_result(unsafe { bindings::apple_pmp_set_device_power(0x0f, 5, 1) })?;
-            dev_info!(pdev.as_ref(), "M3 G15G: PMP GPU device 5 power acknowledged\n");
+            if t6031_soc {
+                dev_info!(pdev.as_ref(), "M3 G15C: PMP GPU device 5 power acknowledged\n");
+            } else {
+                dev_info!(pdev.as_ref(), "M3 G15G: PMP GPU device 5 power acknowledged\n");
+            }
         }
 
         let registers = device.sgx.access(pdev.as_ref())?;
@@ -132,7 +138,21 @@ impl Device {
                 }
                 e.sgx_setup()
             }
-            None => Some(soc.sgx_setup.ok_or(ENODEV)?),
+            None => match t6031 {
+                Some(e) => {
+                    match e.sgx_setup() {
+                        Some((offset, value)) => dev_warn!(
+                            pdev.as_ref(),
+                            "M3 G15C start: SGX setup write: SGX+{:#x} = {:#x}\n",
+                            offset,
+                            value
+                        ),
+                        None => dev_info!(pdev.as_ref(), "M3 G15C start: no SGX setup write\n"),
+                    }
+                    e.sgx_setup()
+                }
+                None => Some(soc.sgx_setup.ok_or(ENODEV)?),
+            },
         };
         if let Some((setup_offset, setup_value)) = setup {
             registers.try_write32(setup_value, setup_offset)?;

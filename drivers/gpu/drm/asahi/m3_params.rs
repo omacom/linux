@@ -627,3 +627,209 @@ pub(crate) fn t8122_params() -> crate::t8122_knobs::Raw {
         pstate_cap: get(&T8122_PSTATE_CAP),
     }
 }
+
+fn parse_t6031_number(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_number(text))
+}
+
+fn parse_t6031_fender(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_fender(text))
+}
+
+fn parse_t6031_clkgen(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_clkgen(text))
+}
+
+fn parse_t6031_sgx_setup(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_sgx_setup(text))
+}
+
+fn parse_t6031_mcache(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_mcache(text))
+}
+
+fn parse_t6031_aic_swint(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_aic_swint(text))
+}
+
+fn parse_t6031_slot7(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_slot7(text))
+}
+
+fn parse_t6031_gifaf(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_gifaf(text))
+}
+
+fn parse_t6031_slot(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_slot(text))
+}
+
+fn parse_t6031_ane(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_ane(text))
+}
+
+fn parse_t6031_mtr(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_mtr(text))
+}
+
+fn parse_t6031_fw_words(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_fw_words(text))
+}
+
+fn parse_t6031_hwdata_object(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_hwdata_object(text))
+}
+
+fn parse_t6031_rev_id(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_rev_id(text))
+}
+
+fn parse_t6031_tristate(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_tristate(text))
+}
+
+fn parse_t6031_tag(text: &str) -> Option<u64> {
+    Some(crate::t6031_knobs::parse_tag(text))
+}
+
+// The T6031 start (`t6031_start`). Each parameter is stored as given, unset or with a value its
+// parser does not accept (`t6031_knobs`), so the start can refuse rather than fall back.
+use crate::t6031_knobs::UNSET as T6031_UNSET;
+
+/// `asahi.t6031_start=1`: one attempt to start the M3 runtime on a T6031. Without it the probe
+/// is the same refusal as before.
+static T6031_START: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_start", T6031_START, parse_t6031_number);
+/// `asahi.t6031_image_hash`: the first 8 bytes of the loaded text SHA-256, big-endian.
+static T6031_IMAGE_HASH: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_image_hash", T6031_IMAGE_HASH, parse_t6031_number);
+/// `asahi.t6031_tag=search` or a text offset of the boot-entropy tag.
+static T6031_TAG: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_tag", T6031_TAG, parse_t6031_tag);
+/// `asahi.t6031_initdata_version=<u64>`: the InitData version given to the T6031 firmware.
+static T6031_INITDATA_VERSION: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_initdata_version", T6031_INITDATA_VERSION, parse_t6031_number);
+/// `asahi.t6031_pstate_cap=N`: the highest performance state the T6031 firmware may use.
+static T6031_PSTATE_CAP: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_pstate_cap", T6031_PSTATE_CAP, parse_t6031_number);
+/// `asahi.t6031_fender=rule|adt`: the Fender window size.
+static T6031_FENDER: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_fender", T6031_FENDER, parse_t6031_fender);
+/// `asahi.t6031_clkgen=e5c|e1c|none`: the GPU clock-generator IO mapping.
+static T6031_CLKGEN: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_clkgen", T6031_CLKGEN, parse_t6031_clkgen);
+/// `asahi.t6031_sgx_setup=t6030|none`: the SGX write made before the firmware starts.
+static T6031_SGX_SETUP: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_sgx_setup", T6031_SGX_SETUP, parse_t6031_sgx_setup);
+/// `asahi.t6031_mcache=none|x2|x4|x8`.
+static T6031_MCACHE: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_mcache", T6031_MCACHE, parse_t6031_mcache);
+/// `asahi.t6031_aic_swint=page|reg`.
+static T6031_AIC_SWINT: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_aic_swint", T6031_AIC_SWINT, parse_t6031_aic_swint);
+/// `asahi.t6031_slot7=none|rule`.
+static T6031_SLOT7: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_slot7", T6031_SLOT7, parse_t6031_slot7);
+/// `asahi.t6031_gifaf=none|fender`.
+static T6031_GIFAF: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_gifaf", T6031_GIFAF, parse_t6031_gifaf);
+/// `asahi.t6031_slot21=none` or a physical address.
+static T6031_SLOT21: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_slot21", T6031_SLOT21, parse_t6031_slot);
+/// `asahi.t6031_slot24=none` or a physical address.
+static T6031_SLOT24: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_slot24", T6031_SLOT24, parse_t6031_slot);
+/// `asahi.t6031_slot28=none` or a physical address.
+static T6031_SLOT28: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_slot28", T6031_SLOT28, parse_t6031_slot);
+/// `asahi.t6031_ane=none|t6030|t8122` or a physical address.
+static T6031_ANE: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_ane", T6031_ANE, parse_t6031_ane);
+/// `asahi.t6031_io_drop`: a mask of default slots to leave out.
+static T6031_IO_DROP: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_io_drop", T6031_IO_DROP, parse_t6031_number);
+/// `asahi.t6031_mtr=t6030|t8122|adt|none`.
+static T6031_MTR: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_mtr", T6031_MTR, parse_t6031_mtr);
+/// `asahi.t6031_mtr_fast_die`: overrides the fast-die MTR mask.
+static T6031_MTR_FAST_DIE: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_mtr_fast_die", T6031_MTR_FAST_DIE, parse_t6031_number);
+/// `asahi.t6031_mtr_alarm`: overrides the alarm MTR mask.
+static T6031_MTR_ALARM: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_mtr_alarm", T6031_MTR_ALARM, parse_t6031_number);
+/// `asahi.t6031_unit_mask_a=<u64>`: HwDataB unit mask A (+0x17c0).
+static T6031_UNIT_MASK_A: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_unit_mask_a", T6031_UNIT_MASK_A, parse_t6031_number);
+/// `asahi.t6031_unit_mask_b=<u32>`: HwDataB unit mask B (+0x17c8).
+static T6031_UNIT_MASK_B: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_unit_mask_b", T6031_UNIT_MASK_B, parse_t6031_number);
+/// `asahi.t6031_hwb_454`: HwDataB +0xa2c.
+static T6031_HWB_454: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_hwb_454", T6031_HWB_454, parse_t6031_number);
+/// `asahi.t6031_hwb_b20`: HwDataB +0xb20, the core slots.
+static T6031_HWB_B20: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_hwb_b20", T6031_HWB_B20, parse_t6031_number);
+/// `asahi.t6031_hwb_17b8`: HwDataB +0x17b8.
+static T6031_HWB_17B8: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_hwb_17b8", T6031_HWB_17B8, parse_t6031_number);
+/// `asahi.t6031_hwb_1818`: HwDataB +0x1818.
+static T6031_HWB_1818: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_hwb_1818", T6031_HWB_1818, parse_t6031_number);
+/// `asahi.t6031_fw_words=none|t8122`.
+static T6031_FW_WORDS: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_fw_words", T6031_FW_WORDS, parse_t6031_fw_words);
+/// `asahi.t6031_hwdata_object=aligned|fixed`.
+static T6031_HWDATA_OBJECT: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_hwdata_object", T6031_HWDATA_OBJECT, parse_t6031_hwdata_object);
+/// `asahi.t6031_gpu_core`: must be the table's G15C core type, 24.
+static T6031_GPU_CORE: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_gpu_core", T6031_GPU_CORE, parse_t6031_number);
+/// `asahi.t6031_rev_id=auto` or 1 to 6.
+static T6031_REV_ID: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_rev_id", T6031_REV_ID, parse_t6031_rev_id);
+/// `asahi.t6031_csafr=auto|on|off`.
+static T6031_CSAFR: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_csafr", T6031_CSAFR, parse_t6031_tristate);
+/// `asahi.t6031_power_cap_mw`: the power target while the boot loader's model is a stand-in.
+static T6031_POWER_CAP_MW: AtomicU64 = AtomicU64::new(T6031_UNSET);
+m3_param!("t6031_power_cap_mw", T6031_POWER_CAP_MW, parse_t6031_number);
+
+/// The T6031 start parameters of this boot, as given. The image UUID has no module parameter.
+pub(crate) fn t6031_params() -> crate::t6031_knobs::Raw {
+    let get = |p: &AtomicU64| p.load(Ordering::Relaxed);
+    crate::t6031_knobs::Raw {
+        start: get(&T6031_START),
+        image_uuid: crate::t6031_knobs::UuidParam::Unset,
+        image_hash: get(&T6031_IMAGE_HASH),
+        tag: get(&T6031_TAG),
+        initdata_version: get(&T6031_INITDATA_VERSION),
+        pstate_cap: get(&T6031_PSTATE_CAP),
+        fender: get(&T6031_FENDER),
+        clkgen: get(&T6031_CLKGEN),
+        sgx_setup: get(&T6031_SGX_SETUP),
+        mcache: get(&T6031_MCACHE),
+        aic_swint: get(&T6031_AIC_SWINT),
+        slot7: get(&T6031_SLOT7),
+        gifaf: get(&T6031_GIFAF),
+        slot21: get(&T6031_SLOT21),
+        slot24: get(&T6031_SLOT24),
+        slot28: get(&T6031_SLOT28),
+        ane: get(&T6031_ANE),
+        io_drop: get(&T6031_IO_DROP),
+        mtr: get(&T6031_MTR),
+        mtr_fast_die: get(&T6031_MTR_FAST_DIE),
+        mtr_alarm: get(&T6031_MTR_ALARM),
+        unit_mask_a: get(&T6031_UNIT_MASK_A),
+        unit_mask_b: get(&T6031_UNIT_MASK_B),
+        hwb_454: get(&T6031_HWB_454),
+        hwb_b20: get(&T6031_HWB_B20),
+        hwb_17b8: get(&T6031_HWB_17B8),
+        hwb_1818: get(&T6031_HWB_1818),
+        fw_words: get(&T6031_FW_WORDS),
+        hwdata_object: get(&T6031_HWDATA_OBJECT),
+        gpu_core: get(&T6031_GPU_CORE),
+        rev_id: get(&T6031_REV_ID),
+        csafr: get(&T6031_CSAFR),
+        power_cap_mw: get(&T6031_POWER_CAP_MW),
+    }
+}

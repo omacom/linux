@@ -206,8 +206,9 @@ kernel::of_device_table!(
         // HwConfig: unproved power/MMIO/firmware-tuning fields must never be
         // represented by copied or zero-filled legacy values. T6030 starts
         // the M3 runtime; a handed-over T8122 is admitted by it and refused
-        // while its table is incomplete; the others fail closed before any
-        // firmware handoff.
+        // while its table is incomplete; T6031 starts that runtime only with
+        // asahi.t6031_start=1 and otherwise fails closed the same way; the
+        // others fail closed before any firmware handoff.
         // The M4 (G16) and M5/A18 Pro (G17) bring-up runtimes are not bound
         // in this kernel.
         (
@@ -253,6 +254,12 @@ fn start_t8122(pdev: &platform::Device<Core>) -> Result<crate::m3_drm::Registere
         return Err(ENODEV);
     }
     crate::m3_drm::Registered::start(pdev, &crate::m3_soc::T8122)
+}
+
+/// Start the M3 runtime on a T6031 (M3 Max, G15C) when `asahi.t6031_start=1`. The caller has
+/// already accepted that parameter. Resource admission still requires the boot loader's handoff.
+fn start_t6031(pdev: &platform::Device<Core>) -> Result<crate::m3_drm::Registered> {
+    crate::m3_drm::Registered::start(pdev, &crate::m3_soc::T6031)
 }
 
 fn refuse_agx3_probe(pdev: &platform::Device<Core>, soc: &'static hw::agx3::SocConfig) -> Error {
@@ -450,6 +457,30 @@ impl platform::Driver for AsahiDriver {
                 }
                 let runtime = start_t8122(pdev)?;
                 return Ok(Self { runtime: AsahiRuntime::M3(runtime) });
+            }
+            ProbeConfig::Agx3Diagnostic(soc) if soc.chip_id == 0x6031 => {
+                match crate::t6031_knobs::start(&crate::m3_params::t6031_params()) {
+                    crate::t6031_knobs::Start::Off => {
+                        if crate::m3_params::t6031_params().values_given() {
+                            dev_info!(
+                                pdev.as_ref(),
+                                "M3 G15C start: asahi.t6031_* values given without asahi.t6031_start=1; ignored\n"
+                            );
+                        }
+                        return Err(refuse_agx3_probe(pdev, soc));
+                    }
+                    crate::t6031_knobs::Start::Invalid => {
+                        dev_err!(
+                            pdev.as_ref(),
+                            "M3 G15C start: refused: asahi.t6031_start has a value it does not accept (0 or 1); GPU startup disabled\n"
+                        );
+                        return Err(ENODEV);
+                    }
+                    crate::t6031_knobs::Start::On => {
+                        let runtime = start_t6031(pdev)?;
+                        return Ok(Self { runtime: AsahiRuntime::M3(runtime) });
+                    }
+                }
             }
             ProbeConfig::Agx3Diagnostic(soc) => return Err(refuse_agx3_probe(pdev, soc)),
         };
