@@ -191,8 +191,10 @@ void mt_link_event(struct mt7932 *m, const struct mt7932_event *event)
 		if (length >= 20)
 			dev_info(&m->pdev->dev, "ASSOC_START: band=%u width=%u channel=%u extension=%u\n",
 				 get_unaligned_le32(body + 12), body[16], body[17], body[19]);
-		if (!mt_channel_event(m, body, length))
+		if (!mt_channel_event(m, body, length)) {
 			m->connect_error = -EPROTO;
+			complete(&m->assoc_done);
+		}
 		complete(&m->assoc_start);
 		break;
 	case 0x40:
