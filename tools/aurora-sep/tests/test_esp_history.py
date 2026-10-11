@@ -74,6 +74,53 @@ class HistoryTest(unittest.TestCase):
         archived = {row['original'] for row in self.archive()}
         self.assertEqual(archived, {'m1n1/boot.bin.before-v1'})
 
+    def test_saved_headers_are_payload_not_boot_metadata(self):
+        headers = self.state / 'modules-7.1.12-sep-ARCH/build/include'
+        headers.mkdir(parents=True)
+        (headers / 'linked.h').symlink_to('/missing/kernel/header.h')
+        (headers / 'fake.conf').write_text('old0.efi boot.bin.before-v0')
+        (self.state / 'esp-history').mkdir()
+        (self.state / 'esp-history/unrelated.json').write_text('old0.efi')
+        (self.state / 'recovery.json').write_text('boot.bin.before-v0')
+        rows = self.archive()
+        self.assertEqual({row['original'] for row in rows},
+                         {'limine_history/old0.efi', 'limine_history/old1.efi',
+                          'm1n1/boot.bin.before-v1'})
+        self.assertTrue((self.boot / 'boot.bin.before-v0').exists())
+        self.assertTrue((headers / 'linked.h').is_symlink())
+        for row in rows:
+            saved = self.destination / row['archive']
+            original = self.esp / row['original']
+            original.write_bytes(saved.read_bytes())
+            self.assertEqual(M.digest(original), row['sha256'])
+
+    def test_skipped_module_directory_symlink_is_never_followed(self):
+        outside = self.root / 'outside'; outside.mkdir()
+        (outside / 'recovery.json').write_text('old0.efi')
+        (self.state / 'modules-old').symlink_to(outside, target_is_directory=True)
+        rows = M.inventory(self.esp, self.state)
+        self.assertFalse(next(row['protected'] for row in rows
+                              if row['file']=='limine_history/old0.efi'))
+
+    def test_metadata_file_and_directory_symlinks_still_refuse_archive(self):
+        outside = self.root / 'outside'; outside.mkdir()
+        (outside / 'recovery.json').write_text('old0.efi')
+        for name, target in [('recovery.json', outside / 'recovery.json'),
+                             ('recovery', outside)]:
+            with self.subTest(name=name):
+                link = self.state / name; link.symlink_to(target)
+                try:
+                    with self.assertRaisesRegex(ValueError, 'symlink'):
+                        self.archive()
+                    self.assertTrue((self.history / 'old0.efi').exists())
+                finally:
+                    link.unlink()
+
+    def test_state_root_symlink_is_refused_even_if_dangling(self):
+        self.state.rmdir(); self.state.symlink_to(self.root / 'missing-state')
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            M.inventory(self.esp, self.state)
+
     def test_missing_config_keeps_all_files(self):
         self.conf.unlink()
         with self.assertRaisesRegex(ValueError, 'configuration missing'):
