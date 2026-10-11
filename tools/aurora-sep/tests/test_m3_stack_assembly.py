@@ -146,7 +146,8 @@ class Assembly(unittest.TestCase):
         for name in ('NEO_FW_ROOT_PAIR', 'NEO_PREVIOUS_RELEASE_FW_ROOT_PAIR',
                      'NEO_RELEASED_FW_ROOT_PAIR', 'NEO_PREVIOUS_FW_ROOT_PAIR',
                      'NEO_TUNNEL_LIVE_FW_ROOT_PAIR', 'NEO_NIC_LIVE_FW_ROOT_PAIR',
-                     'NEO_DISPLAY_READY_LIVE_FW_ROOT_PAIR', 'NEO_RELEASE14_LIVE_FW_ROOT_PAIR'):
+                     'NEO_DISPLAY_READY_LIVE_FW_ROOT_PAIR', 'NEO_RELEASE14_LIVE_FW_ROOT_PAIR',
+                     'NEO_RELEASE15_LIVE_FW_ROOT_PAIR'):
             changed=dict(pair,kernel=getattr(mod,name)['kernel'])
             patch=mock.patch.object(mod,name,changed);patch.start();self.addCleanup(patch.stop)
         self.manifest['legacy_gpu_boards']=['j613','j615']
@@ -217,7 +218,8 @@ class Assembly(unittest.TestCase):
         for pair, neo in ((mod.J615_TUNNEL_NATIVE25_PAIR, mod.NEO_TUNNEL_LIVE_FW_ROOT_PAIR),
                           (mod.J615_NIC_NATIVE25_PAIR, mod.NEO_NIC_LIVE_FW_ROOT_PAIR),
                           (mod.J615_DISPLAY_READY_NATIVE25_PAIR, mod.NEO_DISPLAY_READY_LIVE_FW_ROOT_PAIR),
-                          (mod.J615_RELEASE14_NATIVE25_PAIR, mod.NEO_RELEASE14_LIVE_FW_ROOT_PAIR)):
+                          (mod.J615_RELEASE14_NATIVE25_PAIR, mod.NEO_RELEASE14_LIVE_FW_ROOT_PAIR),
+                          (mod.J615_RELEASE15_NATIVE25_PAIR, mod.NEO_RELEASE15_LIVE_FW_ROOT_PAIR)):
             self.assertEqual(pair['kernel'], neo['kernel'])
             self.assertIn(pair['kernel'], mod.NEO_KERNELS)
             members = {'opt/mesa-m3/share/mesa-m3/native25-boards': b'j613\nj615-experimental\n',

@@ -24,7 +24,8 @@ NEO_KERNELS = (NEO_KERNEL, 'a6a62e586021d9f786d6a96b4ded6b0ad3b613fa',
                'a29fbe8f9244d3ab42fae7aa188c62e980d40a82',
                '0a7037c9871fd1bde2923c3c7f27732d53519ed2',
                'a85f8eee2fd54ed9e7237f25d1f085e9d7848111',
-               '7cae5a72ccc6690a710e199c853f8e1c97a3d86c')
+               '7cae5a72ccc6690a710e199c853f8e1c97a3d86c',
+               'f240960cc84cfda6f73e188050ccadb9435e938f')
 # J615 native25 requires exact kernel, boot source and packaged binary bindings.
 J615_NATIVE25_PAIR = {
     'kernel': '9189760ca2222ba57d802d65ff3a0ebb2ca985ab',
@@ -53,6 +54,11 @@ J615_DISPLAY_READY_NATIVE25_PAIR = {
 }
 J615_RELEASE14_NATIVE25_PAIR = {
     'kernel': '7cae5a72ccc6690a710e199c853f8e1c97a3d86c',
+    'm1n1': 'd05ba17dfb771871d608225be42968bbb1e75a18',
+    'm1n1_bin_sha256': '396cf3ec1774ca9d15ca1b6f71b5e8a3639b27f80b95d530722b35a5ea35141d',
+}
+J615_RELEASE15_NATIVE25_PAIR = {
+    'kernel': 'f240960cc84cfda6f73e188050ccadb9435e938f',
     'm1n1': 'd05ba17dfb771871d608225be42968bbb1e75a18',
     'm1n1_bin_sha256': '396cf3ec1774ca9d15ca1b6f71b5e8a3639b27f80b95d530722b35a5ea35141d',
 }
@@ -103,6 +109,11 @@ NEO_RELEASE14_LIVE_FW_ROOT_PAIR = {
     'm1n1': '1b36287e04788f4a028e6180c64d3d96e49f06b1',
     'm1n1_bin_sha256': '1c61eea4da8bd4bd2e18de534d661ccc569e1b8e92b19d4af867d5b281516491',
 }
+NEO_RELEASE15_LIVE_FW_ROOT_PAIR = {
+    'kernel': 'f240960cc84cfda6f73e188050ccadb9435e938f',
+    'm1n1': '1b36287e04788f4a028e6180c64d3d96e49f06b1',
+    'm1n1_bin_sha256': '1c61eea4da8bd4bd2e18de534d661ccc569e1b8e92b19d4af867d5b281516491',
+}
 STANDARD_M1N1_SOURCE = "d05ba17dfb771871d608225be42968bbb1e75a18"
 PREVIOUS_STANDARD_M1N1_SOURCE = "31501778e863feb5d2afe77be3a1edc588c98119"
 J615_LEGACY_M1N1_SOURCES = ("74ba6bea52d1f865d204bb3f8168705a148fd5c5",
@@ -145,6 +156,8 @@ def check_j615_native25(sources, binary_sha, mesa):
         pair = J615_DISPLAY_READY_NATIVE25_PAIR
     if sources['kernel'] == J615_RELEASE14_NATIVE25_PAIR['kernel']:
         pair = J615_RELEASE14_NATIVE25_PAIR
+    if sources['kernel'] == J615_RELEASE15_NATIVE25_PAIR['kernel']:
+        pair = J615_RELEASE15_NATIVE25_PAIR
     if not isinstance(pair, dict) or set(pair) != {'kernel', 'm1n1', 'm1n1_bin_sha256'}:
         raise ValueError('J615 native25 requires the recorded J615 boot/kernel pair (J615_NATIVE25_PAIR)')
     if sources['kernel'] != pair['kernel']: raise ValueError('J615 native25 requires the matched J615 kernel')
@@ -161,7 +174,8 @@ def check_neo_firmware_tables(kernel, sources, binary_sha):
                         NEO_RELEASED_FW_ROOT_PAIR, NEO_PREVIOUS_FW_ROOT_PAIR,
                         NEO_LIVE_FW_ROOT_PAIR, NEO_TUNNEL_LIVE_FW_ROOT_PAIR,
                         NEO_NIC_LIVE_FW_ROOT_PAIR, NEO_DISPLAY_READY_LIVE_FW_ROOT_PAIR,
-                        NEO_RELEASE14_LIVE_FW_ROOT_PAIR) if kernel == p['kernel']]
+                        NEO_RELEASE14_LIVE_FW_ROOT_PAIR,
+                        NEO_RELEASE15_LIVE_FW_ROOT_PAIR) if kernel == p['kernel']]
     if not pairs:
         return
     if any(not re.fullmatch(r'[0-9a-f]{40}', p.get('m1n1') or '') for p in pairs):
