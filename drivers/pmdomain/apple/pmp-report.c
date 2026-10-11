@@ -885,7 +885,8 @@ int apple_pmp_report_wait_ready(struct device_node *entry, unsigned long timeout
 	}
 	/* Only M3 reports publish state under the startup lifetime lock. */
 	if (!of_device_is_compatible(parent, "apple,t6030-pmp-v2-report") &&
-	    !of_device_is_compatible(parent, "apple,t8122-pmp-v2-report")) {
+	    !of_device_is_compatible(parent, "apple,t8122-pmp-v2-report") &&
+	    !of_device_is_compatible(parent, "apple,t6031-pmp-v2-report")) {
 		of_node_put(parent);
 		return -EINVAL;
 	}
@@ -1156,6 +1157,24 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t8122 = {
 	.pwrstate = "apple,t8122-pmgr-pwrstate",
 };
 
+/*
+ * T6031, from the J516C ADT ptd-range: SOC-DEV-PS-REQ at PTD index 0x200
+ * (read 0x2000, update 0x10000 + 0x1000), SOC-DEV-PS-ACK at 0x208 (0x2080),
+ * PMP-STATUS at 0x1 (0x10): the T6020 apertures. Its soc-device records are
+ * in id order, as on T6030. The positions of its temperature records are
+ * not known, so none are registered.
+ */
+static const struct apple_pmp_report_offsets apple_pmp_offsets_t6031 = {
+	.tgt_read = 0x2000,
+	.tgt_write = 0x11000,
+	.actual = 0x2080,
+	.status = 0x10,
+	.starts_pmp = true,
+	.name = "T6031",
+	.pwrstate = "apple,t6031-pmgr-pwrstate",
+	.devices_ordered = true,
+};
+
 /* Same PTD apertures; startup belongs to the native PMP supplier. */
 static const struct apple_pmp_report_offsets apple_pmp_offsets_j613_25g83 = {
 	.tgt_read = 0x1000,
@@ -1172,6 +1191,7 @@ static const struct of_device_id apple_pmp_report_of_match[] = {
 	{ .compatible = "apple,t8132-pmp-v2-report", .data = &apple_pmp_offsets_t8132 },
 	{ .compatible = "apple,t6030-pmp-v2-report", .data = &apple_pmp_offsets_t6030 },
 	{ .compatible = "apple,t8122-pmp-v2-report", .data = &apple_pmp_offsets_t8122 },
+	{ .compatible = "apple,t6031-pmp-v2-report", .data = &apple_pmp_offsets_t6031 },
 	{}
 };
 
