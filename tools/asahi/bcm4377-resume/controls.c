@@ -9,7 +9,7 @@ static void *active_callback(void *data) {run_request(data);return NULL;}
 static void *producer(void *data) {deliver_work(data);return NULL;}
 static void pause_producer(struct bcm4377_data *b) {bcm4377_hci_timeout(b->hdev);producer_pause=true;pthread_barrier_init(&producer_captured,NULL,2);pthread_barrier_init(&producer_release,NULL,2);pthread_create(&producer_thread,NULL,producer,b);pthread_barrier_wait(&producer_captured);}
 int main(int argc,char **argv) {
- struct bcm4377_hw hw={.id=4378,.send_calibration=send_cal,.send_ptb=send_ptb};struct pci_dev pci={};
+ struct bcm4377_hw hw=bcm4377_hw_variants[BCM4378];struct pci_dev pci={};
  struct bcm4377_data b={.hw=&hw,.pdev=&pci};struct hci_dev h={.data=&b,.flags=HCI_UP|HCI_RUNNING};b.hdev=&h;active=&b;pci.data=&b;struct device dev={.pci=&pci};pthread_mutex_init(&b.resume_lock,NULL);if(bcm4377_resume_recovery_supported(&b))h.reset=bcm4377_hci_timeout;
  bdaddr_t own={{2,3,4,5,6,7}},setup={{8,9,10,11,12,13}},pub={{14,15,16,17,18,19}};b.bdaddr=own;h.setup_addr=setup;h.public_addr=pub;
  switch(atoi(argv[1])) {
@@ -27,9 +27,9 @@ int main(int argc,char **argv) {
  case 11: h.flags|=HCI_RFKILLED;resume_cycle(&dev);recover(&b);assert(!reset_count);break;
  case 12: h.flags|=HCI_POWERING_DOWN;resume_cycle(&dev);recover(&b);assert(!reset_count);break;
  case 13: board_j493=false;resume_cycle(&dev);recover(&b);assert(!reset_count);break;
- case 14: hw.id=4377;resume_cycle(&dev);recover(&b);assert(!reset_count);break;
- case 15: hw.id=4387;resume_cycle(&dev);recover(&b);assert(!reset_count);break;
- case 16: hw.id=4388;resume_cycle(&dev);recover(&b);assert(!reset_count);break;
+ case 14: hw=bcm4377_hw_variants[BCM4377];resume_cycle(&dev);recover(&b);assert(!reset_count);break;
+ case 15: hw=bcm4377_hw_variants[BCM4387];resume_cycle(&dev);recover(&b);assert(!reset_count);break;
+ case 16: hw=bcm4377_hw_variants[BCM4388];resume_cycle(&dev);recover(&b);assert(!reset_count);break;
  case 17: resume_cycle(&dev);bcm4377_hci_timeout(&h);deliver_work(&b);assert(request.fn);bcm4377_hci_close(&h);run_request(&h);assert(!reset_count);break;
  case 18: resume_cycle(&dev);bcm4377_hci_timeout(&h);deliver_work(&b);h.flags&=~HCI_UP;bcm4377_hci_close(&h);h.flags|=HCI_UP;run_request(&h);assert(!reset_count);break;
  case 19: resume_cycle(&dev);bcm4377_hci_timeout(&h);deliver_work(&b);h.flags|=HCI_RFKILLED;run_request(&h);assert(!reset_count);break;

@@ -29,7 +29,22 @@ if a.mutation:
 core_bodies={n:extract(core_hci,n) for n in ['hci_cmd_timeout','hci_cancel_cmd_sync','hci_suspend_dev','hci_resume_dev']}
 # The fixture models UP as a mask; the core uses a bit index.
 core_bodies={n:v.replace('test_bit(HCI_UP,', 'test_bit(HCI_UP_INDEX,') for n,v in core_bodies.items()}
-code=(r/'tools/asahi/bcm4377-resume/fixture.h').read_text()+'\n'.join(bodies.values())+'\n'.join(core_bodies.values())+extract(core,'hci_reset_dev_sync')+(r/'tools/asahi/bcm4377-resume/controls.c').read_text()
+fixture=(r/'tools/asahi/bcm4377-resume/fixture.h').read_text()
+hw_struct=re.search(r'^struct bcm4377_hw \{.*?^\};',s,re.M|re.S).group()
+hw_enum=re.search(r'^enum bcm4377_chip \{.*?^\};',s,re.M|re.S).group()
+hw_table=re.search(r'^static const struct bcm4377_hw bcm4377_hw_variants\[\] = \{.*?^\};',s,re.M|re.S).group()
+fixture=re.sub(r'^struct bcm4377_hw \{.*?\};', 'typedef uint32_t u32;\n'+hw_struct,fixture,count=1,flags=re.M)
+fixture=fixture.replace('struct bcm4377_hw *hw;', 'const struct bcm4377_hw *hw;')
+table_callbacks='''
+static int send_cal(struct bcm4377_data *);
+static int send_ptb(struct bcm4377_data *,const struct firmware *);
+#define bcm4378_send_calibration send_cal
+#define bcm4387_send_calibration send_cal
+#define bcm4388_send_calibration send_cal
+#define bcm4377_send_ptb send_ptb
+#define bcm4378_send_ptb send_ptb
+'''
+code=fixture+hw_enum+table_callbacks+hw_table+'\n'.join(bodies.values())+'\n'.join(core_bodies.values())+extract(core,'hci_reset_dev_sync')+(r/'tools/asahi/bcm4377-resume/controls.c').read_text()
 (o/'production.c').write_text(code);env=dict(os.environ,TMPDIR=str(o/'tmp'))
 c=subprocess.run(['cc','-std=gnu11','-pthread','-Wall','-Wextra','-Wno-unused-function','-Wno-unused-parameter','-fsanitize=address,undefined','-fno-pie','-no-pie',str(o/'production.c'),'-o',str(o/'controls')],env=env,capture_output=True,text=True)
 (o/'compile.log').write_text(c.stdout+c.stderr);assert not c.returncode,c.stderr
@@ -39,6 +54,6 @@ for n in ([mutations[a.mutation][3]] if a.mutation else [0,1,2,28] if a.old_ref 
  c=subprocess.run([str(o/'controls'),str(n)],capture_output=True,text=True,preexec_fn=no_core,env=dict(env,ASAN_OPTIONS='detect_leaks=1'))
  results.append({'case':n,'exit':c.returncode,'stdout':c.stdout,'stderr':c.stderr})
 expected=-6 if a.old_ref or a.mutation else 0
-receipt={'source_sha256':hashlib.sha256(s.encode()).hexdigest(),'core_sha256':hashlib.sha256(core.encode()).hexdigest(),'core_hci_sha256':hashlib.sha256(core_hci.encode()).hexdigest(),'core_bodies':{n:hashlib.sha256(v.encode()).hexdigest() for n,v in core_bodies.items()},'extracted_bodies':{n:hashlib.sha256(v.encode()).hexdigest() for n,v in bodies.items()},'shared_new_prerequisites_for_old':shared,'old_ref':a.old_ref,'mutation':a.mutation,'core_fixture_adapter':'Only HCI_UP test_bit index is translated from fixture mask32 to index5; production conditions/order unchanged.', 'source_semantics':'Actual driver callbacks and synchronous close/open helper; core request serialization, PCI/firmware and HCI services are controlled fixtures, not whole-kernel or radio execution.','translation_sha256':hashlib.sha256(code.encode()).hexdigest(),'controls':results,'expected_exit':expected}
+receipt={'source_sha256':hashlib.sha256(s.encode()).hexdigest(),'core_sha256':hashlib.sha256(core.encode()).hexdigest(),'core_hci_sha256':hashlib.sha256(core_hci.encode()).hexdigest(),'core_bodies':{n:hashlib.sha256(v.encode()).hexdigest() for n,v in core_bodies.items()},'actual_hw_struct_sha256':hashlib.sha256(hw_struct.encode()).hexdigest(),'actual_hw_table_sha256':hashlib.sha256(hw_table.encode()).hexdigest(),'table_callback_fixture':'Production variant table compiled unchanged; only calibration/PTB callback names map to controlled send boundaries.', 'extracted_bodies':{n:hashlib.sha256(v.encode()).hexdigest() for n,v in bodies.items()},'shared_new_prerequisites_for_old':shared,'old_ref':a.old_ref,'mutation':a.mutation,'core_fixture_adapter':'Only HCI_UP test_bit index is translated from fixture mask32 to index5; production conditions/order unchanged.', 'source_semantics':'Actual driver callbacks and synchronous close/open helper; core request serialization, PCI/firmware and HCI services are controlled fixtures, not whole-kernel or radio execution.','translation_sha256':hashlib.sha256(code.encode()).hexdigest(),'controls':results,'expected_exit':expected}
 (o/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n');assert all(x['exit']==expected for x in results),results
 print(f'{len(results)} production controls passed')
