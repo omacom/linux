@@ -177,7 +177,7 @@ shutil.copyfile(src,dst)
   if old:
    source=self.base/'old-installer.sh';source.write_bytes(subprocess.check_output(['git','show','05d6db:tools/aurora-sep/install-aurora-sep.sh'],cwd=ROOT))
   names=re.findall(r'^([a-zA-Z0-9_]+)\(\) \{',source.read_text(),re.M)
-  keep={'install_all','m3_install_packages','m3_install_cleanup','say','warn','die'}|{n for n in names if n.startswith('desktop_fixes_')}
+  keep={'install_all','fetch_release_file','m3_install_packages','m3_install_cleanup','say','warn','die'}|{n for n in names if n.startswith('desktop_fixes_')}
   stubs='\n'.join(n+'() { :; }' for n in names if n not in keep)
   kernel=self.assets/'linux-aurora-candidate-aarch64.pkg.tar.zst';kernel.write_bytes(b'kernel')
   frozen_body='''
