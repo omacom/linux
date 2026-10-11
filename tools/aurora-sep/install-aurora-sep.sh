@@ -3814,7 +3814,10 @@ def resolve(requirements, candidates, installed, available):
             continue
         name = dependency(req)[0]
         if any(satisfies(pkg, name) for pkg in installed + candidates):
-            raise ValueError("Installed or matched provider is too old for " + req + "; run the full updater")
+            advice = ("; the kernel package and retained bootloader do not match. "
+                      "Report this packaging error; do not select another Mac's GPU profile"
+                      if name in ("m1n1", "m1n1-aurora", "m1n1-neo") else "; run the full updater")
+            raise ValueError("Installed or matched provider is too old for " + req + advice)
         matches = [pkg for pkg in available if satisfies(pkg, req)]
         # Repository order wins for an exact package name; alternative providers must be unique.
         exact = [pkg for pkg in matches if pkg["name"] == name]
@@ -4347,13 +4350,17 @@ uninstall_all() {
   # 11.36 rewrote this on every run, so an updated Mac may name linux-aurora
   # itself, which the repositories don't carry for these Macs.
   if [[ -z $previous || $previous == linux-aurora ]]; then previous="linux-asahi"; fi
-  # 11.36 kept no record: every M3 it installed was kernel-only. Whatever the
-  # record says, an M3 with m1n1-aurora installed had its boot loader replaced.
+  # A kernel-only install can retain a previously installed m1n1-aurora.
+  # Without a mode record, older supported handoff installs used that package.
   m3_mode=$(m3_recorded_mode)
   if is_m3; then
     if pacman -Q m1n1-aurora >/dev/null 2>&1; then
-      m3_mode=handoff
-    elif [[ $m3_mode != handoff ]]; then
+      if [[ $m3_mode == kernel ]] || is_m3_kernel_only_chip; then
+        m3_mode=kernel
+      else
+        m3_mode=handoff
+      fi
+    elif [[ $m3_mode != handoff ]] || is_m3_kernel_only_chip; then
       m3_mode=kernel
     fi
   else

@@ -18,7 +18,9 @@ class Assembly(unittest.TestCase):
         for role,name in mod.ROLES.items():
             files={'.PKGINFO':f'pkgname = {name}\npkgver = candidate-1\narch = aarch64\ndepend = glibc\n'.encode()}
             if role=='m1n1':files['usr/lib/asahi-boot/m1n1.bin']=self.binary
-            if role=='kernel':files['usr/lib/modules/test/dtbs/apple/t8122-j613-25g83.dtb']=b'apple,j613-25g83-profile\0apple,firmware-compat\0'
+            if role=='kernel':
+                files['.PKGINFO'] += b'depend = m1n1>=1.6.1\n'
+                files['usr/lib/modules/test/dtbs/apple/t8122-j613-25g83.dtb']=b'apple,j613-25g83-profile\0apple,firmware-compat\0'
             if role=='mesa':
                 files.update({'opt/mesa-m3/25g83/share/mesa-m3/profile':b'j613-25g83-gl-only\n',
                               'usr/share/uwsm/env.d/50-mesa-m3':b'. /opt/mesa-m3/libexec/mesa-m3-session-env\n',
@@ -35,6 +37,19 @@ class Assembly(unittest.TestCase):
         subprocess.run(['bsdtar','--zstd','-cf',str(path),'-C',str(tree),*files],check=True)
         self.manifest['packages'][role]=dict(file=path.name,sha256=hashlib.sha256(path.read_bytes()).hexdigest())
     def assemble(self):return mod.assemble((ROOT/'install-aurora-sep.sh').read_text(),self.manifest,self.root)
+    def test_kernel_dependency_preserves_existing_bootloaders(self):
+        self.assemble()
+        base = b'pkgname = linux-aurora\npkgver = candidate-1\narch = aarch64\n'
+        for dependencies in ([], ['m1n1'], ['m1n1>=1.6.1.aurora15'],
+                             ['m1n1>=1.6.1', 'm1n1>=1.6.1.aurora15'],
+                             ['m1n1>=1.6.1', 'm1n1>=1.6.1'],
+                             ['m1n1>=1.6.1', 'm1n1-aurora'],
+                             ['m1n1>=1.6.1', 'm1n1-neo>=1']):
+            with self.subTest(dependencies=dependencies):
+                self.package('kernel', 'linux-aurora', {'.PKGINFO': base +
+                             ''.join('depend = '+d+'\n' for d in dependencies).encode()})
+                with self.assertRaisesRegex(ValueError, 'kernel'):
+                    self.assemble()
     def test_legacy_board_capability_defaults_and_exact_j615_pair(self):
         self.assertIn('M3_PERSISTENT_BOARDS="j613"',self.assemble()[0])
         self.manifest['legacy_gpu_boards']=['j613','j615']
@@ -131,7 +146,8 @@ class Assembly(unittest.TestCase):
         for name in ('NEO_FW_ROOT_PAIR', 'NEO_PREVIOUS_RELEASE_FW_ROOT_PAIR',
                      'NEO_RELEASED_FW_ROOT_PAIR', 'NEO_PREVIOUS_FW_ROOT_PAIR',
                      'NEO_TUNNEL_LIVE_FW_ROOT_PAIR', 'NEO_NIC_LIVE_FW_ROOT_PAIR',
-                     'NEO_DISPLAY_READY_LIVE_FW_ROOT_PAIR', 'NEO_RELEASE14_LIVE_FW_ROOT_PAIR'):
+                     'NEO_DISPLAY_READY_LIVE_FW_ROOT_PAIR', 'NEO_RELEASE14_LIVE_FW_ROOT_PAIR',
+                     'NEO_RELEASE15_LIVE_FW_ROOT_PAIR'):
             changed=dict(pair,kernel=getattr(mod,name)['kernel'])
             patch=mock.patch.object(mod,name,changed);patch.start();self.addCleanup(patch.stop)
         self.manifest['legacy_gpu_boards']=['j613','j615']
@@ -202,7 +218,8 @@ class Assembly(unittest.TestCase):
         for pair, neo in ((mod.J615_TUNNEL_NATIVE25_PAIR, mod.NEO_TUNNEL_LIVE_FW_ROOT_PAIR),
                           (mod.J615_NIC_NATIVE25_PAIR, mod.NEO_NIC_LIVE_FW_ROOT_PAIR),
                           (mod.J615_DISPLAY_READY_NATIVE25_PAIR, mod.NEO_DISPLAY_READY_LIVE_FW_ROOT_PAIR),
-                          (mod.J615_RELEASE14_NATIVE25_PAIR, mod.NEO_RELEASE14_LIVE_FW_ROOT_PAIR)):
+                          (mod.J615_RELEASE14_NATIVE25_PAIR, mod.NEO_RELEASE14_LIVE_FW_ROOT_PAIR),
+                          (mod.J615_RELEASE15_NATIVE25_PAIR, mod.NEO_RELEASE15_LIVE_FW_ROOT_PAIR)):
             self.assertEqual(pair['kernel'], neo['kernel'])
             self.assertIn(pair['kernel'], mod.NEO_KERNELS)
             members = {'opt/mesa-m3/share/mesa-m3/native25-boards': b'j613\nj615-experimental\n',
@@ -305,7 +322,7 @@ class Assembly(unittest.TestCase):
         output=self.root/'candidate.sh';output.write_text(script)
         subprocess.run(['bash','-n',str(output)],check=True)
     def kernel_dtbs(self,paths):
-        files={'.PKGINFO':b'pkgname = linux-aurora\npkgver = candidate-1\narch = aarch64\n'}
+        files={'.PKGINFO':b'pkgname = linux-aurora\npkgver = candidate-1\narch = aarch64\ndepend = m1n1>=1.6.1\n'}
         files.update({p:b'apple,j613-25g83-profile\0apple,firmware-compat\0' for p in paths})
         self.package('kernel','linux-aurora',files)
     def test_flat_release_recipe_layout_is_accepted(self):
@@ -361,7 +378,7 @@ class Assembly(unittest.TestCase):
         explicit,other=self.assemble()
         self.assertEqual(explicit.replace(other,ident),script)
     def kernel_files(self,dtbs):
-        files={'.PKGINFO':b'pkgname = linux-aurora\npkgver = candidate-1\narch = aarch64\n'}
+        files={'.PKGINFO':b'pkgname = linux-aurora\npkgver = candidate-1\narch = aarch64\ndepend = m1n1>=1.6.1\n'}
         files.update(dtbs)
         self.package('kernel','linux-aurora',files)
     J615_KERNEL='c'*40

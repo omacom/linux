@@ -141,6 +141,25 @@ class FrozenDependencies(unittest.TestCase):
         self.installed('old-provider',provides=['virtual=1']);self.pkg('new-provider',provides=['virtual=2']);self.pkg('fprintd',depends=['virtual>=2'])
         self.call(self.pkg('aurora-touchid',local=True),okay=False)
 
+    def test_kernel_accepts_retained_aurora12_provider_without_bootloader_upgrade(self):
+        self.installed('m1n1-aurora', '1.6.1.aurora12-1', provides=['m1n1=1.6.1.aurora12'])
+        self.pkg('m1n1-aurora', '1.6.1.aurora17-5', provides=['m1n1=1.6.1.aurora17'])
+        candidate = self.pkg('linux-aurora', depends=['m1n1>=1.6.1'], local=True)
+        receipt = self.call(candidate, requires=())
+        self.assertEqual(receipt['dependencies'], [])
+        prepared = subprocess.run(['pacman', '--config', receipt['transaction_config'],
+                                   '-Up', '--noconfirm', str(candidate)], capture_output=True, text=True)
+        self.assertEqual(prepared.returncode, 0, prepared.stderr+prepared.stdout)
+
+    def test_global_gpu_bootloader_minimum_blocks_retained_aurora12(self):
+        self.installed('m1n1-aurora', '1.6.1.aurora12-1', provides=['m1n1=1.6.1.aurora12'])
+        self.pkg('m1n1-aurora', '1.6.1.aurora17-5', provides=['m1n1=1.6.1.aurora17'])
+        result = self.call(self.pkg('linux-aurora', depends=['m1n1>=1.6.1.aurora15'], local=True),
+                           requires=(), okay=False)
+        self.assertIn('provider is too old for m1n1>=1.6.1.aurora15', result.stderr)
+        self.assertIn('Report this packaging error', result.stderr)
+        self.assertNotIn('run the full updater', result.stderr)
+
     def test_missing_dependency_replacement_refused(self):
         self.installed('unrelated');self.pkg('fprintd',replaces=['unrelated'])
         self.call(self.pkg('aurora-touchid',local=True),okay=False)
