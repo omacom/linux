@@ -1508,7 +1508,7 @@ static void bcm4377_setup_retry_work(struct work_struct *work)
 
 static bool bcm4377_resume_recovery_supported(struct bcm4377_data *bcm4377)
 {
-	return bcm4377->hw->id == 4378 &&
+	return bcm4377->hw->id == 0x4378 &&
 	       of_machine_is_compatible("apple,j493");
 }
 
