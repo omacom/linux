@@ -3,6 +3,16 @@
 These files connect the Apple SEP kernel driver to the shared APFS xART
 gigalocker and the desktop fingerprint stack.
 
+The current release installer and matched packages are published in
+[omacom/linux-aurora](https://github.com/omacom/linux-aurora/releases/latest):
+
+```sh
+curl -fsSL https://github.com/omacom/linux-aurora/releases/latest/download/install-aurora-sep.sh | bash
+```
+
+The installer in this source tree is an assembly template. Use the release
+asset above, whose package checksums and GPU profiles are pinned together.
+
 For experimental acceleration on the 13-inch or 15-inch M3 MacBook Air, see
 the [M3 GPU quick start](M3-GPU.md) for the matched activation command and
 desktop GPU check.

@@ -13,7 +13,7 @@ profile supports experimental OpenGL; Vulkan is unavailable.
 1. Enable the experimental GPU profile:
 
    ```sh
-   curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-gpu
+   curl -fsSL https://github.com/omacom/linux-aurora/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-gpu
    ```
 
 2. Reboot and log into your desktop normally.
@@ -81,7 +81,7 @@ On a J613 already using its own exact 26.6.2/25G83 volume group and matched
 stage 1, update with:
 
 ```sh
-curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-profile=j613-25g83
+curl -fsSL https://github.com/omacom/linux-aurora/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-profile=j613-25g83
 ```
 
 Reboot, log in and run `aurora-m3-gpu-check`. The native25 profile reports
@@ -97,7 +97,7 @@ native25 capability and contain the admitted kernel, m1n1 and Mesa package pair.
 Other bundles refuse activation.
 
 ```sh
-curl -fsSL https://github.com/iconidentify/aurora-linux/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-profile=j615-25g83
+curl -fsSL https://github.com/omacom/linux-aurora/releases/latest/download/install-aurora-sep.sh | bash -s -- --m3-profile=j615-25g83
 ```
 
 This selects experimental native OpenGL and sets the independent J615 boot
