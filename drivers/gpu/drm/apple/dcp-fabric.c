@@ -817,6 +817,8 @@ static void dcp_fabric_snapshot_port(struct apple_dcp_typec_port *port,
 		route->core.pipeline = pipeline;
 		route->core.tunnel = route->tunnel;
 		route->core.dpin = route->tunnel_dpin;
+		route->core.tunnel_clock_blocked = dcp_fabric_tunnel_clock_blocked(
+			of_machine_is_compatible("apple,t6030"), route->mux_index);
 		*tail = &route->core;
 		tail = &route->core.next;
 	}
@@ -1799,6 +1801,10 @@ struct dcp_tb_attach_context {
 static struct mux_control *
 dcp_typec_tunnel_ctl(struct apple_dcp_typec_route *route, unsigned int dpin)
 {
+	if (dpin > 1 ||
+	    (dcp_fabric_tunnel_clock_blocked(of_machine_is_compatible("apple,t6030"),
+					     route->mux_index) & BIT(dpin)))
+		return NULL;
 	if (route->dpin[dpin])
 		return route->dpin[dpin];
 	/* Legacy DT ABI: unnamed DPIN controls share the DP-alt chip. */
