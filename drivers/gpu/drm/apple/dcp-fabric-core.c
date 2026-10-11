@@ -26,6 +26,13 @@ bool dcp_fabric_t6020_flow(bool usb4, bool soc_support, bool connector_wired)
 }
 EXPORT_SYMBOL_GPL(dcp_fabric_t6020_flow);
 
+u8 dcp_fabric_tunnel_clock_blocked(bool t6030, unsigned int source)
+{
+	/* T6030 currently clocks only source 0 feeding DP IN0. */
+	return t6030 ? BIT(1) | (source ? BIT(0) : 0) : 0;
+}
+EXPORT_SYMBOL_GPL(dcp_fabric_tunnel_clock_blocked);
+
 int dcp_fabric_tunnel_request(const struct dcp_fabric_port *ports,
 			      unsigned long key, unsigned int dpin,
 			      const struct dcp_fabric_port **found)
@@ -211,7 +218,7 @@ static void dcp_fabric_plan_pipeline(struct dcp_fabric_pipeline *pipeline,
 	for (stream = 0; stream < 2; stream++) {
 		for (port = ports; port; port = port->next) {
 			struct dcp_fabric_route *route;
-			bool wants;
+			bool wants, tunnel;
 
 			if (stream)
 				wants = port->owner[1] ||
@@ -227,7 +234,10 @@ static void dcp_fabric_plan_pipeline(struct dcp_fabric_pipeline *pipeline,
 			      BIT(pipeline->crtc_index)))
 				continue;
 			route = dcp_fabric_port_route(port, pipeline);
-			if (!route)
+			tunnel = stream || (port->owner[0] && port->owner[0]->tunnel) ||
+				 (port == arriving && dpin == 0);
+			if (!route || (tunnel &&
+				       (route->tunnel_clock_blocked & BIT(stream))))
 				continue;
 			port->plan->target[stream] = route;
 			return;
@@ -293,12 +303,22 @@ dcp_fabric_tunnel_candidate(const struct dcp_fabric_port *port,
 {
 	struct dcp_fabric_route *route, *best = NULL;
 	unsigned int best_score = UINT_MAX;
-	bool waiting = false;
+	bool waiting = false, clock_blocked = false, clock_capable = false;
+
+	if (dpin > 1) {
+		*error = -EINVAL;
+		return NULL;
+	}
 
 	for (route = port->routes; route; route = route->next) {
 		const struct dcp_fabric_pipeline *pipeline = route->pipeline;
 		unsigned int score;
 
+		if (route->tunnel_clock_blocked & BIT(dpin)) {
+			clock_blocked = true;
+			continue;
+		}
+		clock_capable = true;
 		if ((ordered && route != planned) ||
 		    !dcp_fabric_available(pipeline, policy))
 			continue;
@@ -323,7 +343,8 @@ dcp_fabric_tunnel_candidate(const struct dcp_fabric_port *port,
 			best_score = score;
 		}
 	}
-	*error = best ? 0 : waiting ? -EAGAIN : -EBUSY;
+	*error = best ? 0 : waiting ? -EAGAIN :
+		 clock_blocked && !clock_capable ? -EOPNOTSUPP : -EBUSY;
 	return best;
 }
 EXPORT_SYMBOL_GPL(dcp_fabric_tunnel_candidate);
@@ -355,6 +376,12 @@ dcp_fabric_follow(const struct dcp_fabric_route *from,
 		return DCP_FABRIC_FOLLOW_REFUSE;
 	if (from == to)
 		return DCP_FABRIC_FOLLOW_STAY;
+	if ((from->tunnel && (from->dpin > 1 ||
+		(to->tunnel_clock_blocked & BIT(from->dpin)))) ||
+	    (holder && holder->tunnel && holder_back &&
+		(holder->dpin > 1 ||
+		 (holder_back->tunnel_clock_blocked & BIT(holder->dpin)))))
+		return DCP_FABRIC_FOLLOW_REFUSE;
 	pipeline = to->pipeline;
 	if (!pipeline->bound || pipeline->fixed_busy || pipeline->terminal ||
 	    !pipeline->services_ready)
