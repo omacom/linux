@@ -111,6 +111,15 @@ J615_LEGACY_M1N1_SOURCES = ("74ba6bea52d1f865d204bb3f8168705a148fd5c5",
 def member(path, name):
     return subprocess.check_output(['bsdtar', '-xOf', str(path), name])
 
+def check_kernel_bootloader_dependency(metadata):
+    # Kernel-only installs retain m1n1; GPU handoffs have separate admission gates.
+    dependencies = re.findall(r'^depend = (.+)$', metadata, re.M)
+    bootloader = [d for d in dependencies if re.match(r'^m1n1(?:$|[<>=])', d)]
+    if bootloader != ['m1n1>=1.6.1']:
+        raise ValueError('kernel must require m1n1>=1.6.1; newer bootloaders belong to matched GPU profiles')
+    if any(re.match(r'^m1n1-(?:aurora|neo)(?:$|[<>=])', d) for d in dependencies):
+        raise ValueError('kernel-only installs must not require a GPU-profile bootloader package')
+
 def optional_member(path, name):
     result = subprocess.run(['bsdtar', '-xOf', str(path), name], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     return result.stdout if result.returncode == 0 else None
@@ -284,6 +293,7 @@ def assemble(template, manifest, directory):
         if re.findall(r'^arch = (.+)$', metadata,re.M) not in (['aarch64'], ['any']): raise ValueError('unsupported package architecture')
         if role in ('kernel','headers') and re.findall(r'^pkgver = (.+)$',metadata,re.M) != [manifest['version']]:
             raise ValueError('kernel package version and installer version differ')
+        if role == 'kernel': check_kernel_bootloader_dependency(metadata)
         pins[role] = f'{path.name} {digest}'; resolved[role] = path
     check_standard_m1n1_source(sources['m1n1'], resolved['m1n1'])
     binary = member(resolved['m1n1'],'usr/lib/asahi-boot/m1n1.bin')

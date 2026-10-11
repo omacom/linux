@@ -39,6 +39,8 @@ BOARDS = {
     "j504": ["apple,j504", "apple,t8122", "apple,arm-platform"],
     "j516c": ["apple,j516c", "apple,t6031", "apple,arm-platform"],
     "j516m": ["apple,j516m", "apple,t6034", "apple,arm-platform"],
+    "j514c": ["apple,j514c", "apple,t6031", "apple,arm-platform"],
+    "j514m": ["apple,j514m", "apple,t6034", "apple,arm-platform"],
     "j314s": ["apple,j314s", "apple,t6000", "apple,arm-platform"],
     "j293": ["apple,j293", "apple,t8103", "apple,arm-platform"],
     "j313": ["apple,j313", "apple,t8103", "apple,arm-platform"],
@@ -477,6 +479,24 @@ class M3FlowTest(M3FlowBase):
 
     def test_unlisted_m3_pro_is_kernel_only(self):
         self.assert_kernel_only("j514s")
+
+    def test_max_keeps_aurora12_bootloader_and_has_no_gpu_handoff(self):
+        for board in ('j514c', 'j514m', 'j516c', 'j516m'):
+            with self.subTest(board=board):
+                self.assert_kernel_only(board, m1n1='m1n1-aurora-1.6.1.aurora12-1')
+                self.assertNotIn('chosen.asahi,t6030-gpu=1', self.boot.read_bytes().decode())
+
+    def test_kernel_only_pro_keeps_preexisting_aurora_bootloader_on_uninstall(self):
+        self.assert_kernel_only('j516s', stub='15.6', m1n1='m1n1-aurora-1.6.1.aurora12-1')
+
+    def test_max_without_mode_record_keeps_preexisting_aurora_bootloader(self):
+        self.mac('j516c', m1n1='m1n1-aurora-1.6.1.aurora12-1')
+        before = self.boot.read_bytes()
+        self.install()
+        (self.state / 'm3-mode').unlink()
+        self.uninstall()
+        self.assertEqual(self.boot.read_bytes(), before)
+        self.assertNotIn('update-m1n1 rebuilt', self.log())
 
     def test_m3_is_kernel_only(self):
         # The J615; the J613 gets the display handoff by default (test_m3_air_default).
