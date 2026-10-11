@@ -307,21 +307,26 @@ die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 # Downloads $1 to $2. A dropped connection (an HTTP/2 stream reset, a timeout, a cut transfer) is not a missing file:
 # curl --retry skips most of those, and it restarts from byte 0, so each try here is its own curl call that continues from
 # the bytes already on disk. Returns 0 on success (a 416 answer means the file was already complete; the checksum check
-# after the call still decides), 22 when the server answered with a client error (the file is not there), or curl's last
-# exit code after five network failures.
+# after the call still decides). Returns 22 only when the server answers a client error at once (the file is not there).
+# After five failed tries it returns 100 if the last answer was a server error (HTTP 408, 429 or 5xx), else curl's last
+# exit code. Exit 33 (the server ignored the Range request) removes the partial file, so the next try starts at byte 0.
 fetch_release_file() {
-  local url=$1 out=$2 try rc=0 code
+  local url=$1 out=$2 try rc=0 code why last
   for try in 1 2 3 4 5; do
-    code=$(curl -fL --progress-bar -C - -o "$out" -w '%{http_code}' "$url") && return 0
+    code=$(curl -fL --progress-bar --connect-timeout 30 --speed-limit 1024 --speed-time 60 -C - -o "$out" \
+      -w '%{http_code}' "$url") && return 0
     rc=$?
     [[ $rc == 22 && $code == 416 ]] && return 0
     if [[ $rc == 22 && $code == 4* && $code != 408 && $code != 429 ]]; then return 22; fi
+    last=$rc why="curl exit $rc"
+    if [[ $rc == 22 ]]; then last=100 why="HTTP $code"; fi
+    if [[ $rc == 33 ]]; then rm -f "$out"; fi
     if (( try < 5 )); then
-      warn "the download of ${out##*/} was interrupted (curl exit $rc); trying again from where it stopped ($try of 4)"
+      warn "the download of ${out##*/} was interrupted ($why); trying again ($try of 4)"
       sleep $((try * 2))
     fi
   done
-  return "$rc"
+  return "$last"
 }
 
 sudo=""
@@ -4104,9 +4109,10 @@ install_all() {
     or can't be reached: check it, or unset AURORA_RELEASE_URL to install from
     the public release. Nothing was installed."
       ((rc == 22)) ||
-        die "could not download $file from $TAG: the connection dropped (curl exit $rc)
-    on all five tries, which points at the network, not at the release or this Mac.
-    Nothing was installed. Run the same command again; it is safe to repeat."
+        die "could not download $file from $TAG: the download failed on all five tries
+    (curl exit $rc; exit 100 means the server kept answering with an error such as HTTP 503).
+    That points at the network or a busy server, not at the release or this Mac.
+    Nothing was installed. Wait a minute, then run the same command again; it is safe to repeat."
       die "could not download $file from $TAG.
     The release is missing a file this script expects, which is a packaging
     mistake rather than anything wrong with this Mac. Nothing was installed.
