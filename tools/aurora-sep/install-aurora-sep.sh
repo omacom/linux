@@ -4354,11 +4354,13 @@ uninstall_all() {
   # Without a mode record, older supported handoff installs used that package.
   m3_mode=$(m3_recorded_mode)
   if is_m3; then
-    if [[ $m3_mode == kernel ]] || is_m3_kernel_only_chip; then
-      m3_mode=kernel
-    elif pacman -Q m1n1-aurora >/dev/null 2>&1; then
-      m3_mode=handoff
-    elif [[ $m3_mode != handoff ]]; then
+    if pacman -Q m1n1-aurora >/dev/null 2>&1; then
+      if [[ $m3_mode == kernel ]] || is_m3_kernel_only_chip; then
+        m3_mode=kernel
+      else
+        m3_mode=handoff
+      fi
+    elif [[ $m3_mode != handoff ]] || is_m3_kernel_only_chip; then
       m3_mode=kernel
     fi
   else
