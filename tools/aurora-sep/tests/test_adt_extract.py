@@ -285,6 +285,84 @@ class AllowlistTest(unittest.TestCase):
         self.assertNotIn('"y"', text)
 
 
+# --- The neural engine -----------------------------------------------------------------------
+
+def build_ane_adt(units=("",)):
+    """An ADT with one ANE per suffix in units, a DART and mapper for each, and look-alikes that
+    must not print."""
+    arm_io = []
+    for u in units:
+        arm_io.append(node(f"ane{u}", [
+            prop("compatible", "ane,t6031"), prop("reg", [0x88880000, 0x2, 0x100000, 0x0]),
+            prop("interrupts", [0x4c0, 0x4c1]), prop("interrupt-parent", 0xa1),
+            prop("clock-gates", [0x120]), prop("power-gates", [0x121, 0x122]),
+            prop("iommu-parent", 0x9f), prop("ane-type", 1),
+            prop("serial-number", SERIAL),
+        ], [node(f"iop-ane{u}-nub", [prop("compatible", "iop-nub,rtbuddy-v2"),
+                                      prop("segment-names", b"__TEXT\0__DATA\0"),
+                                      prop("uuid", FW_UUID)])]))
+        arm_io.append(node(f"dart-ane{u}", [prop("sids", [0, 1, 2]), prop("vm-size", [0, 0x20])],
+                           [node(f"mapper-ane{u}", [prop("compatible", "iommu-mapper,ane")])]))
+    arm_io += [
+        node("ans", [prop("compatible", "OUTSIDE-ans")], [node("iop-ans-nub", [prop("x", "OUTSIDE-ans")])]),
+        node("sart-ans", [prop("compatible", "OUTSIDE-ans")]),
+        node("plane-info", [prop("compatible", "OUTSIDE-plane")]),
+        node("pmgr", [prop("ane-dpe", 0), prop("ane-tvm", 1)]),
+    ]
+    return node("device-tree", [], [node("arm-io", [prop("compatible", "arm-io,t6031")], arm_io)])
+
+
+class AneTest(unittest.TestCase):
+    def test_ane_nodes_print_for_any_unit_count(self):
+        for units in [("",), ("0",), ("0", "1"), ("", "1", "2", "3")]:
+            with self.subTest(units=units):
+                text = render(build_ane_adt(units))
+                nodes = re.findall(r"^(/\S*)$", text, re.M)
+                for u in units:
+                    for want in [f"/arm-io/ane{u}", f"/arm-io/ane{u}/iop-ane{u}-nub",
+                                 f"/arm-io/dart-ane{u}", f"/arm-io/dart-ane{u}/mapper-ane{u}"]:
+                        self.assertIn(want, nodes)
+                for no in ["/arm-io/ans", "/arm-io/ans/iop-ans-nub", "/arm-io/sart-ans",
+                           "/arm-io/plane-info"]:
+                    self.assertNotIn(no, nodes)
+                self.assertNotIn("OUTSIDE", text)
+
+    def test_ane_properties_and_pmgr_entries(self):
+        text = render(build_ane_adt())
+        self.assertIn("  interrupts [8] = <0x000004c0 0x000004c1>", text)
+        self.assertIn("  power-gates [8] = <0x00000121 0x00000122>", text)
+        self.assertIn("  iommu-parent [4] = <0x0000009f>", text)
+        self.assertIn("  sids [12] = <0x00000000 0x00000001 0x00000002>", text)
+        self.assertIn('  segment-names [14] = "__TEXT", "__DATA"', text)
+        self.assertIn("  ane-dpe [4] = <0x00000000>", text)
+        self.assertIn("  ane-tvm [4] = <0x00000001>", text)
+
+    def test_ane_nodes_keep_the_private_value_rules(self):
+        text = render(build_ane_adt())
+        self.assertNotIn(SERIAL, text)
+        self.assertNotIn(FW_UUID, text)
+        self.assertIn("# dropped: /arm-io/ane serial-number", text)
+
+    def test_patterns(self):
+        for path in ["/arm-io/ane", "/arm-io/ane0", "/arm-io/ane1/iop-ane1-nub",
+                     "/arm-io/dart-ane0", "/arm-io/dart-ane/mapper-ane", "/arm-io/mapper-ane0"]:
+            self.assertTrue(adt.in_allowed_subtree(path), path)
+        for path in ["/arm-io/ans", "/arm-io/sart-ans", "/arm-io/plane", "/ane", "/chosen/arm-io/ane",
+                     "/arm-io/dart-ans"]:
+            self.assertFalse(adt.in_allowed_subtree(path), path)
+
+    @unittest.skipUnless(os.environ.get("AURORA_ADT_FIXTURE"), "set AURORA_ADT_FIXTURE to a real ADT file")
+    def test_real_adt_prints_its_ane_nodes(self):
+        blob = Path(os.environ["AURORA_ADT_FIXTURE"]).read_bytes()
+        root, used, nodes, props = adt.parse_adt(blob)
+        text = adt.render(root, "fixture", used, nodes, props)
+        want = [path for path, _ in adt.walk(root) if re.match(r"/arm-io/(dart-|mapper-)?ane", path)]
+        self.assertTrue(want, "the fixture has no ANE node")
+        printed = re.findall(r"^(/\S*)$", text, re.M)
+        for path in want:
+            self.assertIn(path, printed)
+
+
 # --- Malformed input -------------------------------------------------------------------------
 
 class MalformedTest(unittest.TestCase):
