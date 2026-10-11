@@ -812,9 +812,8 @@ EXPORT_SYMBOL_NS_GPL(dma_buf_fd, "DMA_BUF");
  * Must only be called after all fallible work (e.g. copy_to_user)
  * has succeeded, as it cannot be undone safely once called.
  *
- * The caller is responsible for having emitted the trace event
- * (via dma_buf_fd() or get_unused_fd_flags() + this function)
- * before calling this.
+ * The helper emits the export trace before publishing the fd and transfers
+ * the caller's dma-buf file reference to the descriptor table.
  */
 void dma_buf_fd_install(struct dma_buf *dmabuf, int fd)
 {
