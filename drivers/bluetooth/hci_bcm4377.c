@@ -593,6 +593,13 @@ struct bcm4377_data {
 	bool setup_retry_pending;
 	bool setup_retry_blocked;
 	struct delayed_work setup_retry_work;
+	spinlock_t resume_lock;
+	u64 resume_epoch;
+	u64 resume_pending;
+	bool resume_armed;
+	bool resume_blocked;
+	bool resume_powered;
+	struct work_struct resume_work;
 	bdaddr_t bdaddr;
 
 	struct completion event;
@@ -1499,6 +1506,127 @@ static void bcm4377_setup_retry_work(struct work_struct *work)
 	queue_work(hdev->req_workqueue, &hdev->power_on);
 }
 
+static bool bcm4377_resume_recovery_supported(struct bcm4377_data *bcm4377)
+{
+	return bcm4377->hw->id == 4378 &&
+	       of_machine_is_compatible("apple,j493");
+}
+
+static bool bcm4377_resume_recovery_allowed(struct hci_dev *hdev)
+{
+	return hdev_is_powered(hdev) &&
+	       !hci_dev_test_flag(hdev, HCI_SETUP) &&
+	       !hci_dev_test_flag(hdev, HCI_UNREGISTER) &&
+	       !hci_dev_test_flag(hdev, HCI_USER_CHANNEL) &&
+	       !hci_dev_test_flag(hdev, HCI_RFKILLED) &&
+	       !hci_dev_test_flag(hdev, HCI_POWERING_DOWN);
+}
+
+static void bcm4377_resume_recovery_invalidate(struct bcm4377_data *bcm4377)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&bcm4377->resume_lock, flags);
+	bcm4377->resume_epoch++;
+	bcm4377->resume_armed = false;
+	bcm4377->resume_pending = 0;
+	spin_unlock_irqrestore(&bcm4377->resume_lock, flags);
+}
+
+static int bcm4377_resume_recovery_sync(struct hci_dev *hdev, void *data)
+{
+	struct bcm4377_data *bcm4377 = hci_get_drvdata(hdev);
+	u64 epoch = *(u64 *)data;
+	unsigned long flags;
+	bool allowed;
+
+	/* The core runs this callback under req_lock, after earlier power changes. */
+	spin_lock_irqsave(&bcm4377->resume_lock, flags);
+	allowed = epoch == bcm4377->resume_epoch && !bcm4377->resume_blocked &&
+		  bcm4377_resume_recovery_allowed(hdev);
+	if (allowed)
+		bcm4377->needs_reset = true;
+	spin_unlock_irqrestore(&bcm4377->resume_lock, flags);
+	if (!allowed)
+		return 0;
+
+	dev_warn(&bcm4377->pdev->dev,
+		 "recovering transport once after resume command timeout\n");
+	return hci_reset_dev_sync(hdev);
+}
+
+static void bcm4377_resume_recovery_destroy(struct hci_dev *hdev, void *data,
+					  int err)
+{
+	if (err)
+		bt_dev_warn(hdev, "resume transport recovery failed: %d", err);
+	kfree(data);
+}
+
+static void bcm4377_resume_recovery_work(struct work_struct *work)
+{
+	struct bcm4377_data *bcm4377 = container_of(work, struct bcm4377_data,
+						 resume_work);
+	unsigned long flags;
+	u64 pending, *epoch;
+	int ret;
+
+	spin_lock_irqsave(&bcm4377->resume_lock, flags);
+	pending = bcm4377->resume_pending;
+	bcm4377->resume_pending = 0;
+	if (bcm4377->resume_blocked)
+		pending = 0;
+	spin_unlock_irqrestore(&bcm4377->resume_lock, flags);
+	if (!pending)
+		return;
+
+	epoch = kmalloc(sizeof(*epoch), GFP_KERNEL);
+	if (!epoch) {
+		bt_dev_warn(bcm4377->hdev, "cannot allocate resume recovery request");
+		return;
+	}
+	*epoch = pending;
+	ret = hci_cmd_sync_queue(bcm4377->hdev, bcm4377_resume_recovery_sync,
+				 epoch, bcm4377_resume_recovery_destroy);
+	if (ret)
+		bcm4377_resume_recovery_destroy(bcm4377->hdev, epoch, ret);
+}
+
+static void bcm4377_hci_timeout(struct hci_dev *hdev)
+{
+	struct bcm4377_data *bcm4377 = hci_get_drvdata(hdev);
+	unsigned long flags;
+
+	spin_lock_irqsave(&bcm4377->resume_lock, flags);
+	if (bcm4377->resume_armed && !bcm4377->resume_blocked &&
+	    bcm4377_resume_recovery_allowed(hdev)) {
+		bcm4377->resume_armed = false;
+		bcm4377->resume_pending = bcm4377->resume_epoch;
+		queue_work(system_freezable_wq, &bcm4377->resume_work);
+	}
+	spin_unlock_irqrestore(&bcm4377->resume_lock, flags);
+}
+
+static void bcm4377_resume_recovery_stop(struct bcm4377_data *bcm4377)
+{
+	unsigned long flags;
+
+	if (!bcm4377_resume_recovery_supported(bcm4377))
+		return;
+
+	spin_lock_irqsave(&bcm4377->resume_lock, flags);
+	bcm4377->resume_blocked = true;
+	bcm4377->resume_epoch++;
+	bcm4377->resume_armed = false;
+	bcm4377->resume_pending = 0;
+	spin_unlock_irqrestore(&bcm4377->resume_lock, flags);
+	cancel_work_sync(&bcm4377->resume_work);
+	hci_cmd_sync_dequeue(bcm4377->hdev, bcm4377_resume_recovery_sync,
+			     NULL, NULL);
+	/* A callback already removed from the queue must retire before PCI quiesces. */
+	flush_work(&bcm4377->hdev->cmd_sync_work);
+}
+
 static int bcm4377_hci_open(struct hci_dev *hdev)
 {
 	struct bcm4377_data *bcm4377 = hci_get_drvdata(hdev);
@@ -1538,6 +1666,7 @@ static int bcm4377_hci_close(struct hci_dev *hdev)
 {
 	struct bcm4377_data *bcm4377 = hci_get_drvdata(hdev);
 
+	bcm4377_resume_recovery_invalidate(bcm4377);
 	dev_dbg(&bcm4377->pdev->dev, "destroying rings in hci_close\n");
 
 	if (!bcm4377->needs_reset) {
@@ -2537,6 +2666,7 @@ static void bcm4377_hci_unregister_dev(void *data)
 	struct hci_dev *hdev = data;
 	struct bcm4377_data *bcm4377 = hci_get_drvdata(hdev);
 
+	bcm4377_resume_recovery_stop(bcm4377);
 	WRITE_ONCE(bcm4377->setup_retry_blocked, true);
 	cancel_delayed_work_sync(&bcm4377->setup_retry_work);
 	hci_unregister_dev(hdev);
@@ -2562,6 +2692,8 @@ static int bcm4377_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	bcm4377->hw = &bcm4377_hw_variants[id->driver_data];
 	init_completion(&bcm4377->event);
 	INIT_DELAYED_WORK(&bcm4377->setup_retry_work, bcm4377_setup_retry_work);
+	spin_lock_init(&bcm4377->resume_lock);
+	INIT_WORK(&bcm4377->resume_work, bcm4377_resume_recovery_work);
 
 	ret = bcm4377_prepare_rings(bcm4377);
 	if (ret)
@@ -2660,6 +2792,8 @@ static int bcm4377_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	hdev->set_bdaddr = bcm4377_hci_set_bdaddr;
 	hdev->setup = bcm4377_hci_setup;
 	hdev->post_init = bcm4377_hci_post_init;
+	if (bcm4377_resume_recovery_supported(bcm4377))
+		hdev->reset = bcm4377_hci_timeout;
 
 	if (bcm4377->hw->broken_mws_transport_config)
 		hci_set_quirk(hdev, HCI_QUIRK_BROKEN_MWS_TRANSPORT_CONFIG);
@@ -2697,12 +2831,15 @@ static int bcm4377_suspend(struct device *dev)
 	struct bcm4377_data *bcm4377 = pci_get_drvdata(pdev);
 	int ret;
 
+	bcm4377_resume_recovery_stop(bcm4377);
 	WRITE_ONCE(bcm4377->setup_retry_blocked, true);
 	cancel_delayed_work_sync(&bcm4377->setup_retry_work);
 	/* A retry queued before this fence must finish before PCI quiesces. */
 	flush_work(&bcm4377->hdev->power_on);
+	bcm4377->resume_powered = bcm4377_resume_recovery_allowed(bcm4377->hdev);
 	ret = hci_suspend_dev(bcm4377->hdev);
 	if (ret) {
+		bcm4377->resume_powered = false;
 		WRITE_ONCE(bcm4377->setup_retry_blocked, false);
 		bcm4377_queue_setup_retry(bcm4377);
 		return ret;
@@ -2718,8 +2855,17 @@ static int bcm4377_resume(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	struct bcm4377_data *bcm4377 = pci_get_drvdata(pdev);
+	unsigned long flags;
 	int ret;
 
+	if (bcm4377_resume_recovery_supported(bcm4377)) {
+		spin_lock_irqsave(&bcm4377->resume_lock, flags);
+		bcm4377->resume_blocked = false;
+		bcm4377->resume_armed = bcm4377->resume_powered &&
+			bcm4377_resume_recovery_allowed(bcm4377->hdev);
+		spin_unlock_irqrestore(&bcm4377->resume_lock, flags);
+	}
+	bcm4377->resume_powered = false;
 	iowrite32(BCM4377_BAR0_SLEEP_CONTROL_UNQUIESCE,
 		  bcm4377->bar0 + BCM4377_BAR0_SLEEP_CONTROL);
 

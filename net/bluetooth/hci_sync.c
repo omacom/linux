@@ -5920,6 +5920,19 @@ static int hci_disconnect_all_sync(struct hci_dev *hdev, u8 reason)
 	return 0;
 }
 
+/* Caller holds req_lock so a power change cannot interleave close and reopen. */
+int hci_reset_dev_sync(struct hci_dev *hdev)
+{
+	int ret;
+
+	lockdep_assert_held(&hdev->req_lock);
+	ret = hci_dev_close_sync(hdev);
+	if (!ret)
+		ret = hci_dev_open_sync(hdev);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(hci_reset_dev_sync);
+
 /* This function perform power off HCI command sequence as follows:
  *
  * Clear Advertising
