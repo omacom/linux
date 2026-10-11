@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         Keep one broad test-report issue per Mac and append later results as comments. Add detailed evidence for known bugs to their existing issues and link them here.
-        See [reporting guidance](https://github.com/iconidentify/aurora-linux/blob/custom/sep/CONTRIBUTING.md), [#6](https://github.com/iconidentify/aurora-linux/issues/6), and the [roadmap #57](https://github.com/iconidentify/aurora-linux/issues/57).
+        See [reporting guidance](https://github.com/omacom/linux-aurora/blob/integration/aurora/CONTRIBUTING.md) and the [roadmap #56](https://github.com/omacom/linux-aurora/issues/56).
         Never attach serials, addresses, keys, fingerprints, calibration bytes, raw device trees, per-unit firmware images, or core dumps. Review logs for private data.
   - type: textarea
     id: environment
