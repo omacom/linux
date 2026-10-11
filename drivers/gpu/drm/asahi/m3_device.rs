@@ -30,7 +30,7 @@ pub(crate) struct Device {
     asc: Pin<KBox<Devres<IoMem<0x4000>>>>,
     sgx: Pin<KBox<Devres<IoMem>>>,
     firmware: Firmware,
-    core_mask: u32,
+    core_mask: u64,
     soc: &'static Soc,
     power_vote: bool,
 }
@@ -107,7 +107,11 @@ impl Device {
         let registers = device.sgx.access(pdev.as_ref())?;
         let version = registers.try_read32(0xd04000)?;
         let counts = registers.try_read32(0xd04010)?;
-        let core_mask = registers.try_read32(0xe01500)?;
+        // The core-enable words: the second only on a SoC with more than 32 core slots.
+        let mut core_mask = u64::from(registers.try_read32(0xe01500)?);
+        if crate::m3_board::core_slots(soc) > 32 {
+            core_mask |= u64::from(registers.try_read32(0xe01504)?) << 32;
+        }
         dev_info!(pdev.as_ref(), "M3 {}: power acknowledged, version={:#010x} counts={:#010x} core-mask={:#x}, firmware={}\n",
             soc.gpu_name, version, counts, core_mask, device.firmware.version());
         // These words identify the qualified configuration of this SoC. The
@@ -137,7 +141,7 @@ impl Device {
         Ok(device)
     }
 
-    pub(crate) fn core_mask(&self) -> u32 { self.core_mask }
+    pub(crate) fn core_mask(&self) -> u64 { self.core_mask }
 
     /// The SoC table this device was admitted with.
     pub(crate) fn soc(&self) -> &'static Soc { self.soc }
@@ -215,9 +219,12 @@ impl Device {
         // core-selector protocol as the idle check.
         let service=sgx.try_read32(0xa010)?;
         let debug=sgx.try_read32(0xa000)?;
-        let cores=sgx.try_read32(0xe01500)?;
-        for core in 0..self.soc.clusters * self.soc.cores_per_cluster {
-            if cores & (1<<core)==0 {continue;}
+        let mut cores=u64::from(sgx.try_read32(0xe01500)?);
+        if crate::m3_board::core_slots(self.soc) > 32 {
+            cores |= u64::from(sgx.try_read32(0xe01504)?) << 32;
+        }
+        for core in 0..crate::m3_board::core_slots(self.soc).min(64) {
+            if cores & (1u64<<core)==0 {continue;}
             sgx.try_write32(core,0xa010)?;
             sgx.try_write32(core,0xa000)?;
             dev_info!(self.dev.as_ref(),"M3_USC core={} VDM={:#x}/{:#x} PDM={:#x}/{:#x} CDM={:#x}/{:#x}\n",

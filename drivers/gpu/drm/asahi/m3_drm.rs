@@ -158,7 +158,7 @@ impl Registered {
 }
 impl Drop for Registered { fn drop(&mut self) { self.stop(); } }
 struct Backend { shared: Shared, health: Arc<crate::m3_rtkit::Health>, ids: gpu::SequenceIDs,
-    scheduler:Arc<drm::sched::Scheduler<crate::m3_submit::Job>>, core_mask: u32, max_frequency_khz: u32,
+    scheduler:Arc<drm::sched::Scheduler<crate::m3_submit::Job>>, core_mask: u64, max_frequency_khz: u32,
     soc: &'static crate::m3_soc::Soc }
 impl DrmGpu for Backend {
     fn init(&self) -> Result { if self.is_crashed() { Err(ENODEV) } else { Ok(()) } }

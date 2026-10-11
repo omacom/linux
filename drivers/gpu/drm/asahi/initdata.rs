@@ -74,6 +74,9 @@ pub(crate) struct G15Options {
     /// Runtime layout: the SoC's HwDataB configuration words and unit masks
     /// (`m3_soc::Soc::hwdata_b`). None for the manager layout, which does not write them.
     pub(crate) runtime_hwdata_b: Option<&'static G15RuntimeHwDataB>,
+    /// Accept operating points whose clusters have different voltages
+    /// (`m3_soc::Soc::per_cluster_voltages`); see [`PStateTables`].
+    pub(crate) per_cluster_voltages: bool,
 }
 
 /// The HwDataB words of the runtime backend's InitData that are neither its GPU VA layout nor
@@ -116,12 +119,13 @@ impl G15Options {
             reference_ppm: g15
                 && crate::m3_params::g15_debug(crate::m3_params::G15Debug::ManagerReferencePpm),
             runtime_hwdata_b: None,
+            per_cluster_voltages: false,
         }
     }
 
     /// The published performance-state tables for `pwr`.
     pub(crate) fn tables(&self, pwr: &hw::PwrConfig) -> Result<PStateTables> {
-        PStateTables::new(pwr, self.split_pstates, self.cap)
+        PStateTables::new(pwr, self.split_pstates, self.cap, self.per_cluster_voltages)
     }
 
     /// RuntimePointers+0x2d0, a configuration word: 4 in the runtime backend's InitData, 0 (its
@@ -149,6 +153,11 @@ const PSTATE_TABLE_ENTRIES: usize = 16;
 /// by voltage: the primary one with the highest frequency of each voltage, the secondary one with
 /// the lowest, plus the device-tree index of every entry. Entry 0 is the off state in both.
 /// Every frequency and voltage comes from the device tree; nothing is interpolated.
+///
+/// With per-cluster voltages (T6031, whose clusters have their own binned voltage tables), the
+/// states are grouped by their whole voltage list instead: states that share their highest
+/// cluster voltage must have the same voltage on every cluster, the groups are ordered by that
+/// highest voltage, and every cluster's voltage must rise from one entry to the next.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct PStateTables {
     /// Number of entries, including the off state.
@@ -166,6 +175,14 @@ impl PStateTables {
     fn split(
         states: &[hw::PState],
     ) -> Result<([u8; PSTATE_TABLE_ENTRIES], [u8; PSTATE_TABLE_ENTRIES], usize)> {
+        Self::split_for(states, false)
+    }
+
+    /// [`Self::split`], accepting per-cluster voltages when `per_cluster` is set.
+    fn split_for(
+        states: &[hw::PState],
+        per_cluster: bool,
+    ) -> Result<([u8; PSTATE_TABLE_ENTRIES], [u8; PSTATE_TABLE_ENTRIES], usize)> {
         let mut primary = [0u8; PSTATE_TABLE_ENTRIES];
         let mut secondary = [0u8; PSTATE_TABLE_ENTRIES];
         if states.len() < 2 || states.len() > u8::MAX as usize || states[0].freq_hz != 0 {
@@ -178,12 +195,19 @@ impl PStateTables {
             let mut next: Option<(u32, usize, usize)> = None;
             for (i, ps) in states.iter().enumerate().skip(1) {
                 let mv = ps.max_volt_mv();
-                // Every state after the off state runs, with one voltage for all clusters.
-                if ps.freq_hz == 0 || ps.volt_mv.iter().any(|v| *v != mv) {
+                // Every state after the off state runs, with one voltage for all clusters
+                // unless the SoC gives each cluster its own.
+                if ps.freq_hz == 0 || (!per_cluster && ps.volt_mv.iter().any(|v| *v != mv)) {
                     return Err(EINVAL);
                 }
                 if mv <= last_mv {
                     continue;
+                }
+                // States of one entry run every cluster at the same voltages.
+                if let (true, Some((best, hi, _))) = (per_cluster, next) {
+                    if mv == best && states[hi].volt_mv[..] != ps.volt_mv[..] {
+                        return Err(EINVAL);
+                    }
                 }
                 next = match next {
                     Some((best, hi, lo)) if mv == best => Some((
@@ -205,6 +229,16 @@ impl PStateTables {
                 // Faster states must need a higher voltage in both tables.
                 return Err(EINVAL);
             }
+            // With per-cluster voltages, every cluster's voltage rises with the entry.
+            if per_cluster && len > 1 {
+                let previous = &states[primary[len - 1] as usize].volt_mv;
+                let current = &states[hi].volt_mv;
+                if previous.len() != current.len()
+                    || previous.iter().zip(current.iter()).any(|(p, c)| c <= p)
+                {
+                    return Err(EINVAL);
+                }
+            }
             primary[len] = hi as u8;
             secondary[len] = lo as u8;
             len += 1;
@@ -222,10 +256,16 @@ impl PStateTables {
     /// also when the states are published in device-tree order: the firmware may then use any
     /// device-tree state up to the capped frequency, and the cap is translated to the highest
     /// device-tree index whose states all stay at or below it.
-    pub(crate) fn new(pwr: &hw::PwrConfig, split: bool, cap: Option<u64>) -> Result<Self> {
+    /// `per_cluster` accepts per-cluster voltages (see [`PStateTables`]).
+    pub(crate) fn new(
+        pwr: &hw::PwrConfig,
+        split: bool,
+        cap: Option<u64>,
+        per_cluster: bool,
+    ) -> Result<Self> {
         let states = &pwr.perf_states;
         if split {
-            let (primary, secondary, len) = Self::split(states)?;
+            let (primary, secondary, len) = Self::split_for(states, per_cluster)?;
             let top = len as u64 - 1;
             let max = cap.map_or(top, |c| c.clamp(1, top)) as u32;
             return Ok(PStateTables {

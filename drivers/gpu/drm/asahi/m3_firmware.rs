@@ -140,6 +140,20 @@ pub(crate) static T8122_LAYOUT: Layout = Layout {
     version: "RTKit-2419.140.12.release",
 };
 
+/// The T6031 firmware-compat 14.8.3 segment sizes and VAs, from the J516C ADT (iop-gfx-nub0
+/// segment-ranges: TEXT 0x64000 and DATA 0x140000 at the VAs both other layouts use). Neither
+/// existing layout matches them. Groundwork only, read by nothing: the boot-entropy tag offset
+/// and the version of the loaded image are not known yet (0 and "unknown" stand for them).
+#[allow(dead_code)]
+pub(crate) const T6031_LAYOUT: Layout = Layout {
+    text_size: 0x64000,
+    data_size: 0x14_0000,
+    vas: [0xffff_fc00_0000_0000, 0xffff_fc00_0006_4000],
+    entropy_tag_offset: 0,
+    entropy_tag: *b"GKTS\x08\x00\x00\x00",
+    version: "unknown",
+};
+
 pub(crate) const TEXT_SHA256: [u8; 32] = [
     0x11, 0xe4, 0x9f, 0x75, 0xb, 0x67, 0x1a, 0x2b, 0x13, 0xd0, 0x92, 0xdb, 0x1c, 0xbc, 0xa3, 0xa8, 0x77, 0x55, 0x86, 0xd6, 0xb1, 0xe3, 0xaa, 0xe8, 0xa6, 0xa4, 0x64, 0xa7, 0x80, 0x2, 0x93, 0xd5];
 
@@ -361,6 +375,21 @@ mod tests {
             resources.firmware_vas[1] += 0x4000;
             assert!(!Firmware::matching_layout(layout, &resources));
         }
+    }
+
+    #[test]
+    fn t6031_layout_is_the_adt_segments_and_matches_neither_other_layout() {
+        let layout = &T6031_LAYOUT;
+        assert_eq!((layout.text_size, layout.data_size), (0x64000, 0x140000));
+        assert_eq!(layout.vas, [0xffff_fc00_0000_0000, 0xffff_fc00_0000_0000 + 0x64000]);
+        assert_eq!(layout.entropy_tag, T8122_LAYOUT.entropy_tag);
+        let mut regions = [Region { base: 0, size: 0 }; 6];
+        regions[4].size = layout.text_size;
+        regions[5].size = layout.data_size;
+        let resources = Resources { regions, firmware_vas: layout.vas };
+        assert!(Firmware::matching_layout(layout, &resources));
+        assert!(!Firmware::matching_layout(&T6030_LAYOUT, &resources));
+        assert!(!Firmware::matching_layout(&T8122_LAYOUT, &resources));
     }
 
     #[test]

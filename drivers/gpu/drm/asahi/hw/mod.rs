@@ -15,6 +15,7 @@ pub(crate) mod agx3;
 pub(crate) mod t600x;
 pub(crate) mod t602x;
 pub(crate) mod t6030;
+pub(crate) mod t6031;
 pub(crate) mod t8103;
 pub(crate) mod t8112;
 pub(crate) mod t8122;
@@ -27,6 +28,10 @@ pub(crate) enum GpuRevision {
     A1 = 0x01,
     B0 = 0x10,
     B1 = 0x11,
+    /// The chip revision T6031 (M3 Max) reports (/arm-io chip-revision 0x12). Only the T6031
+    /// table names it; no identification path maps a register read to it yet.
+    #[allow(dead_code)]
+    B2 = 0x12,
     C0 = 0x20,
     C1 = 0x21,
 }
@@ -60,7 +65,9 @@ pub(crate) enum GpuCore {
     // G15P = 21,
     G15G = 22,
     G15S = 23,
-    // G15C = 24,
+    /// The next entry of the same list, not confirmed; only the T6031 table names it.
+    #[allow(dead_code)]
+    G15C = 24,
 }
 
 /// GPU revision ID. Note: Part of the firmware ABI.

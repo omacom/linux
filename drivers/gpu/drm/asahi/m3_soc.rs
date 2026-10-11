@@ -121,8 +121,10 @@ pub(crate) struct Soc {
     pub(crate) cores_per_cluster: u32,
     /// Accepted compatible lists of the GPU coprocessor mailbox.
     pub(crate) mailbox_compatibles: &'static [&'static [u8]],
-    /// The mailbox interrupts: send-empty, send-not-empty, recv-empty, recv-not-empty.
-    pub(crate) mailbox_interrupts: [u32; 12],
+    /// The mailbox interrupts: send-empty, send-not-empty, recv-empty, recv-not-empty, as the
+    /// mailbox node's `interrupts` cells (three per interrupt, or four with the die cell of a
+    /// multi-die interrupt controller).
+    pub(crate) mailbox_interrupts: &'static [u32],
     /// The register windows of the GPU node and its mailbox.
     pub(crate) windows: Windows,
     /// The identification words the runtime admits.
@@ -176,6 +178,9 @@ pub(crate) struct Soc {
     pub(crate) globals_words: &'static [(usize, u32)],
     /// The boot loader's decoded GPU leakage fuse, when it exports one for this SoC.
     pub(crate) leak_fuse: Option<LeakFuse>,
+    /// Whether each operating point may give each cluster its own voltage (the per-cluster,
+    /// binned voltage tables of T6031). Otherwise every cluster of a point must have the same.
+    pub(crate) per_cluster_voltages: bool,
 }
 
 impl Soc {
@@ -279,7 +284,7 @@ pub(crate) static T6030: Soc = Soc {
         b"apple,t6030-asc-mailbox\0apple,asc-mailbox-v4\0",
         b"apple,t6030-agx-asc-mailbox\0",
     ],
-    mailbox_interrupts: [0, 832, 4, 0, 833, 4, 0, 834, 4, 0, 835, 4],
+    mailbox_interrupts: &[0, 832, 4, 0, 833, 4, 0, 834, 4, 0, 835, 4],
     // The T6030 device tree (t6030-gpu.dtsi): asc, sgx and the mailbox at asc + 0x8000.
     windows: Windows {
         asc: 0x2_9240_0000,
@@ -324,6 +329,7 @@ pub(crate) static T6030: Soc = Soc {
     globals_words: &[],
     // The boot loader reads the T6030 leakage fuse itself and writes apple,core-leak-coef.
     leak_fuse: None,
+    per_cluster_voltages: false,
 };
 
 /// T8122 (M3, G15G): one die, one cluster of ten core slots (eight or ten of them active).
@@ -354,7 +360,7 @@ pub(crate) static T8122: Soc = Soc {
         b"apple,t8122-agx-asc-mailbox\0",
         b"apple,t8122-asc-mailbox\0apple,asc-mailbox-v4\0",
     ],
-    mailbox_interrupts: [0, 723, 4, 0, 724, 4, 0, 725, 4, 0, 726, 4],
+    mailbox_interrupts: &[0, 723, 4, 0, 724, 4, 0, 725, 4, 0, 726, 4],
     // The J613 ADT: sgx reg[0] (child 0x80000000 + arm-io 0x210000000) and gfx-asc reg[0]; the
     // mailbox at asc + 0x8000 (t8122-gpu.dtsi). The same addresses as on T6030.
     windows: Windows {
@@ -427,6 +433,76 @@ pub(crate) static T8122: Soc = Soc {
         values: c_str!("asahi,t8122-gpu-leak-fuse"),
         switch: c_str!("asahi,t8122-gpu-fuse-leakage"),
     }),
+    per_cluster_voltages: false,
+};
+
+/// T6031 (M3 Max, G15C): one die, four clusters of ten core slots. Groundwork only: not in
+/// [`SOCS`], so nothing reads it, and T6031 still fails closed in the probe (`driver.rs`).
+///
+/// The compatibles, the register windows, the mailbox and its interrupts are the J516C ADT's
+/// (`t6031-gpu.dtsi`). The power configuration and the operating points, with one voltage per
+/// cluster, would come from the boot loader. Every value the ADT does not give is `None`, and
+/// `unported` names what is missing, so `require_complete` would refuse this table as it is.
+/// The candidates for the missing values are listed in `t6031_knobs`.
+#[allow(dead_code)]
+pub(crate) static T6031: Soc = Soc {
+    name: "T6031",
+    gpu_name: "G15C",
+    chip_id: 0x6031,
+    gpu_variant: hw::GpuVariant::C,
+    // /arm-io chip-revision 0x12; to be confirmed by the GPU's own identification register.
+    gpu_revision: hw::GpuRevision::B2,
+    gpu_revision_id: hw::GpuRevisionID::B1,
+    board: "apple,t6031",
+    gpu: "apple,agx-t6031",
+    // No board is validated.
+    validated_boards: &[],
+    clusters: 4,
+    cores_per_cluster: 10,
+    mailbox_compatibles: &[b"apple,t6031-agx-asc-mailbox\0"],
+    // The ADT's gfx-asc interrupts 1244, 1243, 1246, 1245, in mailbox order, on die 0 of the
+    // four-cell AIC.
+    mailbox_interrupts: &[0, 0, 1243, 4, 0, 0, 1244, 4, 0, 0, 1245, 4, 0, 0, 1246, 4],
+    // ADT sgx reg[0] and gfx-asc reg[0] through /arm-io ranges (child + 0x2_0000_0000); the
+    // mailbox at asc + 0x8000, as on T6030 and T8122.
+    windows: Windows {
+        asc: 0x4_0a40_0000,
+        sgx: 0x4_0800_0000,
+        mailbox: 0x4_0a40_8000,
+    },
+    // Family 7, variant 4; one die with four clusters. The revision is left to the read.
+    id: IdWords {
+        version: 0x0704_0000,
+        version_mask: 0xffff_0000,
+        counts: 0x0001_0400,
+        counts_mask: 0x000f_ff00,
+    },
+    images: &[],
+    firmware: None,
+    hwcfg: Some(&hw::t6031::CONFIG),
+    io_mappings: None,
+    iomaps: None,
+    // The boot loader's ladder from this machine's ADT (J516C: eight voltages, up to 1380 MHz).
+    pstates: PstateTable::DeviceTree,
+    sgx_setup: None,
+    hwdata_b: None,
+    features: Features {
+        compute_wide_visibility: false,
+        fragment_dependency: false,
+    },
+    power_from_boot_loader: true,
+    unported: &["the G15C values the device tree does not give (InitData version, IO mappings, HwDataB words, MTR masks): no start is written for this SoC"],
+    // The performance state only, as on T8122.
+    retire_mmio: 4,
+    mtr_masks: None,
+    hwdata_object: None,
+    registers: RegisterSet::G15S,
+    ut_engagement: 1,
+    power_target_cap_mw: None,
+    hwdata_words: &[],
+    globals_words: &[],
+    leak_fuse: None,
+    per_cluster_voltages: true,
 };
 
 /// The T8122 HwData words that differ from the shared builder's (offsets into the object;
