@@ -41,6 +41,7 @@ BOARDS = {
     "j516s": ["apple,j516s", "apple,t6030", "apple,arm-platform"],
     "j514s": ["apple,j514s", "apple,t6030", "apple,arm-platform"],
     "j514c": ["apple,j514c", "apple,t6031", "apple,arm-platform"],
+    "j514m": ["apple,j514m", "apple,t6034", "apple,arm-platform"],
     "j293": ["apple,j293", "apple,t8103", "apple,arm-platform"],
     "j613": ["apple,j613", "apple,t8122", "apple,arm-platform"],
     "j615": ["apple,j615", "apple,t8122", "apple,arm-platform"],
@@ -216,9 +217,22 @@ esp_bootbin() {{ [[ -f '{self.esp}/m1n1/boot.bin' ]] && echo '{self.esp}/m1n1/bo
         out = self.run_sh("M3_TRY=1\nm3_plan").stderr
         self.assertIn("nobody", out)
 
+    def test_plan_try_on_the_m3_max(self):
+        # The 16-core M3 Max's opt-in boot loader variant: the same stub and stage 1 checks.
+        self.mac("j514c")
+        self.assertEqual(self.plan(try_=1), "handoff")
+        self.assertEqual(self.plan(), "kernel")
+        for stub, want in (("15.6", "stub is 15.6"),):
+            self.mac("j514c", stub=stub)
+            proc = self.run_sh("M3_TRY=1\nm3_plan", check=False)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn(want, proc.stderr)
+
     def test_plan_try_refused_elsewhere(self):
         # The M3 MacBook Air's own opt-in is in test_m3_air.py.
-        for board, stub, why in [("j504", "14.8.3", "M3 Pro"), ("j514c", "14.8.3", "M3 Pro"),
+        # The 16-core M3 Max (j514c) takes --m3-handoff (test_m3max_kit.VariantTest); the 14-core
+        # one (j514m) does not.
+        for board, stub, why in [("j504", "14.8.3", "M3 Pro"), ("j514m", "14.8.3", "M3 Pro"),
                                  ("j314s", "13.5", "isn't an M3"), ("j700", "26.4", "isn't an M3"),
                                  ("j514s", "15.6", "stub is 15.6"), ("j516s", "15.6", "stub is 15.6")]:
             with self.subTest(board=board, stub=stub):

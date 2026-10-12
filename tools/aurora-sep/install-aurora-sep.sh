@@ -8,6 +8,11 @@
 #   ... | bash -s -- --m3-report      M3: write a bring-up report to attach to an issue (read-only)
 #   ... | bash -s -- --m3-power-survey   M3: sample the SMC's temperature and power keys through
 #                                         short CPU and backlight loads (opt-in, about 5 minutes)
+#   ... | bash -s -- --m3max-kit          16-core M3 Max (j514c, j516c): the test kit. One consent
+#                                         screen, then the kernel and the boot loader variant, and
+#                                         test boots one at a time across restarts, by itself; one
+#                                         file to upload at the end. Then, at any time:
+#                                         sudo aurora-m3max-kit --status | --stop | --restore
 #   ... | bash -s -- --m3-gpu-experiment   M3 MacBook Air only: install the GPU start
 #                                         experiment's scripts with the kernel (arms nothing)
 #   ... | bash -s -- --m3-gpu-persistent   J613 on current14: install the matched stack and
@@ -232,12 +237,12 @@ set -euo pipefail
 # bash reads it from a regular file (bash /path/install-aurora-sep.sh), hashed here, before
 # anything else runs. Through a pipe (curl ... | bash) it can't be read again: then
 # "unavailable" and source "stdin", never a guess.
-SELF_SOURCE=stdin SELF_SHA256=unavailable
+SELF_SOURCE=stdin SELF_SHA256=unavailable SELF_PATH=""
 case ${BASH_SOURCE[0]:-} in
   "" | /dev/* | /proc/*) ;;
   *)
     if [[ -f ${BASH_SOURCE[0]} ]]; then
-      SELF_SOURCE="file"
+      SELF_SOURCE="file" SELF_PATH=${BASH_SOURCE[0]}
       SELF_SHA256=$(sha256sum <"${BASH_SOURCE[0]}" 2>/dev/null | cut -d' ' -f1) || SELF_SHA256=""
       [[ $SELF_SHA256 =~ ^[0-9a-f]{64}$ ]] || SELF_SHA256=unavailable
     fi
@@ -509,6 +514,14 @@ is_m3_air() {
   [[ -n $board && " $M3_AIR_BOARDS " == *" $board "* ]]
 }
 
+# The M3 Maxes with a boot loader variant (M3_MAX_BOARDS, t6031). The t6034 is not one of them.
+is_m3_max() {
+  local board
+  tr '\0' '\n' <"$DT/compatible" 2>/dev/null | grep -qx 'apple,t6031' || return 1
+  board=$(this_board)
+  [[ -n $board && " $M3_MAX_BOARDS " == *" $board "* ]]
+}
+
 # M3 support is experimental. Every M3 gets linux-aurora; what happens to m1n1's
 # stage 2 (boot.bin: m1n1, device trees and U-Boot) depends on the model, and
 # m3_plan decides it before anything is downloaded (M3_MODE):
@@ -606,6 +619,28 @@ M3_AIR_DRY_RUN_SWITCHES="chosen.asahi,t8122-gpu-diag=1 chosen.asahi,t8122-gpu-ha
 M3_AIR_SWITCHES="chosen.asahi,t8122-dcp=1 chosen.asahi,t8122-gpu-handoff-diag=1"
 # Its name in $STATE/m3-mode: this release's m1n1 with M3_AIR_SWITCHES.
 M3_AIR_DEFAULT_VARIANT="air-handoff-12"
+# The M3 Max (t6031: the 14" J514C and the 16" J516C) has one boot loader variant, opt-in only:
+# --m3-handoff, or the M3 Max test kit (--m3max-kit), puts M1N1_PACKAGE on with
+# M3_MAX_SAFE_SWITCHES. A plain run stays kernel-only (is_m3_kernel_only_chip), and the t6034
+# (J514M, J516M) has no variant: it needs its own ADT first. The T6031 m1n1 (aurora17.t6031 and
+# later) runs its handoffs on a J514C/J516C unless a switch says =0: chosen.asahi,t6031-dcp
+# (the display handoff; the dcp-oslog reservations stay either way) and chosen.asahi,t6031-gpu
+# (the GPU image facts, the powered identity read and the GPU node fill). The variant boots with
+# the GPU part off: its identity read powers the GPU on every boot, and a read that stalled the
+# bus would hang every boot of that boot.bin, which no one-shot entry can undo. Only the test kit
+# turns it on (M3_MAX_GPU_HANDOFF, M3_MAX_SWITCHES), for its boot loader GPU stage, after the
+# interim results are packed, and turns it off again. The display handoff, the log reservations,
+# the PMP values and the firmware UUIDs stay on; the kernel's new T6031 paths are off unless a
+# one-shot boot of the kit switches one on. m1n1_pkg_has_handoff refuses an m1n1 that lacks
+# either name, so a release whose m1n1 names them differently stops before anything changes. A
+# release whose m1n1 changes what a Max boots gives the variant a new name: a Max on another
+# variant then moves to it only with a new --m3-handoff.
+M3_MAX_BOARDS="j514c j516c"
+M3_MAX_SWITCHES="chosen.asahi,t6031-dcp=1 chosen.asahi,t6031-gpu=1"
+M3_MAX_SAFE_SWITCHES="chosen.asahi,t6031-dcp=1 chosen.asahi,t6031-gpu=0"
+M3_MAX_VARIANT="t6031-gpu-off-1"
+# 1 only while the test kit's boot loader GPU stage needs M3_MAX_SWITCHES (m3max_kit_loader).
+M3_MAX_GPU_HANDOFF=0
 # --m3-gpu-experiment (M3 MacBook Air only) installs the GPU start experiment's tools with the
 # kernel: three scripts in M3_GPU_BIN, from this release (M3_GPU_SCRIPTS, checked like the
 # packages), and the opt-in file M3_GPU_OPTIN that lets mesa-m3's login hook use the Air's GPU.
@@ -747,6 +782,8 @@ M1N1_CONF_BEGIN="# >>> aurora-sep: M3 Pro display and GPU handoff (remove with: 
 M1N1_CONF_END="# <<< aurora-sep: M3 Pro display and GPU handoff"
 M1N1_CONF_AIR_BEGIN="# >>> aurora-sep: M3 Air handoff (remove with: install-aurora-sep.sh --uninstall)"
 M1N1_CONF_AIR_END="# <<< aurora-sep: M3 Air handoff"
+M1N1_CONF_MAX_BEGIN="# >>> aurora-sep: M3 Max boot loader variant (remove with: install-aurora-sep.sh --uninstall)"
+M1N1_CONF_MAX_END="# <<< aurora-sep: M3 Max boot loader variant"
 # The M3 bring-up's install-m3gpu.sh froze boot.bin with exactly these lines,
 # and left this marker when it created the file.
 M3GPU_FREEZE=(
@@ -936,6 +973,10 @@ m3_air_off_notice() {
 # ones, or the M3 Air's without those its owner switched off.
 m3_switches() {
   local s on=()
+  if is_m3_max; then
+    if ((M3_MAX_GPU_HANDOFF)); then echo "$M3_MAX_SWITCHES"; else echo "$M3_MAX_SAFE_SWITCHES"; fi
+    return 0
+  fi
   if ! is_m3_air; then
     echo "$M3_SWITCHES"
     return 0
@@ -971,6 +1012,7 @@ m1n1_version() {
 m3_handoff_name() {
   if ((M3_GPU_PERSISTENT)) && m3_25_j615; then echo "experimental J615 (untested) $M3_GPU_PROFILE GPU/display handoff"; return; fi
   if ((M3_GPU_PERSISTENT)); then echo "experimental J613 $M3_GPU_PROFILE GPU/display handoff"; return; fi
+  if is_m3_max; then echo "M3 Max boot loader variant ($M3_MAX_VARIANT)"; return; fi
   if ! is_m3_air; then
     echo "M3 Pro display and GPU handoff"
   elif m3_air_default; then
@@ -1236,9 +1278,10 @@ m3gpu_unfreeze() {
 m1n1_conf_without_switches() {
   [[ -f $M1N1_CONF ]] || return 0
   awk -v b="$M1N1_CONF_BEGIN" -v e="$M1N1_CONF_END" \
-    -v ab="$M1N1_CONF_AIR_BEGIN" -v ae="$M1N1_CONF_AIR_END" '
-    $0 == b || $0 == ab { skip = 1; next }
-    skip && ($0 == e || $0 == ae) { skip = 0; next }
+    -v ab="$M1N1_CONF_AIR_BEGIN" -v ae="$M1N1_CONF_AIR_END" \
+    -v mb="$M1N1_CONF_MAX_BEGIN" -v me="$M1N1_CONF_MAX_END" '
+    $0 == b || $0 == ab || $0 == mb { skip = 1; next }
+    skip && ($0 == e || $0 == ae || $0 == me) { skip = 0; next }
     !skip' "$M1N1_CONF"
 }
 
@@ -1247,6 +1290,9 @@ m3_switches_write() {
   if is_m3_air; then
     begin=$M1N1_CONF_AIR_BEGIN
     end=$M1N1_CONF_AIR_END
+  elif is_m3_max; then
+    begin=$M1N1_CONF_MAX_BEGIN
+    end=$M1N1_CONF_MAX_END
   fi
   tmp=$(mktemp)
   m1n1_conf_without_switches >"$tmp"
@@ -1261,7 +1307,8 @@ m3_switches_write() {
 
 m3_switches_remove() {
   local tmp
-  [[ -f $M1N1_CONF ]] && grep -qxF -e "$M1N1_CONF_BEGIN" -e "$M1N1_CONF_AIR_BEGIN" "$M1N1_CONF" || return 0
+  [[ -f $M1N1_CONF ]] && grep -qxF -e "$M1N1_CONF_BEGIN" -e "$M1N1_CONF_AIR_BEGIN" -e "$M1N1_CONF_MAX_BEGIN" "$M1N1_CONF" ||
+    return 0
   tmp=$(mktemp)
   m1n1_conf_without_switches >"$tmp"
   if grep -q '[^[:space:]]' "$tmp"; then
@@ -1284,6 +1331,7 @@ m3_recorded_mode() {
 # into a GPU start) without a new --m3-handoff.
 m3_variant() {
   if ((M3_GPU_PERSISTENT)); then echo "air-gpu-persistent-$M3_GPU_PROFILE"; return; fi
+  if is_m3_max; then echo "$M3_MAX_VARIANT"; return; fi
   if ! is_m3_air; then echo "$M3_PRO_VARIANT"
   elif m3_air_default; then echo "$M3_AIR_DEFAULT_VARIANT"
   elif [[ $M3_AIR_DISPLAY_HANDOFF == 1 ]]; then echo "$M3_AIR_DISPLAY_VARIANT"
@@ -1371,9 +1419,18 @@ m3_plan() {
     $(m3_handoff_name) ($(m3_variant)). Run this again with --m3-handoff to switch to it.
     Nothing was installed."
     fi
+    # The same for an M3 Max: it opted in to an earlier variant, not to this one.
+    variant=$(m3_recorded_variant)
+    if is_m3_max && [[ $variant != "$(m3_variant)" ]]; then
+      die "M3 Max ($board): this Mac has m1n1's boot loader variant from an earlier release
+    (${variant:-no variant recorded}), and this release's is another one ($(m3_variant)). Nothing was
+    installed; this Mac keeps the boot loader and kernel it has. To switch to the new variant (it
+    replaces this Mac's boot loader, and the steps to put the old one back follow), run this again
+    with --m3-handoff:
+      curl -fsSL $LATEST_URL | bash -s -- --m3-handoff"
+    fi
     # The same for an M3 Pro that is not on the list: it opted in to an
     # earlier m1n1, not to this one.
-    variant=$(m3_recorded_variant)
     if is_m3_pro && ! is_m3_handoff_board && [[ $variant != "$(m3_variant)" ]]; then
       die "M3 Pro ($board): this Mac has m1n1's display and GPU handoff from an earlier release
     (${variant:-no variant recorded}), and this release's m1n1 is a newer one ($(m3_variant)) that
@@ -1396,7 +1453,11 @@ m3_plan() {
     (it replaces this Mac's boot loader), see case D in the M3 section of: bash -s -- --agent-prompt"
       return 0
     fi
+  elif is_m3_max && ((M3_TRY)); then
+    # The opt-in M3 Max variant: the same stub, stage 1 and freeze checks as the M3 Pro below.
+    :
   elif ! is_m3_pro; then
+    # 12.3's words, unchanged for every Mac that reaches them (the 16-core M3 Max no longer does).
     ((M3_TRY == 0)) || die "--m3-handoff is for an M3 Pro (t6030) or an M3 MacBook Air (j613, j615);
     this M3 ($board) has no display and GPU handoff in m1n1 yet. Nothing was installed."
     say "M3 ($board): installing the kernel only. m1n1 has no display and GPU handoff for this chip
@@ -1445,6 +1506,8 @@ m3_plan() {
   M3_MODE=handoff
   if ((kept && air)); then
     say "M3 MacBook Air ($board): this Mac has m1n1's $(m3_handoff_name) from an earlier install; keeping it"
+  elif ((kept)) && is_m3_max; then
+    say "M3 Max ($board): this Mac has m1n1's $(m3_handoff_name) from an earlier install; keeping it"
   elif ((kept)); then
     say "M3 ($board): this Mac has m1n1's display and GPU handoff from an earlier install; keeping it"
   fi
@@ -1454,6 +1517,14 @@ m3_plan() {
       m3_25_j615_warning
     else
       say "J613: installing matched experimental GPU profile $M3_GPU_PROFILE; current OS firmware is retained"
+    fi
+  elif is_m3_max; then
+    if ((!kept)); then
+      warn "--m3-handoff: installing m1n1's $(m3_handoff_name) on this M3 Max ($board). It reserves
+    the display processors' log buffers, publishes the M3 Max facts and hands the internal display
+    over for the kernel to take or leave; its GPU handoff stays off (chosen.asahi,t6031-gpu=0). The
+    kernel's new M3 Max paths stay off, so the desktop stays on the boot framebuffer.
+    This replaces the Mac's boot loader; the steps to put the old one back from macOS follow."
     fi
   elif ((air)); then
     if m3_air_default; then
@@ -1494,6 +1565,7 @@ m3_plan() {
 m3_verify_bootbin() {
   local target tail block size kind="M3 Pro"
   if is_m3_air; then kind="M3 Air"; fi
+  if is_m3_max; then kind="M3 Max"; fi
   target=$(esp_bootbin) || die "could not find m1n1's boot.bin to check the $kind switches in"
   size=$(stat -c %s "$M1N1_BIN")
   $sudo cmp -s -n "$size" "$M1N1_BIN" "$target" ||
@@ -3180,6 +3252,10 @@ bootbin_backup() {
   if [[ $M3_MODE == handoff ]] && is_m3_air; then
     keep_bootbin_on_esp "This replaces the boot loader of this M3 MacBook Air ($board)
     with m1n1-aurora and its $(m3_handoff_name)."
+  elif [[ $M3_MODE == handoff ]] && is_m3_max; then
+    keep_bootbin_on_esp "This replaces the boot loader of this M3 Max ($board) with
+    m1n1-aurora and its $(m3_handoff_name)."
+    m3max_bootbin_record
   elif [[ $M3_MODE == handoff ]]; then
     keep_bootbin_on_esp "This replaces the boot loader of this M3 Pro ($board) with
     m1n1-aurora and its display and GPU handoff."
@@ -4175,6 +4251,8 @@ install_all() {
     m3_persistent_keep_entry
     m3_persistent_transaction_begin "$chain"
   fi
+  # The M3 Max test kit keeps the kernel this Mac runs as a boot menu entry before it changes.
+  if ((M3MAX_KIT)); then m3_keep_limine_entry retain; fi
   # The kernel this Mac had before the first install; an update keeps it.
   if [[ ! -f $STATE/previous-package ]]; then
     pacman -Q "$kernel" | $sudo tee "$STATE/previous-package" >/dev/null
@@ -4285,6 +4363,11 @@ install_all() {
     say "Done. The matched kernel, Mesa and bootloader are installed with experimental GPU
     profile $M3_GPU_PROFILE selected for subsequent boots. The retained previous entry stays
     in the boot menu with GPU start disabled and Mesa off. Touch ID is not supported on M3 yet."
+  elif [[ $M3_MODE == handoff ]] && is_m3_max; then
+    say "Done. Reboot: expect the boot menu, then the same desktop on the boot framebuffer. m1n1
+    now reserves the display processors' log buffers, publishes the M3 Max facts and hands the
+    internal display over (its GPU handoff stays off); the kernel's new M3 Max paths stay off.
+    Touch ID is not supported on M3 yet."
   elif [[ $M3_MODE == handoff ]] && m3_air_default; then
     say "Done. Reboot: expect the Omarchy logo, the boot menu, then the same desktop on the boot
     framebuffer. m1n1 now hands the built-in display over and describes the GPU firmware for
@@ -4345,13 +4428,23 @@ install_all() {
 }
 
 uninstall_all() {
-  local previous=linux-asahi m3_mode=none neo_restore=0
+  local previous=linux-asahi m3_mode=none neo_restore=0 max_variant=0
   if is_neo && [[ -f $STATE/neo-before.json ]]; then neo_restore=1; fi
   require_supported_soc "Uninstalling, which rebuilds boot.bin with the stock m1n1,"
+  # An M3 Max on its boot loader variant gets the boot.bin it booted before the variant back,
+  # checked by its recorded sha256 before anything changes (m3max_bootbin_restore).
+  if is_m3_max && [[ $(m3_recorded_mode) == handoff ]]; then
+    max_variant=1
+    m3max_bootbin_restore check ||
+      die "this M3 Max has m1n1's boot loader variant, and the boot.bin it booted before it can't be
+    put back (see above). Nothing was uninstalled."
+  fi
   # Before anything changes: a boot left armed for the kernel being removed would fail Limine's
   # hash check at the next boot.
   m3_gpu_disarm || die "air-gpu-oneshot.sh --disarm failed, so a boot may still be armed for the
     kernel --uninstall would remove. Nothing was uninstalled. Run: sudo air-gpu-oneshot.sh --disarm"
+  # The M3 Max test kit stops for good (its results stay in $M3MAX_KIT_STATE).
+  m3max_kit_uninstall
   if [[ -f $STATE/previous-package ]]; then read -r previous _ <"$STATE/previous-package" || true; fi
   # 11.36 rewrote this on every run, so an updated Mac may name linux-aurora
   # itself, which the repositories don't carry for these Macs.
@@ -4387,6 +4480,10 @@ uninstall_all() {
   if is_neo && { [[ $NEO_AURORA_M1N1 != 1 ]] || ! pacman -Q m1n1-aurora >/dev/null 2>&1; }; then
     m1n1=
     say "Reinstalling $previous and the stock libfprint; this MacBook Neo keeps its own m1n1"
+  elif ((max_variant)); then
+    m1n1=
+    say "Reinstalling $previous and the stock libfprint; this M3 Max gets back the boot.bin it booted
+    before m1n1's boot loader variant"
   elif [[ $m3_mode == kernel ]]; then
     m1n1=
     say "Reinstalling $previous and the stock libfprint; this M3 keeps its m1n1 and boot.bin as they are"
@@ -4396,6 +4493,12 @@ uninstall_all() {
   $sudo pacman -Rdd --noconfirm aurora-touchid 2>/dev/null || true
   # The stock m1n1 has no M3 handoff; drop the switches before its rebuild.
   m3_switches_remove
+  # The M3 Max's earlier boot.bin, frozen as a kernel-only M3's is, so the kernel's hook below
+  # leaves it as it is; the freeze comes off at the end, as on any kernel-only M3.
+  if ((max_variant)); then
+    m3max_bootbin_restore
+    m3max_conf_kernel_only
+  fi
   $sudo pacman -S --noconfirm --ask 4 "$previous" "$previous-headers" libfprint $m1n1
   # Restore the stock update-m1n1 configuration on either chain before the
   # rebuild below, so boot.bin goes back to the packaged m1n1 and DTBs.
@@ -4616,7 +4719,7 @@ M3_WORK=""
 # read-only node of the phram MTD device named adt and prints an allowlist of it;
 # "--check <node>" checks the node and what it is bound to, and reads nothing. Empty: a
 # release with none, and the report says so.
-M3_ADT_READER="aurora-adt-extract.py 3563a3bb7ff832bf94401a9ec751afa0424156ac8a1b160813cdfa96d592a72b"
+M3_ADT_READER="aurora-adt-extract.py 809aa6b892042df92f11f346acdb73bb4c5f8c66a99c9765dada0dbdeea05cf5"
 
 # A file's first line, or "-" when it can't be read. No fork: the report reads a few thousand.
 m3_attr() {
@@ -4898,6 +5001,9 @@ m3_report_cleanup() {
 # only when no MTD device but nvram is present; it is unloaded on every path (the traps cover
 # an interruption). The reader gets only the read-only node /dev/mtdNro of the device named adt,
 # once its size and device-tree node match the region's and the reader's own --check agrees.
+# Once the ADT was read, and while phram is still loaded, m1n1's log of this boot (the
+# m1n1_stage2.log region, the other device phram makes) is read the same way, read-only, into
+# m1n1-stage2-log.txt (m3_report_stage2_log); a step that stopped reads no log either.
 m3_report_adt() { # DIR
   local out=$1/adt-allowlist.txt log=$1/adt-check.txt reader node want reg mtd dev i rc=0 why="" before after
   local loaded new
@@ -4963,10 +5069,17 @@ m3_report_adt() { # DIR
           M3_ADT_PID=""
           if ((rc)); then
             why="the ADT reader failed (exit $rc), so its output was left out: $(tail -1 "$M3_WORK/adt.err" 2>/dev/null | cut -c1-200 || true)"
+          else
+            # Only after the ADT was read: phram made exactly the two regions' devices, and the adt
+            # device matched its region, so the log device is its region's too.
+            m3_report_stage2_log "$1" "$reader" "$log" || true
           fi
         fi
       fi
     fi
+  fi
+  if [[ ! -e $1/m1n1-stage2-log.txt ]]; then
+    echo "m1n1's log was not read: ${why:-the ADT step did not read it}" >"$1/m1n1-stage2-log.txt"
   fi
   if [[ -n $why ]]; then echo "$why" >"$out"; echo "stopped: $why" >>"$log"; else echo "read: done" >>"$log"; fi
   local unload=ok
@@ -4988,6 +5101,52 @@ m3_report_adt() { # DIR
     [[ $unload == failed ]] || warn "the ADT step left the MTD devices or phram not as it found them: see adt-check.txt in the report"
   fi
   return 0
+}
+
+# m1n1's log of this boot, while phram is loaded (m3_report_adt): the read-only node of the MTD
+# device named m1n1_stage2.log, read by the ADT reader's --stage2-log, which checks that it is
+# that region's and prints it as text with the lines that name serial numbers, UUIDs and the like
+# left out. Its output, or one line why there is none, goes to DIR/m1n1-stage2-log.txt; each step
+# goes to LOG. Returns 1 when there is none.
+m3_report_stage2_log() { # DIR READER LOG
+  local out=$1/m1n1-stage2-log.txt reader=$2 log=$3 mtd dev i rc=0
+  mtd=$(m3_mtd_named m1n1_stage2.log)
+  if [[ -z $mtd ]]; then
+    echo "m1n1's log was not read: phram made no MTD device named m1n1_stage2.log" >"$out"
+    echo "log: no m1n1_stage2.log device" >>"$log"
+    return 1
+  fi
+  dev=$M3_DEVFS/${mtd}ro
+  for ((i = 0; i < 10; i++)); do [[ -e $dev ]] && break; sleep 0.5; done
+  if [[ ! -e $dev ]]; then
+    echo "m1n1's log was not read: no read-only device node $dev" >"$out"
+    echo "log: no $dev" >>"$log"
+    return 1
+  fi
+  echo "log: $dev with ${reader##*/} --stage2-log" >>"$log"
+  $sudo python3 "$reader" --stage2-log "$dev" >"$out" 2>"$M3_WORK/log.err" &
+  M3_ADT_PID=$!
+  wait "$M3_ADT_PID" || rc=$?
+  M3_ADT_PID=""
+  if ((rc)); then
+    echo "m1n1's log was not read: the reader refused or failed (exit $rc): $(tail -1 "$M3_WORK/log.err" 2>/dev/null | cut -c1-200 || true)" >"$out"
+    echo "log: failed (exit $rc)" >>"$log"
+    return 1
+  fi
+  echo "log: done" >>"$log"
+  # And all 16 KiB of it, byte for byte but the same lines overwritten (a reader without --raw
+  # leaves this file out).
+  rc=0
+  $sudo python3 "$reader" --stage2-log --raw "$dev" >"$1/m1n1-stage2-log.raw" 2>>"$M3_WORK/log.err" &
+  M3_ADT_PID=$!
+  wait "$M3_ADT_PID" || rc=$?
+  M3_ADT_PID=""
+  if ((rc)); then
+    rm -f "$1/m1n1-stage2-log.raw"
+    echo "log raw: failed (exit $rc)" >>"$log"
+  else
+    echo "log raw: done" >>"$log"
+  fi
 }
 
 # Every device-tree node, one per line: its path, compatible and status.
@@ -5210,14 +5369,11 @@ m3_smc_keys_file() {
   $sudo find "$M3_DEBUGFS" -maxdepth 3 -name keys -path '*smc*' 2>/dev/null | head -1 || true
 }
 
-# Why there is no SMC key list, in one line. This kernel's SMC driver makes the list on the M3s
-# it knows, and t6034 is not one of them yet.
+# Why there is no SMC key list, in one line. This kernel's SMC driver makes the list on every M3
+# (macsmc_hwmon_is_m3: t8122, t6030, t6031, t6032 and t6034), so its absence means debugfs or the
+# driver, on any of them.
 m3_smc_missing() {
-  if [[ $(this_soc) == t6034 ]]; then
-    echo "no SMC key list on this kernel (t6034 not yet supported)"
-  else
-    echo "no SMC key list on this kernel (no $M3_DEBUGFS/*smc*/keys: debugfs is not mounted, or the SMC driver did not start)"
-  fi
+  echo "no SMC key list on this kernel (no $M3_DEBUGFS/*smc*/keys: debugfs is not mounted, or the SMC driver did not start)"
 }
 
 # The SMC's key list: its header line and every T* (temperature, mC) and P* (power, mW) key.
@@ -5264,6 +5420,9 @@ SERIAL and MAC addresses by xx:xx:xx:xx:xx:xx; kernel log lines naming a USB ser
   adt-allowlist.txt the ADT reader's allowlist of the boot loader's ADT (on an M3), or why
                     there is none
   adt-check.txt     the ADT read's steps, and the MTD devices and phram's state before and after
+  m1n1-stage2-log.txt  m1n1's log of this boot, read with the ADT (lines naming serial numbers,
+                    UUIDs other than firmware images' and the like left out), or why there is none
+  m1n1-stage2-log.raw  the same log region whole (16 KiB), those lines overwritten with x
   interrupts.txt    $M3_PROCFS/interrupts
   iomem.txt         $M3_PROCFS/iomem, its System RAM and reserved ranges only
   usb-display.txt   USB tree, USB-C roles and DRM connector states (as in earlier reports)
@@ -5271,19 +5430,15 @@ SERIAL and MAC addresses by xx:xx:xx:xx:xx:xx; kernel log lines naming a USB ser
 EOF
 }
 
-m3_report() {
-  local dir out board soc f s src
+# Where m3_report_collect's kernel-log.txt came from: journal or dmesg (only a journal file has
+# the host column m3_privacy_mask masks).
+M3_REPORT_KLOG_SRC=""
+
+# Collects the report's files into DIR (made by the caller), unmasked, with M3_WORK as the work
+# directory: --m3-report packs them (m3_report), and the M3 Max test kit keeps one per stage.
+m3_report_collect() { # DIR
+  local dir=$1 board soc f s src
   board=$(this_board) soc=$(this_soc)
-  [[ -w $PWD ]] || die "can't write to $PWD. Change to a directory you can write to (cd ~) and run this
-    again. Nothing was written."
-  out=$PWD/aurora-m3-report-${board:-mac}-$(date +%Y%m%d-%H%M%S).tgz
-  M3_WORK=$(mktemp -d)
-  trap 'm3_report_cleanup' EXIT
-  trap 'm3_report_cleanup; warn "interrupted: nothing was written"; exit 130' INT TERM HUP
-  dir=$M3_WORK/report
-  mkdir "$dir"
-  # What must not leave this Mac, gathered first (m3_privacy_mask, m3_privacy_check).
-  m3_privacy_secrets >"$M3_WORK/secrets"
   {
     echo "board: ${board:-?} soc: ${soc:-?}"
     echo "kernel: $(uname -r)"
@@ -5338,7 +5493,24 @@ m3_report() {
   cat "$M3_PROCFS/interrupts" >"$dir/interrupts.txt" 2>&1 || true
   ( set +e +o pipefail; m3_report_iomem ) >"$dir/iomem.txt" 2>&1
   m3_report_readme >"$dir/README.txt"
-  if [[ $src == journal ]]; then
+  M3_REPORT_KLOG_SRC=$src
+}
+
+m3_report() {
+  local dir out board
+  board=$(this_board)
+  [[ -w $PWD ]] || die "can't write to $PWD. Change to a directory you can write to (cd ~) and run this
+    again. Nothing was written."
+  out=$PWD/aurora-m3-report-${board:-mac}-$(date +%Y%m%d-%H%M%S).tgz
+  M3_WORK=$(mktemp -d)
+  trap 'm3_report_cleanup' EXIT
+  trap 'm3_report_cleanup; warn "interrupted: nothing was written"; exit 130' INT TERM HUP
+  dir=$M3_WORK/report
+  mkdir "$dir"
+  # What must not leave this Mac, gathered first (m3_privacy_mask, m3_privacy_check).
+  m3_privacy_secrets >"$M3_WORK/secrets"
+  m3_report_collect "$dir"
+  if [[ $M3_REPORT_KLOG_SRC == journal ]]; then
     m3_privacy_pack "$dir" "$out" "$M3_WORK/secrets" "$dir/kernel-log.txt" || die "the report was not kept (see above). Nothing was written.
     Please tell us at https://github.com/omacom/linux-aurora/issues what this printed, without any file."
   else
@@ -6103,9 +6275,26 @@ m3_kernel_release() {
   echo "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]}-sep-ARCH"
 }
 
-# The last block of an install's summary on those Macs: what to do next, in order.
+# The last block of an install's summary on those Macs: what to do next, in order. An M3 Max on
+# its boot loader variant (not through the test kit, which says what happens next itself) gets
+# the same block, plus where its earlier boot.bin is.
 m3_next_steps() {
   local rel
+  if [[ $M3_MODE == handoff ]] && is_m3_max && ((!M3MAX_KIT)); then
+    rel=$(m3_kernel_release)
+    echo
+    echo "======================== NEXT STEPS: M3 MAX BOOT LOADER VARIANT ($(this_board)) ========================"
+    echo "  1. Reboot. The boot menu and the desktop should come up as before."
+    echo "  2. Check that the Mac runs the new kernel: uname -r should print ${rel:-a version that ends in -sep-ARCH}."
+    echo "  3. Write the bring-up report (read-only; host name, user names, serial numbers and MAC"
+    echo "     addresses masked):"
+    echo "       curl -fsSL $LATEST_URL | bash -s -- --m3-report"
+    echo "  4. Attach aurora-m3-report-$(this_board)-<date>.tgz to an issue at https://github.com/omacom/linux-aurora/issues"
+    echo "  The boot loader this Mac had is kept as m1n1/boot.bin.before-$VERSION on the EFI partition;"
+    echo "  the steps above say how to put it back. --uninstall puts it back too."
+    echo "=========================================================================================="
+    return 0
+  fi
   [[ $M3_MODE == kernel ]] && is_m3_kernel_only_chip || return 0
   rel=$(m3_kernel_release)
   echo
@@ -6604,7 +6793,7 @@ PROMPT
 }
 
 # A reset needs none of the kernel and boot checks; it checks for itself.
-preflight_needed() { case ${1:-} in --agent-prompt | --reset-touchid | --m3-report | --m3-power-survey) return 1 ;; --m3-gpu-check) return 1 ;; *) return 0 ;; esac; }
+preflight_needed() { case ${1:-} in --agent-prompt | --reset-touchid | --m3-report | --m3-power-survey) return 1 ;; --m3-gpu-check) return 1 ;; --m3max-kit-runner | --m3max-kit-status | --m3max-kit-stop | --m3max-kit-restore) return 1 ;; *) return 0 ;; esac; }
 
 # Exact stack pins are filled when the installer is assembled from its manifest.
 m3_gpu_firmware_compat() {
@@ -8382,6 +8571,2185 @@ neo_gpu_activate() {
   say "Neo GPU profile installed. Reboot, then run: /opt/mesa-neo/bin/mesa-neo-probe"
 }
 
+# ---- the M3 Max boot loader variant's earlier boot.bin ---------------------------------------------
+# The boot.bin an M3 Max booted before its boot loader variant first went on: the copy
+# keep_bootbin_on_esp kept, recorded with its sha256 in $STATE/m3max-bootbin-backup ("path
+# sha256"). A later install keeps the first record, so --uninstall and the test kit's --restore
+# always put back the boot.bin from before the variant, whatever release ran since.
+m3max_bootbin_record() {
+  local target keep sha
+  [[ -f $STATE/m3max-bootbin-backup ]] && return 0
+  target=$(esp_bootbin) || return 0
+  keep=$target.before-$VERSION
+  sha=$($sudo sha256sum "$keep" 2>/dev/null | cut -d' ' -f1) || sha=""
+  [[ $sha =~ ^[0-9a-f]{64}$ ]] || die "could not read the kept copy $keep; nothing was installed"
+  $sudo install -d "$STATE"
+  echo "$keep $sha" | $sudo tee "$STATE/m3max-bootbin-backup" >/dev/null
+}
+
+# update-m1n1's configuration as a kernel-only M3 has it: without the DTBS block m1n1_update
+# wrote for the variant's rebuilds, and frozen by this script (m3_freeze), so no kernel or m1n1
+# update rebuilds the boot.bin that was put back.
+m3max_conf_kernel_only() {
+  local tmp
+  if [[ -f $UPDATE_M1N1_CONF ]]; then
+    tmp=$(mktemp)
+    $sudo sed -e '/^# aurora-sep: build m1n1/,/^DTBS=/d' -e '/^DTBS=/d' "$UPDATE_M1N1_CONF" >"$tmp"
+    if grep -q '[^[:space:]]' "$tmp"; then
+      $sudo install -m 644 "$tmp" "$UPDATE_M1N1_CONF"
+    else
+      $sudo rm -f "$UPDATE_M1N1_CONF"
+    fi
+    rm -f "$tmp"
+  fi
+  m3_freeze
+}
+
+# Puts that boot.bin back (checked by its sha256, replaced through a compared copy), and drops
+# the record and $STATE/m1n1-installed, so no later run takes the put-back boot.bin for a failed
+# m1n1. With "check", only says whether it can. Returns 1, with a warning, when it can't.
+m3max_bootbin_restore() { # [check]
+  local keep sha target
+  if [[ ! -f $STATE/m3max-bootbin-backup ]]; then
+    warn "there is no record of the boot.bin this M3 Max booted before its boot loader variant ($STATE/m3max-bootbin-backup)"
+    return 1
+  fi
+  read -r keep sha <"$STATE/m3max-bootbin-backup"
+  if ! target=$(esp_bootbin); then
+    warn "could not find m1n1's boot.bin on the EFI partition"
+    return 1
+  fi
+  if [[ $($sudo sha256sum "$keep" 2>/dev/null | cut -d' ' -f1) != "$sha" ]]; then
+    warn "$keep, the boot.bin this M3 Max booted before its boot loader variant, is missing or changed (it was sha256 $sha)"
+    return 1
+  fi
+  [[ ${1:-} != check ]] || return 0
+  if [[ $($sudo sha256sum "$target" | cut -d' ' -f1) != "$sha" ]]; then replace_on_esp "$keep" "$target"; fi
+  [[ $($sudo sha256sum "$target" | cut -d' ' -f1) == "$sha" ]] ||
+    die "$target is not the boot.bin it should be after putting it back; $keep is still there"
+  $sudo rm -f "$STATE/m3max-bootbin-backup" "$STATE/m1n1-installed"
+  say "Put back the boot.bin this M3 Max booted before the boot loader variant (sha256 $sha, from $keep)"
+}
+
+# ---- the M3 Max test kit (--m3max-kit) -----------------------------------------------------------
+# One command runs the M3 Max test plan (T1 to T4 of the J516C ADT review) on a 16-core M3 Max
+# (t6031: J514C, J516C), so the tester runs it once and uploads one file. --m3max-kit:
+#   1. checks this Mac (chip and board, the Limine boot menu, the one-shot boot variables, disk
+#      space) and downloads and checks the kit's files, before anything changes;
+#   2. shows one consent screen (or takes --yes);
+#   3. writes the baseline report (stage 00-baseline, the --m3-report collection);
+#   4. installs this release's kernel and the M3 Max boot loader variant (--m3-handoff), keeping
+#      the boot.bin the Mac booted with on the EFI partition (with the restore steps) and the
+#      kernel it runs as a boot menu entry ("Aurora previous (GPU off)"), plus the kit's
+#      separate-prefix Mesa when the release has one (M3MAX_KIT_MESA_PACKAGE);
+#   5. installs the runner, aurora-m3max-kit (this script, run with --m3max-kit-runner), and two
+#      systemd units, and restarts the Mac.
+# From then on the runner works at every boot (aurora-m3max-kit.service): it collects what this
+# boot shows into the stage's directory, then arms the plan's next boot as ONE Limine one-shot
+# boot (air-gpu-oneshot.sh's LoaderEntryOneShot mechanism, with its locks and checks) and
+# restarts the Mac after a short delay. A one-shot boot is used once: Limine deletes the
+# variable before the kernel starts, so a hang, a panic (panic=10) or a power cycle always lands
+# on the normal entry. A stage whose boot left no collection is recorded as hung at the next boot
+# (hung when it reached userspace, aurora-m3max-kit-mark.service's marker; hung-early when it did
+# not), with that boot's journal, and the kit goes on. The plan (M3MAX_KIT_PLAN, a release
+# asset; m3max_kit_plan_check says what it holds) names every boot and its kernel parameters, so
+# its knob sets change without a code change. The kit arms at most the plan's max-boots
+# experimental boots (never more than M3MAX_KIT_BOOT_CEILING). It ends on a normal boot: it
+# collects that boot too, packs every stage into one tgz in the desktop user's home, masked and
+# checked as --m3-report's is, and says which file to upload. "sudo aurora-m3max-kit --status",
+# "--stop" and "--restore" work at any point; --restore puts back the boot.bin the Mac booted with
+# (and the kernel-only state around it) and keeps the previous kernel's boot menu entry.
+M3MAX_KIT=0
+# --yes after --m3max-kit: the consent is given on the command line.
+M3MAX_KIT_YES=0
+M3MAX_KIT_STATE=/var/lib/aurora-m3max-kit
+M3MAX_KIT_LIBEXEC=/usr/local/libexec/aurora-m3max-kit
+M3MAX_KIT_BIN=/usr/local/bin/aurora-m3max-kit
+M3MAX_KIT_UNIT_DIR=/etc/systemd/system
+M3MAX_KIT_UNIT=aurora-m3max-kit.service
+M3MAX_KIT_MARK_UNIT=aurora-m3max-kit-mark.service
+# The kit's plan, "file sha256": a release asset (tools/aurora-sep/m3max-kit/m3max-kit.plan),
+# downloaded and checked like M3_GPU_SCRIPTS. The kit also takes air-gpu-oneshot.sh and
+# air-gpu-job.sh from M3_GPU_SCRIPTS, and the ADT reader from M3_ADT_READER.
+M3MAX_KIT_PLAN="m3max-kit.plan c8df9530af334437c6c6fdce711532b0c23cc9a68c4209129a23d990b1c2c530"
+# A separate-prefix Mesa for the jobs stage, "file sha256", or empty when the release has none:
+# mesa-m3-g15c (G15C behind ASAHI_M3_G15C=1, in /opt/mesa-m3-g15c, with bin/g15c-first-job and
+# bin/mesa-m3-probe). It goes on only when it can be used and changes nothing else: every file
+# under /opt, every dependency already satisfied (pacman -T; no partial upgrade), the test
+# kernel has the GPU start experiment, and the image does not hold its packages; then in a
+# pacman transaction of its own.
+M3MAX_KIT_MESA_PACKAGE="mesa-m3-g15c-26.1.4.g15c1-2-aarch64.pkg.tar.zst 552c94de1a98a25cc5e0dbd9e3a4cf5fdd738fb5d95689b41428f9dee3aa0936"
+# The most experimental boots one kit run arms, whatever its plan says.
+M3MAX_KIT_BOOT_CEILING=12
+# The tag on an armed boot's command line (its arming id), and the Limine entry's name.
+M3MAX_KIT_TAG=m3max_kit.boot
+M3MAX_KIT_ENTRY=m3max-kit
+# Free space (MB) the kit needs in its state directory and in the desktop user's home.
+M3MAX_KIT_MIN_MB=200
+# Where the consent screen reads the answer (tests point it at a file).
+M3MAX_KIT_TTY=/dev/tty
+# Seconds to let a boot settle after it finished starting, before the runner collects it, and
+# more for a display boot (the DCP waits up to 30 s for the PMP).
+M3MAX_KIT_SETTLE=20
+M3MAX_KIT_DISPLAY_SETTLE=40
+# The device tree as the boot loader handed it over (before the kernel's display gate changed it),
+# and the journal directory that keeps a hung boot's log.
+M3MAX_KIT_FDT=/sys/firmware/fdt
+M3MAX_KIT_JOURNAL_DIR=/var/log/journal
+M3MAX_KIT_DEBUGFS=/sys/kernel/debug
+# Where the one-shot arming finds the EFI variables, the command line, the Limine tools' locks
+# and their settings (air-gpu-oneshot.sh's own defaults; tests point them at a fake Mac), and the
+# arming script itself (the runner's copy; the setup's download before that).
+M3MAX_KIT_EFIVARS=/sys/firmware/efi/efivars
+M3MAX_KIT_CMDLINE=/proc/cmdline
+M3MAX_KIT_LOCKS="/run/lock/boot-partition.lock /tmp/limine-global.lock"
+M3MAX_KIT_LIMINE_DEFAULTS=/etc/default/limine
+M3MAX_KIT_ONESHOT=$M3MAX_KIT_LIBEXEC/air-gpu-oneshot.sh
+M3MAX_KIT_JOB=$M3MAX_KIT_LIBEXEC/air-gpu-job.sh
+# The plan this run follows: the runner's copy, or the setup's checked download.
+M3MAX_KIT_PLAN_FILE=$M3MAX_KIT_STATE/plan
+# The device tree the one-shot subshell reads (air-gpu-oneshot.sh sets its own DT when sourced).
+M3MAX_KIT_DT=""
+# Set by m3max_kit_arm: the id of the boot it armed, or why it did not arm.
+M3MAX_KIT_ARMED_ID="" M3MAX_KIT_WHY=""
+
+# ---- the plan -------------------------------------------------------------------------------
+# Checks a plan file and prints it normalized (no comments, single spaces), or prints why not on
+# stderr and returns 1. One directive per line; # starts a comment:
+#   format 1                      first, always
+#   chip t6031                    the chip it is for
+#   boards j514c j516c            the boards it is for (M3_MAX_BOARDS or fewer)
+#   max-boots N                   experimental boots one run arms (1 to M3MAX_KIT_BOOT_CEILING; 6)
+#   reboot-delay S                seconds between a boot's collection and the restart (30-900; 60)
+#   safety PARAM...               added to every experimental boot's command line, unchecked in
+#                                 the kernel image (hang detection, the systemd watchdog)
+#   loader-delay S                seconds before the restart into the loader boot (30-900; 180)
+#   boot NAME KIND [PARAM...]     one boot, in the order they run. KIND:
+#                                   data     the normal boot after the install (no one-shot, no
+#                                            parameters); exactly one, the first
+#                                   display  one one-shot boot with PARAMs
+#                                   loader   boot.bin rebuilt with m1n1's GPU handoff on
+#                                            (M3_MAX_SWITCHES), then a normal boot: not a one-shot.
+#                                            The interim results are packed first. No parameters;
+#                                            at most one; the gpu and jobs boots come after it
+#                                   gpu      one one-shot boot with PARAMs; the gpu boots after
+#                                            the first that succeeds are skipped
+#                                   jobs     one one-shot boot after a gpu boot succeeded, when
+#                                            mesa-prefix has a Vulkan driver: "@gpu" stands for
+#                                            that boot's PARAMs; then it runs the jobs below
+#   success KIND REGEX            an extended regex over the boot's kernel log that marks a boot
+#                                 of KIND (display or gpu) a success
+#   mesa-prefix PATH              the jobs stage's Mesa (under /opt)
+#   job-env NAME=VALUE...         the jobs' environment, on top of air-gpu-job.sh's
+#   jobs JOB...                   first-job (the prefix's headless bin/g15c-first-job), compute
+#                                 (air-gpu-job.sh) and render (the prefix's bin/mesa-m3-probe in
+#                                 the desktop session), in order, up to 6; none after a hang
+# A PARAM is name=value: name is module.param (not rd., systemd. but systemd.watchdog_sec,
+# init., root.), or one of the plain names in BARE below; value is 1 to 64 of [A-Za-z0-9_.,:+-].
+# The kit adds panic=10 and its tag itself.
+m3max_kit_plan_check() { # FILE
+  python3 -I - "$1" "$M3MAX_KIT_BOOT_CEILING" "$M3_MAX_BOARDS" <<'M3MAX_PLAN_PY'
+import re, sys
+
+path, ceiling, max_boards = sys.argv[1], int(sys.argv[2]), sys.argv[3].split()
+KINDS = ("data", "display", "loader", "gpu", "jobs")
+NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+PNAME = re.compile(r"[a-z0-9_]+(\.[a-z0-9_]+)?")
+VALUE = re.compile(r"[A-Za-z0-9_.,:+-]{1,64}")
+BARE = {"softlockup_panic", "hung_task_panic", "hung_task_timeout_secs", "loglevel",
+        "ignore_loglevel", "initcall_debug", "printk.devkmsg"}
+DOTTED_OK = {"systemd.watchdog_sec", "printk.devkmsg"}
+DENIED_MODULES = {"rd", "systemd", "init", "root", "rootflags", "luks", "udev", "fstab",
+                  "m3max_kit", "mesa_m3", "air_gpu"}
+ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
+ENV_VALUE = re.compile(r"[A-Za-z0-9_.,:/=+-]{0,128}")
+
+
+def fail(line, why):
+    where = f"line {line}: " if line else ""
+    sys.stderr.write(f"the kit's plan, {where}{why}\n")
+    sys.exit(1)
+
+
+def param(word, line, allow_gpu=False):
+    if word == "@gpu":
+        if not allow_gpu:
+            fail(line, "@gpu belongs to a jobs boot only")
+        return word
+    if "=" not in word:
+        fail(line, f"{word!r} is not name=value")
+    name, value = word.split("=", 1)
+    if not PNAME.fullmatch(name):
+        fail(line, f"{name!r} is not a parameter name")
+    if "." in name:
+        module = name.split(".", 1)[0]
+        if name not in DOTTED_OK and module in DENIED_MODULES:
+            fail(line, f"{name} is not a parameter the kit sets")
+    elif name not in BARE:
+        fail(line, f"{name} is not a parameter the kit sets (a plain name must be one of {', '.join(sorted(BARE))})")
+    if not VALUE.fullmatch(value):
+        fail(line, f"{name}={value}: the value must be 1 to 64 of A-Z a-z 0-9 _ . , : + -")
+    return word
+
+
+try:
+    with open(path, encoding="ascii") as f:
+        raw = f.read()
+except (OSError, UnicodeError) as e:
+    fail(0, f"could not be read ({e})")
+seen = {}
+boots = []
+out = []
+success = {}
+jobs = []
+for n, text in enumerate(raw.splitlines(), 1):
+    text = text.split("#", 1)[0].strip() if not text.lstrip().startswith("success ") else text.strip()
+    if not text:
+        continue
+    words = text.split()
+    key = words[0]
+    if not out and key != "format":
+        fail(n, "the first directive must be: format 1")
+    once = ("format", "chip", "boards", "max-boots", "reboot-delay", "loader-delay", "safety", "mesa-prefix",
+            "job-env", "jobs")
+    if key in once:
+        if key in seen:
+            fail(n, f"{key} is given twice")
+        seen[key] = words[1:]
+    if key == "format":
+        if words[1:] != ["1"]:
+            fail(n, "this kit reads plan format 1")
+    elif key == "chip":
+        if words[1:] != ["t6031"]:
+            fail(n, "this kit is for chip t6031")
+    elif key == "boards":
+        if not words[1:] or any(b not in max_boards for b in words[1:]):
+            fail(n, f"boards must be among {' '.join(max_boards)}")
+    elif key == "max-boots":
+        if len(words) != 2 or not words[1].isdigit() or not 1 <= int(words[1]) <= ceiling:
+            fail(n, f"max-boots must be 1 to {ceiling}")
+        words[1] = str(int(words[1]))
+    elif key in ("reboot-delay", "loader-delay"):
+        if len(words) != 2 or not words[1].isdigit() or not 30 <= int(words[1]) <= 900:
+            fail(n, f"{key} must be 30 to 900 seconds")
+        words[1] = str(int(words[1]))
+    elif key == "safety":
+        for w in words[1:]:
+            param(w, n)
+    elif key == "boot":
+        if len(words) < 3:
+            fail(n, "boot needs a name and a kind")
+        name, kind, params = words[1], words[2], words[3:]
+        if not NAME.fullmatch(name) or name in ("baseline", "final"):
+            fail(n, f"{name!r} is not a boot name (a-z, 0-9 and -, up to 32; not baseline or final)")
+        if any(b[0] == name for b in boots):
+            fail(n, f"boot {name} is given twice")
+        if kind not in KINDS:
+            fail(n, f"{kind!r} is not a kind ({', '.join(KINDS)})")
+        if params == ["-"]:
+            params = []
+            words = words[:3]
+        if kind == "data" and (params or boots):
+            fail(n, "the data boot is the first boot, with no parameters")
+        if kind != "data" and not boots:
+            fail(n, "the first boot must be the data boot")
+        if kind == "data" and any(b[1] == "data" for b in boots):
+            fail(n, "only one data boot")
+        if kind != "jobs" and any(b[1] == "jobs" for b in boots):
+            fail(n, "the jobs boot comes after every other boot")
+        if kind == "jobs" and any(b[1] == "jobs" for b in boots):
+            fail(n, "only one jobs boot")
+        if kind in ("display", "gpu") and not params:
+            fail(n, f"a {kind} boot needs parameters")
+        if kind == "loader" and params:
+            fail(n, "the loader boot takes no parameters")
+        if kind == "loader" and any(b[1] == "loader" for b in boots):
+            fail(n, "only one loader boot")
+        if kind == "loader" and any(b[1] in ("gpu", "jobs") for b in boots):
+            fail(n, "the gpu and jobs boots come after the loader boot")
+        for w in params:
+            param(w, n, allow_gpu=(kind == "jobs"))
+        if params.count("@gpu") > 1:
+            fail(n, "@gpu is given twice")
+        boots.append((name, kind, params))
+    elif key == "success":
+        if len(words) < 3 or words[1] not in ("display", "gpu"):
+            fail(n, "success needs a kind (display or gpu) and an extended regex")
+        regex = text.split(None, 2)[2]
+        try:
+            re.compile(regex)
+        except re.error as e:
+            fail(n, f"the success regex does not compile ({e})")
+        if words[1] in success:
+            fail(n, f"success {words[1]} is given twice")
+        success[words[1]] = regex
+        out.append(f"success {words[1]} {regex}")
+        continue
+    elif key == "mesa-prefix":
+        if len(words) != 2 or not re.fullmatch(r"/opt/[A-Za-z0-9._/-]+", words[1]) or ".." in words[1].split("/"):
+            fail(n, "mesa-prefix must be one path under /opt")
+    elif key == "job-env":
+        for w in words[1:]:
+            k, _, v = w.partition("=")
+            if not _ or not ENV_NAME.fullmatch(k) or not ENV_VALUE.fullmatch(v):
+                fail(n, f"{w!r} is not NAME=VALUE")
+    elif key == "jobs":
+        if not 1 <= len(words) - 1 <= 6 or any(j not in ("first-job", "compute", "render") for j in words[1:]):
+            fail(n, "jobs takes 1 to 6 of first-job, compute and render")
+    else:
+        fail(n, f"unknown directive {key!r}")
+    out.append(" ".join(words))
+for need in ("chip", "boards"):
+    if need not in seen:
+        fail(0, f"{need} is missing")
+if not boots:
+    fail(0, "it names no boots")
+if "max-boots" not in seen:
+    out.append("max-boots 6")
+if "reboot-delay" not in seen:
+    out.append("reboot-delay 60")
+if "loader-delay" not in seen:
+    out.append("loader-delay 180")
+if any(b[1] == "jobs" for b in boots) and "mesa-prefix" not in seen:
+    fail(0, "a jobs boot needs mesa-prefix")
+sys.stdout.write("\n".join(out) + "\n")
+M3MAX_PLAN_PY
+}
+
+# The value of the plan's first KEY line (the words after the key), or nothing.
+m3max_plan() { awk -v k="$1" '$1 == k { sub(/^[^ ]+ ?/, ""); print; exit }' "$M3MAX_KIT_PLAN_FILE" 2>/dev/null; }
+# The plan's boots, one per line: "NAME KIND PARAM...".
+m3max_plan_boots() { awk '$1 == "boot" { sub(/^boot /, ""); print }' "$M3MAX_KIT_PLAN_FILE" 2>/dev/null; }
+# The INDEX-th boot (0 is the data boot), as m3max_plan_boots prints it.
+m3max_plan_boot() { m3max_plan_boots | sed -n "$(($1 + 1))p"; }
+m3max_plan_count() { m3max_plan_boots | wc -l; }
+# The success regex of KIND, or nothing.
+m3max_plan_success() { awk -v k="$1" '$1 == "success" && $2 == k { sub(/^success [^ ]+ /, ""); print; exit }' "$M3MAX_KIT_PLAN_FILE" 2>/dev/null; }
+
+# ---- the kit's state ----------------------------------------------------------------------------
+# $M3MAX_KIT_STATE (root's, 0700): status (key=value lines: phase, next, armed, boots, gpu_ok,
+# kernel, bootbin, user, board, started, restart, tarball), plan, log, the one-shot's own records
+# (oneshot/), reached-<id> markers, and stages/NN-NAME/ with each stage's collection.
+#   phase: setup (until the install is done), running, finishing (the next normal boot packs),
+#   done, stopped (--stop) or restored (--restore).
+#   next: the index of the next plan boot to arm. armed: "<id> <index>" while a boot is armed.
+m3max_kit_get() {
+  [[ -f $M3MAX_KIT_STATE/status ]] || return 0
+  sed -n "s/^$1=//p" "$M3MAX_KIT_STATE/status" | tail -1
+}
+
+# Sets KEY to VALUE (pairs of arguments), durably: a temp file, synced, renamed.
+m3max_kit_set() {
+  local tmp=$M3MAX_KIT_STATE/status.tmp
+  if [[ -f $M3MAX_KIT_STATE/status ]]; then cp "$M3MAX_KIT_STATE/status" "$tmp"; else : >"$tmp"; fi
+  while (($# >= 2)); do
+    sed -i "/^$1=/d" "$tmp"
+    printf '%s=%s\n' "$1" "$2" >>"$tmp"
+    shift 2
+  done
+  sync "$tmp" 2>/dev/null || sync
+  mv -f "$tmp" "$M3MAX_KIT_STATE/status"
+}
+
+m3max_kit_log() {
+  local line
+  line="$(date -Is) $*"
+  printf '%s\n' "$line" >>"$M3MAX_KIT_STATE/log" 2>/dev/null || true
+  printf 'aurora-m3max-kit: %s\n' "$*"
+}
+
+# The stage directory of plan boot INDEX (stages/01-data for 0), or of baseline / final.
+m3max_kit_stage_dir() {
+  local name
+  case $1 in
+    baseline) echo "$M3MAX_KIT_STATE/stages/00-baseline" ;;
+    final) echo "$M3MAX_KIT_STATE/stages/99-final" ;;
+    *)
+      read -r name _ <<<"$(m3max_plan_boot "$1")"
+      printf '%s/stages/%02d-%s\n' "$M3MAX_KIT_STATE" "$(($1 + 1))" "$name"
+      ;;
+  esac
+}
+
+# Records a stage's outcome: one line "OUTCOME DETAIL" in its outcome.txt.
+m3max_kit_outcome() { # STAGE OUTCOME DETAIL
+  local dir
+  dir=$(m3max_kit_stage_dir "$1")
+  mkdir -p "$dir"
+  printf '%s %s\n' "$2" "${3:-}" >"$dir/outcome.txt"
+  m3max_kit_log "stage ${dir##*/}: $2${3:+ ($3)}"
+}
+
+# This boot's arming id, from its command line, or nothing on a normal boot.
+m3max_kit_boot_tag() {
+  tr ' ' '\n' <"$M3MAX_KIT_CMDLINE" 2>/dev/null | sed -n "s/^${M3MAX_KIT_TAG//./\\.}=//p" | head -1
+}
+
+# The desktop user the kit writes its result for, and that user's home.
+m3max_kit_user() { local u; u=$(m3max_kit_get user); echo "${u:-root}"; }
+m3max_kit_home() { local h; h=$(getent passwd "$1" 2>/dev/null | cut -d: -f6); echo "${h:-/root}"; }
+
+# Free space in MB where PATH is (its nearest existing directory).
+m3max_kit_free_mb() {
+  local p=$1
+  while [[ ! -d $p && $p == /* && $p != / ]]; do p=${p%/*}; p=${p:-/}; done
+  df -Pm "$p" 2>/dev/null | awk 'NR == 2 { print $4 }'
+}
+
+# ---- one-shot boots, through air-gpu-oneshot.sh ----------------------------------------------
+# The kit sources air-gpu-oneshot.sh in a subshell and keeps its mechanism, its checks and its
+# locks as they are: the same EFI variable, the same U-Boot variable file, the same Limine block
+# handling. What it changes is what is armed: its own entry (m3max-kit), tag and record directory,
+# its own board check (is_m3_max), the plan's parameters (checked already, and each one looked
+# for in the kernel image by the script's own preflight), the plan's safety parameters, and a
+# command line without any earlier t6031 parameter or tag.
+# shellcheck disable=SC2034,SC2329 # its variables and functions are air-gpu-oneshot.sh's
+m3max_kit_oneshot_setup() {
+  # Its own DT default, back to this script's.
+  DT=$M3MAX_KIT_DT
+  PROG=m3max-kit-oneshot
+  ENTRY=$M3MAX_KIT_ENTRY
+  TAG=$M3MAX_KIT_TAG
+  BEGIN_MARK="# >>> m3max-kit: one M3 Max test kit boot, chosen only through LoaderEntryOneShot (remove with: sudo aurora-m3max-kit --stop)"
+  END_MARK="# <<< m3max-kit"
+  STATE_DIR=$M3MAX_KIT_STATE/oneshot
+  EFIVARS=$M3MAX_KIT_EFIVARS
+  CMDLINE=$M3MAX_KIT_CMDLINE
+  LOCKS=$M3MAX_KIT_LOCKS
+  LIMINE_DEFAULTS=$M3MAX_KIT_LIMINE_DEFAULTS
+  check_board() {
+    is_m3_max || refuse "this Mac ($(this_board), $(this_soc)) is not a 16-core M3 Max (t6031: $M3_MAX_BOARDS)."
+  }
+  # The kit records the GPU node's state itself, in each stage.
+  gpu_node_note() { :; }
+  block() {
+    printf '%s\n/%s\n    comment: M3 Max test kit, one boot (%s %s)\n    protocol: efi\n    path: %s\n    cmdline: %s\n%s\n' \
+      "$BEGIN_MARK" "$ENTRY" "${M3MAX_ARM_NAME:-?}" "$1" "$2" "$3" "$END_MARK"
+  }
+  new_cmdline() {
+    local w out=() p skip words
+    set -f
+    read -ra words <<<"$SRC_CMDLINE"
+    set +f
+    for w in "${words[@]}"; do
+      skip=0
+      [[ $w == asahi.t6031[_-]* || $w == apple_t6031_display.* || $w == "$TAG"=* || $w == panic=* ]] && skip=1
+      for p in "${PARAMS[@]}" ${M3MAX_ARM_SAFETY[@]+"${M3MAX_ARM_SAFETY[@]}"}; do
+        [[ $w == "${p%%=*}" || $w == "${p%%=*}"=* ]] && skip=1
+      done
+      ((skip)) || out+=("$w")
+    done
+    printf '%s\n' "${out[*]} ${PARAMS[*]}${M3MAX_ARM_SAFETY[*]:+ ${M3MAX_ARM_SAFETY[*]}} panic=10 $TAG=$ID"
+  }
+  # The script's own checks, then: the normal entry must not set a parameter this boot sets, or
+  # every boot would run with it.
+  eval "oneshot_preflight() $(declare -f preflight | tail -n +2)"
+  preflight() {
+    local p
+    oneshot_preflight
+    for p in "${PARAMS[@]}"; do
+      [[ " $SRC_CMDLINE " != *" ${p%%=*}="* && " $SRC_CMDLINE " != *" ${p%%=*} "* ]] ||
+        refuse "the normal //$SOURCE_ENTRY entry already sets ${p%%=*}, so every boot would run with it. Remove it from /etc/default/limine first."
+    done
+  }
+  if declare -F m3max_kit_oneshot_hook >/dev/null; then m3max_kit_oneshot_hook; fi
+}
+
+# Runs air-gpu-oneshot.sh's ACTION (arm NAME PARAM..., disarm, check, armed) with the kit's
+# setup, in a subshell; its refusals end the subshell with status 1 and one line on stderr.
+m3max_kit_oneshot() { # ACTION [ARGS...]
+  local action=$1
+  shift
+  M3MAX_KIT_DT=$DT
+  # shellcheck disable=SC2034 # AIR_GPU_SOURCE_ONLY, QUIET_LOG and KEYS are air-gpu-oneshot.sh's
+  (
+    set -euo pipefail
+    AIR_GPU_SOURCE_ONLY=1
+    # shellcheck source=/dev/null
+    source "$M3MAX_KIT_ONESHOT"
+    m3max_kit_oneshot_setup
+    case $action in
+      arm)
+        M3MAX_ARM_NAME=$1
+        shift
+        PARAMS=("$@")
+        read -ra M3MAX_ARM_SAFETY <<<"$(m3max_plan safety)"
+        do_arm
+        ;;
+      disarm) do_disarm ;;
+      check) PARAMS=(); M3MAX_ARM_SAFETY=(); QUIET_LOG=1; do_check ;;
+      armed) armed_name ;;
+      # The parameter names (of NAME=VALUE...) the kernel image of the normal entry lacks, one
+      # per line; status 3 when that image can't be found (the arming's own checks then decide).
+      missing)
+        find_esp && find_conf || exit 3
+        KEYS=$(entry_keys)
+        [[ $(key count) == 1 ]] || exit 3
+        UKI=$(limine_file "$(key path)")
+        [[ -f $UKI ]] || exit 3
+        local p
+        for p in "$@"; do
+          [[ $p == @gpu ]] && continue
+          grep -qaF "${p%%=*}" "$UKI" || echo "${p%%=*}"
+        done
+        ;;
+      *) return 2 ;;
+    esac
+  )
+}
+
+# Arms plan boot NAME with PARAMs for the next boot. Sets M3MAX_KIT_ARMED_ID, or M3MAX_KIT_WHY
+# and returns 1 (nothing armed).
+m3max_kit_arm() { # NAME PARAM...
+  local out rc=0
+  M3MAX_KIT_ARMED_ID="" M3MAX_KIT_WHY=""
+  rm -f "$M3MAX_KIT_STATE/oneshot/armed"
+  out=$(m3max_kit_oneshot arm "$@" 2>&1) || rc=$?
+  printf '%s\n' "$out" >>"$M3MAX_KIT_STATE/log"
+  if ((rc)) || [[ ! -f $M3MAX_KIT_STATE/oneshot/armed ]]; then
+    M3MAX_KIT_WHY=$(sed -n 's/.*refused: //p' <<<"$out" | head -1)
+    M3MAX_KIT_WHY=${M3MAX_KIT_WHY:-the one-shot arming failed (exit $rc)}
+    return 1
+  fi
+  read -r M3MAX_KIT_ARMED_ID _ <"$M3MAX_KIT_STATE/oneshot/armed"
+}
+
+# Clears the one-shot (if it is the kit's) and removes the kit's Limine entry. Returns 1, with
+# the reason in the log, when air-gpu-oneshot.sh refused.
+m3max_kit_disarm() {
+  local out rc=0
+  [[ -f $M3MAX_KIT_ONESHOT ]] || return 0
+  out=$(m3max_kit_oneshot disarm 2>&1) || rc=$?
+  printf '%s\n' "$out" >>"$M3MAX_KIT_STATE/log" 2>/dev/null || true
+  return "$rc"
+}
+
+# ---- what each stage collects -----------------------------------------------------------------
+# Every stage: the --m3-report collection (m3_report_collect: who this Mac is, /chosen, every
+# device-tree node, the drivers, the whole kernel log, the ADT allowlist and m1n1's log through
+# phram, display, power, ...) into report/, and checks.txt: what that stage looks at, and a
+# "verdict:" line, which also goes to outcome.txt.
+# Where the runner looks for desktop sessions (notifications, the render job, hyprctl).
+M3MAX_KIT_RUNDIR=/run/user
+
+# Waits until this boot has finished starting (at most 5 minutes), then lets it settle. The step's
+# unit is Type=exec, so its own start job does not hold the boot up.
+m3max_kit_wait_boot() {
+  timeout 300 systemctl is-system-running --wait >/dev/null 2>&1 || true
+  sleep "$M3MAX_KIT_SETTLE"
+}
+
+# The device-tree nodes whose properties the boot loader fills, copied whole (one file per
+# property, as /proc/device-tree has them) into the stage's dt/: these hold the GPU and display
+# facts whatever the kernel does with them. The /chosen entries of the M3 boot loader
+# (asahi,t6031-*: gpu-powered-identity, fw-uuids, pmp, and the rest, plus m1n1's own asahi,m1n1-*
+# and firmware versions), every reserved-memory node, and the nodes the aliases below point to
+# (or, for the GPU, every /soc/gpu@* node). Properties whose names carry per-chip calibration or
+# a serial number or an address are left out, as the ADT reader leaves them out.
+M3MAX_KIT_DT_ALIASES="gpu dcp disp0 disp0-piodma dcpext0 dcpext1 dcpext2 dcpext3 pmp"
+M3MAX_KIT_DT_DENIED='fuse|calibration|serial|mac-address|bd-address|ecid|nonce|unique'
+
+# Copies device-tree node SRC (recursively) to DST, without the denied properties.
+m3max_kit_dt_copy() { # SRC DST
+  local f rel
+  [[ -d $1 ]] || return 0
+  while IFS= read -r -d '' f; do
+    rel=${f#"$1"}
+    [[ ${rel##*/} =~ $M3MAX_KIT_DT_DENIED ]] && continue
+    mkdir -p "$2${rel%/*}"
+    cp "$f" "$2$rel" 2>/dev/null || true
+  done < <(find "$1" -type f -print0 2>/dev/null)
+  mkdir -p "$2"
+}
+
+# Copies a flattened device tree with the values of properties named like
+# M3MAX_KIT_DT_DENIED zeroed in place (same length): the MAC and Bluetooth addresses in it are raw
+# bytes, which the text masking would not find. Their names in the strings block are blanked too
+# (letters to x, same length), so the copy stays a valid tree and no name reads as a label.
+m3max_kit_fdt_copy() { # SRC DST
+  python3 -I - "$1" "$2" "$M3MAX_KIT_DT_DENIED" <<'M3MAX_FDT_PY'
+import re, struct, sys
+src, dst, denied = sys.argv[1], sys.argv[2], re.compile(sys.argv[3], re.I)
+with open(src, "rb") as f:
+    data = bytearray(f.read(16 * 1024 * 1024 + 1))
+if not 40 <= len(data) <= 16 * 1024 * 1024:
+    sys.exit("not an FDT of a usable size")
+magic, total, off_struct, off_strings, _, version, _, _, size_strings, size_struct = struct.unpack_from(">10I", data, 0)
+if magic != 0xD00DFEED or total > len(data) or version < 17:
+    sys.exit("not a flattened device tree (version 17)")
+end_struct = off_struct + size_struct
+if end_struct > total or off_strings + size_strings > total:
+    sys.exit("its blocks run past its end")
+off, masked, names = off_struct, 0, set()
+while off + 4 <= end_struct:
+    (tok,) = struct.unpack_from(">I", data, off)
+    off += 4
+    if tok == 1:
+        off = (data.index(b"\0", off, end_struct) + 4) & ~3
+    elif tok == 3:
+        length, nameoff = struct.unpack_from(">II", data, off)
+        off += 8
+        if off + length > end_struct or nameoff >= size_strings:
+            sys.exit("a property runs past the structure block")
+        start = off_strings + nameoff
+        name = data[start:data.index(b"\0", start)].decode("ascii", "replace")
+        if denied.search(name):
+            data[off:off + length] = bytes(length)
+            masked += 1
+            names.add((start, len(name)))
+        off = (off + length + 3) & ~3
+    elif tok in (2, 4):
+        continue
+    elif tok == 9:
+        break
+    else:
+        sys.exit(f"unknown token {tok:#x}")
+for start, n in names:
+    data[start:start + n] = bytes(0x78 if chr(b).isalpha() else b for b in data[start:start + n])
+with open(dst, "wb") as f:
+    f.write(bytes(data[:total]))
+print(f"{masked} properties zeroed")
+M3MAX_FDT_PY
+}
+
+m3max_kit_dt_facts() { # DIR
+  local out=$1/dt a target f
+  mkdir -p "$out/chosen" "$out/nodes"
+  # The whole tree as the boot loader handed it over: every gate and DCP refusal can be
+  # reproduced from it offline.
+  if [[ -r $M3MAX_KIT_FDT ]]; then
+    m3max_kit_fdt_copy "$M3MAX_KIT_FDT" "$out/fdt" >"$out/fdt.txt" 2>&1 || rm -f "$out/fdt"
+  fi
+  for f in "$DT"/chosen/asahi,t6031-* "$DT"/chosen/asahi,m1n1-* "$DT"/chosen/asahi,*-fw-version \
+    "$DT"/chosen/asahi,iboot*-version; do
+    [[ -e $f ]] || continue
+    if [[ -d $f ]]; then m3max_kit_dt_copy "$f" "$out/chosen/${f##*/}"; else cp "$f" "$out/chosen/"; fi
+  done
+  m3max_kit_dt_copy "$DT/reserved-memory" "$out/reserved-memory"
+  for a in $M3MAX_KIT_DT_ALIASES; do
+    target=$({ tr -d '\0' <"$DT/aliases/$a"; } 2>/dev/null) || target=""
+    [[ $target == /* && $target != *..* && -d $DT$target ]] || continue
+    m3max_kit_dt_copy "$DT$target" "$out/nodes/$a"
+    echo "$a $target" >>"$out/nodes/aliases.txt"
+  done
+  for f in "$DT"/soc/gpu@*; do
+    [[ -d $f && ! -e $out/nodes/gpu ]] || continue
+    m3max_kit_dt_copy "$f" "$out/nodes/${f##*/}"
+  done
+  # The GPU's OPP tables (opp-table-gpu, -cs, -afr) and the display subsystem.
+  for f in "$DT"/opp-table-gpu* "$DT"/soc/opp-table-gpu* "$DT"/soc/display-subsystem*; do
+    [[ -d $f ]] || continue
+    m3max_kit_dt_copy "$f" "$out/nodes/${f##*/}"
+  done
+  {
+    echo "# The boot loader's device-tree facts of this boot, one file per property (raw)."
+    echo "# chosen/: /chosen asahi,t6031-*, asahi,m1n1-* and the firmware versions"
+    echo "# reserved-memory/: every reserved-memory node"
+    echo "# nodes/: the nodes of the aliases in nodes/aliases.txt (gpu, dcp, disp0, ...), or /soc/gpu@*"
+    echo "# fdt: $M3MAX_KIT_FDT, the tree the boot loader handed over, those properties zeroed (fdt.txt says how many)"
+    echo "# Left out: properties named like ${M3MAX_KIT_DT_DENIED//|/, }; listed below by name."
+    (cd "$out" && find . -type f ! -name README.txt -printf '%P %s\n' | LC_ALL=C sort)
+    find "$DT/chosen" "$DT/reserved-memory" "$DT/soc" -type f 2>/dev/null | grep -E "/[^/]*($M3MAX_KIT_DT_DENIED)[^/]*$" |
+      grep -E 't6031|reserved-memory|gpu|dcp|disp|opp' | sed "s#^$DT#left out: #" | head -50 || true
+  } >"$out/README.txt"
+}
+
+# This boot's report into DIR/report (unmasked; the pack masks), the boot loader's device-tree
+# facts into DIR/dt (m3max_kit_dt_facts), and where its kernel log came from
+# (DIR/kernel-log-source.txt: journal or dmesg).
+m3max_kit_collect() { # DIR
+  local dir=$1
+  mkdir -p "$dir/report"
+  m3max_kit_dt_facts "$dir" || m3max_kit_log "warning: the device-tree facts of this boot are incomplete"
+  M3_WORK=$(mktemp -d)
+  m3_report_collect "$dir/report" || m3max_kit_log "warning: the report of this boot is incomplete"
+  echo "${M3_REPORT_KLOG_SRC:-dmesg}" >"$dir/kernel-log-source.txt"
+  m3_adt_unload || true
+  rm -rf "$M3_WORK"
+  M3_WORK=""
+}
+
+# A reserved-memory node's reg as "BASE SIZE" in decimal (one entry), or nothing.
+m3max_kit_reg() {
+  local r
+  r=$(m3_dt_reg "$1/reg" "$(m3_dt_u32 "$DT/reserved-memory/#address-cells")" "$(m3_dt_u32 "$DT/reserved-memory/#size-cells")")
+  [[ $r =~ ^0x([0-9a-f]{1,15})\+0x([0-9a-f]{1,15})$ ]] || return 0
+  echo "$((16#${BASH_REMATCH[1]})) $((16#${BASH_REMATCH[2]}))"
+}
+
+# The data stage (T1): the boot loader's T6031 facts, the display processors' log reservations
+# against System RAM, the GPU's powered identity, the CPUs, and whether boot.bin is the kit's.
+m3max_kit_checks_data() {
+  local f d base size start end n=0 inside=0 facts=0 ident=absent cpus line
+  local -a ram=()
+  echo "== the boot loader's T6031 facts ($DT/chosen/asahi,t6031-*)"
+  for f in "$DT"/chosen/asahi,t6031-*; do
+    [[ -e $f ]] || continue
+    facts=$((facts + 1))
+    if [[ -d $f ]]; then
+      echo "${f##*/}/ (a node): $(find "$f" -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null)"
+    else
+      echo "${f##*/}: $(m3_dt_text "$f")"
+    fi
+  done
+  ((facts)) || echo "(none)"
+  [[ -e $DT/chosen/asahi,t6031-gpu-powered-identity ]] && ident=present
+  echo "== the display processors' log reservations (dcp-oslog), against System RAM"
+  while read -r line; do
+    [[ $line =~ ^([0-9a-f]+)-([0-9a-f]+)\ :\ System\ RAM$ ]] && ram+=("$((16#${BASH_REMATCH[1]})) $((16#${BASH_REMATCH[2]}))")
+  done <"$M3_PROCFS/iomem"
+  for d in "$DT"/reserved-memory/dcp-oslog@*; do
+    [[ -d $d ]] || continue
+    n=$((n + 1))
+    read -r base size <<<"$(m3max_kit_reg "$d")"
+    if [[ -z $base ]]; then echo "${d##*/}: no single reg entry"; continue; fi
+    f="outside System RAM"
+    for line in ${ram[@]+"${ram[@]}"}; do
+      read -r start end <<<"$line"
+      if ((base <= end && base + size - 1 >= start)); then f="INSIDE System RAM"; inside=$((inside + 1)); break; fi
+    done
+    printf '%s: 0x%x+0x%x, %s\n' "${d##*/}" "$base" "$size" "$f"
+  done
+  ((n)) || echo "(none)"
+  echo "== the GPU's powered identity (asahi,t6031-gpu-powered-identity): $ident (absent while m1n1's GPU handoff is off)"
+  echo "== what the display gate found handed over (apple-t6031-display: handoff:)"
+  LC_ALL=C grep -a 'apple-t6031-display: ' "${1:-/dev/null}" 2>/dev/null | head -40 || true
+  m3max_kit_m1n1_lines "${2:-/dev/null}"
+  if [[ -d $M3MAX_KIT_JOURNAL_DIR ]]; then
+    echo "== journal: persistent ($M3MAX_KIT_JOURNAL_DIR): a hung test boot's log is kept"
+  else
+    echo "== journal: NOT persistent (no $M3MAX_KIT_JOURNAL_DIR): a hung test boot leaves no log"
+  fi
+  cpus=$(grep -c '^processor' "$M3_PROCFS/cpuinfo" 2>/dev/null) || cpus=0
+  echo "== CPUs: $cpus"
+  echo "== m1n1 stage 2: $({ tr -d '\0' <"$DT/chosen/asahi,m1n1-stage2-version"; } 2>/dev/null || echo -)"
+  if [[ -n $(m3max_kit_get bootbin) && $(m3_bootbin_sha) == "$(m3max_kit_get bootbin)" ]]; then
+    echo "== boot.bin: the kit's ($(m3max_kit_get bootbin))"
+  else
+    echo "== boot.bin: NOT the kit's (sha256 $(m3_bootbin_sha); the kit installed $(m3max_kit_get bootbin))"
+  fi
+  echo "verdict: t6031-facts=$facts dcp-oslog=$n/5 in-system-ram=$inside gpu-identity=$ident cpus=$cpus"
+}
+
+# The lines of m1n1's log of this boot the boot loader workstream reads (its T6031 display, GPU,
+# PMP, facts and firmware lines, power-manager timeouts and warnings), from the report's text copy.
+m3max_kit_m1n1_lines() { # M1N1-STAGE2-LOG.TXT
+  echo "== m1n1's T6031 lines of this boot (m1n1-stage2-log.txt; the whole log is m1n1-stage2-log.raw)"
+  LC_ALL=C grep -aE 'm1n1 v|T6031|ADT: GPU:|FDT: GPU:|pmgr: timeout|WARNING|PMP values|firmware image|Max power table' "$1" 2>/dev/null |
+    head -200 || true
+}
+
+# A big-endian u32 property as a number, or "-".
+m3max_kit_u32() { m3_dt_u32 "$1"; }
+
+# The loader boot (S3a): what m1n1's GPU handoff did on this boot. The powered identity (its
+# probe-result: 1 pass, 2 power-on failed, 3 read faulted, 4 mismatch, 5 power not restored; the
+# power-manager words before and after, which must be equal), the GPU image facts, the GPU node as
+# m1n1 filled it, and m1n1's lines. The kernel starts nothing on this boot.
+m3max_kit_checks_loader() { # DIR
+  local id=$DT/chosen/asahi,t6031-gpu-powered-identity img=$DT/chosen/asahi,t6031-gpu-image gpu="" a result=- restored=-
+  local status=- family=-
+  echo "== the GPU's powered identity ($id)"
+  if [[ -d $id ]]; then
+    for a in "$id"/*; do [[ -f $a ]] && echo "${a##*/}: $(od -An -tx4 --endian=big -v "$a" 2>/dev/null | tr -s ' \n' ' ')"; done
+    result=$(m3max_kit_u32 "$id/probe-result")
+    if [[ -f $id/pmgr-before && -f $id/pmgr-after ]]; then
+      if cmp -s "$id/pmgr-before" "$id/pmgr-after"; then restored=yes; else restored=no; fi
+    fi
+  else
+    echo "(absent)"
+  fi
+  echo "== the GPU image facts ($img)"
+  if [[ -d $img ]]; then
+    for a in "$img"/*; do [[ -f $a ]] && echo "${a##*/}: $(m3_dt_text "$a")"; done
+    family=$(m3_dt_words "$img/firmware-family")
+  else
+    echo "(absent)"
+  fi
+  a=$({ tr -d '\0' <"$DT/aliases/gpu"; } 2>/dev/null) || a=""
+  [[ $a == /* && $a != *..* && -d $DT$a ]] && gpu=$DT$a
+  if [[ -z $gpu ]]; then for a in "$DT"/soc/gpu@*; do [[ -d $a ]] && gpu=$a; done; fi
+  echo "== the GPU node (${gpu#"$DT"})"
+  if [[ -n $gpu ]]; then
+    status=$(m3_dt_words "$gpu/status")
+    [[ $status == - ]] && status=okay
+    echo "status: $status, compatible: $(m3_dt_words "$gpu/compatible")"
+    echo "apple,firmware-compat: $(od -An -tu4 --endian=big "$gpu/apple,firmware-compat" 2>/dev/null | tr -s ' ' ' ')"
+    echo "asahi,t6031-gpu-standin: $(m3_dt_words "$gpu/asahi,t6031-gpu-standin")"
+  fi
+  m3max_kit_m1n1_lines "$1/report/m1n1-stage2-log.txt"
+  echo "verdict: probe-result=$result power-restored=$restored family=$family gpu-node=$status"
+}
+
+# DRM devices and connectors, the backlight, and the desktop's own view (hyprctl) when it runs.
+m3max_kit_display_state() {
+  local c drv
+  for c in "$M3_SYSFS"/class/drm/card*; do
+    [[ -d $c ]] || continue
+    if [[ ${c##*/} == card+([0-9]) ]]; then
+      drv=$(m3_report_driver_of "$c/device")
+      echo "${c##*/}: driver $drv"
+    else
+      echo "  ${c##*/}: status $(m3_attr "$c/status"), enabled $(m3_attr "$c/enabled"), modes $(tr '\n' ' ' <"$c/modes" 2>/dev/null)"
+    fi
+  done
+  for c in "$M3_SYSFS"/class/backlight/*; do
+    [[ -d $c ]] && echo "backlight ${c##*/}: driver $(m3_report_driver_of "$c/device"), brightness $(m3_attr "$c/brightness") of $(m3_attr "$c/max_brightness")"
+  done
+  m3max_kit_hyprctl
+  return 0
+}
+
+# Whether each backlight follows a level: half of its maximum for a second, then back.
+m3max_kit_backlight_check() {
+  local b old max
+  for b in "$M3_SYSFS"/class/backlight/*; do
+    [[ -w $b/brightness ]] || continue
+    old=$(m3_attr "$b/brightness") max=$(m3_attr "$b/max_brightness")
+    [[ $old =~ ^[0-9]+$ && $max =~ ^[1-9][0-9]*$ ]] || continue
+    echo $((max / 2)) >"$b/brightness" 2>/dev/null || continue
+    sleep 1
+    echo "== backlight ${b##*/}: set $((max / 2)) of $max, actual $(m3_attr "$b/actual_brightness"); put back $old"
+    echo "$old" >"$b/brightness" 2>/dev/null || true
+  done
+  return 0
+}
+
+# hyprctl's monitors, as the desktop user, for each Hyprland that runs (with refresh rates).
+m3max_kit_hyprctl() {
+  local s user uid sig
+  command -v hyprctl >/dev/null || return 0
+  for s in "$M3MAX_KIT_RUNDIR"/*/hypr/*/.socket.sock; do
+    [[ -S $s ]] || continue
+    sig=${s%/.socket.sock}; sig=${sig##*/}
+    uid=${s#"$M3MAX_KIT_RUNDIR"/}; uid=${uid%%/*}
+    # shellcheck disable=SC2015 # either failing skips this socket
+    [[ $uid =~ ^[0-9]+$ ]] && user=$(id -nu "$uid" 2>/dev/null) || continue
+    echo "== hyprctl monitors (session of uid $uid)"
+    timeout 5 runuser -u "$user" -- env XDG_RUNTIME_DIR="$M3MAX_KIT_RUNDIR/$uid" HYPRLAND_INSTANCE_SIGNATURE="$sig" \
+      hyprctl monitors all 2>&1 | head -60 || true
+  done
+  return 0
+}
+
+# A display boot (T2): the DRM state, the display lines of this boot's kernel log, and the verdict:
+# native when a card other than the boot framebuffer's has a connected connector with modes.
+m3max_kit_checks_display() { # DIR
+  local log=$1/report/kernel-log.txt state native=no re match=""
+  state=$(m3max_kit_display_state)
+  echo "== DRM and backlight"
+  printf '%s\n' "$state"
+  echo "== the display lines of this boot's kernel log"
+  LC_ALL=C grep -aiE 'apple-t6031-display|apple_t6031_display|t6031.*(display|dcp|pmp)|j516c display|dcp|apple-drm|appledrm|piodma|pmp|panel|backlight' "$log" | head -400 || true
+  if awk '/^card[0-9]+: driver / { drv = $3 }
+    /^  card[0-9]+-.*status connected/ && drv != "" && drv != "-" && drv != "simple-framebuffer" &&
+      drv != "simpledrm" && drv != "asahi" && $0 !~ /modes *$/ { found = 1 }
+    END { exit !found }' <<<"$state"; then
+    native=yes
+  fi
+  echo "== the DCP's and DRM's debugfs"
+  for d in "$M3MAX_KIT_DEBUGFS"/dcp-*/* "$M3MAX_KIT_DEBUGFS"/dri/*/name "$M3MAX_KIT_DEBUGFS"/dri/*/state; do
+    [[ -f $d ]] && { echo "-- ${d#"$M3MAX_KIT_DEBUGFS"/}"; head -c 65536 "$d" 2>/dev/null; echo; }
+  done
+  m3max_kit_backlight_check
+  re=$(m3max_plan_success display)
+  if [[ -n $re ]]; then match=$(LC_ALL=C grep -aE -m1 -- "$re" "$log" || true); fi
+  echo "== the plan's display success line: ${match:-(none)}"
+  echo "verdict: native-display=$native success=$([[ -n $match ]] && echo yes || echo no)"
+}
+
+# A GPU boot (T3): the GPU node and device, render nodes, devcoredumps, the GPU lines of this
+# boot's kernel log, and the verdict: success when the plan's gpu success regex matches.
+m3max_kit_checks_gpu() { # DIR
+  local log=$1/report/kernel-log.txt d re match="" phase=""
+  echo "== GPU nodes"
+  for d in "$DT"/soc/gpu@*; do
+    [[ -d $d ]] && echo "${d#"$DT"}: compatible $(m3_dt_words "$d/compatible"), status $(m3_dt_words "$d/status")"
+  done
+  echo "== GPU devices"
+  for d in "$M3_SYSFS"/bus/platform/devices/*.gpu; do
+    [[ -e $d ]] && echo "${d##*/}: driver $(m3_report_driver_of "$d")"
+  done
+  echo "== render nodes"
+  for d in "$M3_SYSFS"/class/drm/renderD*; do
+    [[ -e $d ]] && echo "${d##*/}: driver $(m3_report_driver_of "$d/device")"
+  done
+  echo "== devcoredump (copied, up to 8 MiB each)"
+  for d in "$M3_SYSFS"/class/devcoredump/devcd*; do
+    [[ -e $d/data ]] || continue
+    echo "${d##*/}"
+    head -c $((8 * 1024 * 1024)) "$d/data" >"$1/${d##*/}.bin" 2>/dev/null || true
+  done
+  echo "== asahi-m3 debugfs"
+  for d in "$M3MAX_KIT_DEBUGFS"/asahi-m3/*; do
+    [[ -f $d ]] && { echo "-- ${d##*/}"; head -c 65536 "$d" 2>/dev/null; echo; }
+  done
+  echo "== the GPU start's status (asahi-t6031/status: early copy, then now)"
+  cat "$1/early/asahi-t6031-status.txt" 2>/dev/null || echo "(no early copy)"
+  m3max_kit_debugfs
+  cat "$M3MAX_KIT_DEBUGFS/asahi-t6031/status" 2>/dev/null || echo "(absent now)"
+  phase=$(sed -n 's/.* phase=\([^ ]*\).*/\1/p' "$1/early/asahi-t6031-status.txt" "$M3MAX_KIT_DEBUGFS/asahi-t6031/status" 2>/dev/null | tail -1)
+  ls -l "$1/early" 2>/dev/null || true
+  echo "== the GPU start's lines (M3 G15C start:, M3 G15C verdict:, M3 G15C:, M3 G15S: firmware crashed)"
+  LC_ALL=C grep -aE 'M3 G15C (start|verdict)?:|M3 G15S: firmware crashed' "$log" | head -400 || true
+  echo "== the GPU lines of this boot's kernel log"
+  LC_ALL=C grep -aE 'asahi|agx|G15|t6031|RTKit|gpu|uat|devcoredump' "$log" | head -800 || true
+  re=$(m3max_plan_success gpu)
+  if [[ -n $re ]]; then match=$(LC_ALL=C grep -aE -m1 -- "$re" "$log" || true); fi
+  echo "== the plan's gpu success line: ${match:-(none)}"
+  echo "verdict: gpu-start=$([[ -n $match ]] && echo success || echo no-success)${phase:+ phase=$phase}"
+}
+
+# debugfs, mounted when it is not (the GPU start's status file lives there).
+m3max_kit_debugfs() {
+  [[ $M3MAX_KIT_DEBUGFS == /sys/kernel/debug ]] || return 0
+  mountpoint -q "$M3MAX_KIT_DEBUGFS" 2>/dev/null || mount -t debugfs debugfs "$M3MAX_KIT_DEBUGFS" 2>/dev/null || true
+}
+
+# The GPU start's own record of this boot, copied as early as possible (devcoredump drops its
+# data a few minutes after it is offered): /sys/kernel/debug/asahi-t6031/status and every
+# devcoredump's data, into the stage's early/ directory (an existing copy is kept).
+m3max_kit_gpu_early() { # STAGE-DIR
+  local dir=$1/early d
+  mkdir -p "$dir"
+  m3max_kit_debugfs
+  if [[ -f $M3MAX_KIT_DEBUGFS/asahi-t6031/status && ! -f $dir/asahi-t6031-status.txt ]]; then
+    cp "$M3MAX_KIT_DEBUGFS/asahi-t6031/status" "$dir/asahi-t6031-status.txt" 2>/dev/null || true
+  fi
+  for d in "$M3_SYSFS"/class/devcoredump/devcd*; do
+    [[ -e $d/data && ! -e $dir/${d##*/}.bin ]] || continue
+    head -c $((8 * 1024 * 1024)) "$d/data" >"$dir/${d##*/}.bin" 2>/dev/null || true
+  done
+  sync
+}
+
+# The stage directory of the boot armed with this boot's tag, or nothing.
+m3max_kit_tagged_stage() {
+  local tag armed id index
+  tag=$(m3max_kit_boot_tag)
+  armed=$(m3max_kit_get armed)
+  [[ -n $tag && -n $armed ]] || return 0
+  read -r id index <<<"$armed"
+  [[ $id == "$tag" ]] && m3max_kit_stage_dir "$index"
+  return 0
+}
+
+# The jobs boot (T4): the plan's jobs, each held to a time limit, with their records, and a
+# "jobs:" summary line (passed, failed and skipped).
+m3max_kit_jobs() { # DIR
+  local dir=$1 prefix job n=0 user uid sock rec rc pass=0 fail=0 skip=0 hang=0 out
+  local -a env=()
+  prefix=$(m3max_plan mesa-prefix)
+  read -ra env <<<"$(m3max_plan job-env)"
+  user=$(m3max_kit_user)
+  for job in $(m3max_plan jobs); do
+    n=$((n + 1))
+    if ((hang)); then
+      echo "job $n $job: skipped after a hang"
+      skip=$((skip + 1))
+      continue
+    fi
+    case $job in
+      first-job)
+        # The headless first jobs (compute, Vulkan and GL render with every word and pixel
+        # checked, wrong results again with the scheduling stalls, a short load), as the desktop
+        # user, into a directory of theirs, then copied here. It stops after a hang itself.
+        rc=0
+        out=$(mktemp -d)
+        chown "$user" "$out" 2>/dev/null || true
+        if [[ -x $prefix/bin/g15c-first-job ]]; then
+          timeout -k 10 900 runuser -u "$user" -- env ${env[@]+"${env[@]}"} "$prefix/bin/g15c-first-job" "$out/mesa" 5 \
+            >"$dir/job-$n-first-job.txt" 2>&1 || rc=$?
+          echo "exit=$rc" >>"$dir/job-$n-first-job.txt"
+          cp -r "$out/mesa" "$dir/mesa" 2>/dev/null || true
+          echo "job $n first-job: $(grep -c ' pass$' "$dir/mesa/summary.txt" 2>/dev/null || echo 0) passed; $(grep '^VERDICT' "$dir/mesa/summary.txt" 2>/dev/null | tr '\n' ';' | cut -c1-300) (exit $rc)"
+          if ((rc == 0)); then pass=$((pass + 1)); else fail=$((fail + 1)); fi
+          if ((rc == 124 || rc == 137)) || grep -q ' hang$' "$dir/mesa/summary.txt" 2>/dev/null; then hang=1; fi
+        else
+          echo "job $n first-job: skipped (no $prefix/bin/g15c-first-job)"
+          skip=$((skip + 1))
+        fi
+        rm -rf "$out"
+        ;;
+      compute)
+        rc=0
+        timeout 60 env -u SUDO_USER ${env[@]+"${env[@]}"} "$M3MAX_KIT_JOB" --seconds 5 "$prefix" >"$dir/job-$n-compute.txt" 2>&1 || rc=$?
+        echo "exit=$rc" >>"$dir/job-$n-compute.txt"
+        rec=$(sed -n 's/.*Record: \(\/[^ ]*\.txt\)$/\1/p' "$dir/job-$n-compute.txt" | tail -1)
+        if [[ -n $rec && -f $rec ]]; then cp "$rec" "$dir/job-$n-compute-record.txt"; fi
+        echo "job $n compute: $(grep '^air-gpu-job: ' "$dir/job-$n-compute.txt" | tail -1 | cut -c1-200) (exit $rc)"
+        if ((rc == 0)); then pass=$((pass + 1)); else fail=$((fail + 1)); fi
+        if ((rc == 3 || rc == 5 || rc == 7 || rc == 8)); then hang=1; fi
+        ;;
+      render)
+        uid=$(id -u "$user" 2>/dev/null) || uid=""
+        sock=""
+        if [[ -n $uid ]]; then
+          sock=$(find "$M3MAX_KIT_RUNDIR/$uid" -maxdepth 1 -type s -name 'wayland-*' 2>/dev/null | head -1)
+        fi
+        if [[ -x $prefix/bin/mesa-m3-probe && -n $sock ]]; then
+          rc=0
+          timeout 100 runuser -u "$user" -- env XDG_RUNTIME_DIR="$M3MAX_KIT_RUNDIR/$uid" WAYLAND_DISPLAY="${sock##*/}" \
+            ${env[@]+"${env[@]}"} "$prefix/bin/mesa-m3-probe" >"$dir/job-$n-render.txt" 2>&1 || rc=$?
+          echo "exit=$rc" >>"$dir/job-$n-render.txt"
+          echo "job $n render: $(grep -E '^(result|gl\.renderer|gl\.render)=' "$dir/job-$n-render.txt" | tr '\n' ' ' | cut -c1-300) (exit $rc)"
+          if ((rc == 0)) && grep -qx 'result=pass' "$dir/job-$n-render.txt"; then pass=$((pass + 1)); else fail=$((fail + 1)); fi
+        else
+          echo "job $n render: skipped (no desktop session of $user, or no $prefix/bin/mesa-m3-probe)"
+          skip=$((skip + 1))
+        fi
+        ;;
+    esac
+  done
+  echo "== the GPU's packages and nodes"
+  pacman -Q mesa-m3-g15c glibc vulkan-icd-loader libglvnd 2>&1 || true
+  ls -l "$M3_DEVFS/dri" "$M3_DEVFS/dri/by-path" 2>&1 || true
+  cat "$M3_SYSFS"/class/drm/renderD*/device/uevent 2>/dev/null || true
+  echo "jobs: passed=$pass failed=$fail skipped=$skip"
+}
+
+# Collects plan boot INDEX in this boot: the report, the stage's checks, its outcome.
+m3max_kit_collect_stage() { # INDEX
+  local index=$1 name kind dir verdict params
+  read -r name kind params <<<"$(m3max_plan_boot "$index")"
+  dir=$(m3max_kit_stage_dir "$index")
+  mkdir -p "$dir"
+  {
+    echo "stage: ${dir##*/} ($kind)"
+    echo "collected: $(date -Is), kernel $(uname -r), boot $(tr -d '-' <"$M3_PROCFS/sys/kernel/random/boot_id" 2>/dev/null || echo -)"
+    echo "command line: $(cat "$M3MAX_KIT_CMDLINE" 2>/dev/null)"
+  } >>"$dir/meta.txt"
+  m3max_kit_log "collecting ${dir##*/}"
+  if [[ $kind == display ]]; then sleep "$M3MAX_KIT_DISPLAY_SETTLE"; fi
+  # The jobs run first, so the report's kernel log has what they did.
+  if [[ $kind == jobs ]]; then m3max_kit_jobs "$dir" >"$dir/jobs.txt" 2>&1 || true; fi
+  m3max_kit_collect "$dir"
+  {
+    case $kind in
+      data) m3max_kit_checks_data "$dir/report/kernel-log.txt" "$dir/report/m1n1-stage2-log.txt" ;;
+      loader) m3max_kit_checks_loader "$dir" ;;
+      display) m3max_kit_checks_display "$dir" ;;
+      gpu) m3max_kit_checks_gpu "$dir" ;;
+      jobs)
+        cat "$dir/jobs.txt"
+        m3max_kit_checks_gpu "$dir" | sed 's/^verdict: /gpu /'
+        echo "verdict: $(sed -n 's/^jobs: //p' "$dir/jobs.txt" | tail -1)"
+        ;;
+    esac
+  } >"$dir/checks.txt" 2>&1 || true
+  verdict=$(sed -n 's/^verdict: //p' "$dir/checks.txt" | tail -1)
+  m3max_kit_outcome "$index" collected "$verdict"
+  if [[ $kind == gpu && $verdict == *gpu-start=success* && -z $(m3max_kit_get gpu_ok) ]]; then
+    m3max_kit_set gpu_ok "$index"
+  fi
+  if [[ $kind == loader && $verdict == *probe-result=1*gpu-node=okay* ]]; then
+    m3max_kit_set loader_ok 1
+  fi
+}
+
+# The boot the journal knows by arming id ID (its kernel command line carries the tag), or
+# nothing.
+m3max_kit_journal_boot() { # ID SINCE-EPOCH
+  journalctl -k -o json --no-pager --since "@$2" -g "${M3MAX_KIT_TAG//./\\.}=$1( |\$)" 2>/dev/null |
+    python3 -I -c '
+import json, sys
+for line in sys.stdin:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if "Kernel command line:" in str(entry.get("MESSAGE", "")) and entry.get("_BOOT_ID"):
+        print(entry["_BOOT_ID"])
+        break
+' 2>/dev/null || true
+}
+
+# The armed boot of plan boot INDEX (arming id ID) was not collected: this is a normal boot.
+# Records why (hung, hung-early, or not-booted when Limine never took the one-shot) with that
+# boot's journal when there is one. Returns 1 when the kit can't go on (not-booted).
+m3max_kit_missed() { # ID INDEX
+  local id=$1 index=$2 dir since bid detail
+  dir=$(m3max_kit_stage_dir "$index")
+  mkdir -p "$dir"
+  if [[ $(m3max_kit_oneshot armed 2>/dev/null) == "$M3MAX_KIT_ENTRY" ]]; then
+    m3max_kit_outcome "$index" not-booted "the one-shot was still set at the next boot: Limine did not boot it, so the kit can't arm its test boots on this Mac"
+    return 1
+  fi
+  since=$(stat -c %Y "$M3MAX_KIT_STATE/oneshot/armed" 2>/dev/null) || since=$(($(date +%s) - 86400))
+  bid=$(m3max_kit_journal_boot "$id" "$since")
+  if [[ -n $bid ]]; then
+    journalctl -k -b "$bid" -o short-monotonic --no-pager >"$dir/previous-boot-kernel-log.txt" 2>&1 || true
+    journalctl -b "$bid" -o short-monotonic --no-pager 2>/dev/null | tail -n 5000 >"$dir/previous-boot-journal.txt" || true
+    detail="its journal is in previous-boot-kernel-log.txt and previous-boot-journal.txt"
+  else
+    detail="it left no journal"
+  fi
+  if [[ -f $M3MAX_KIT_STATE/reached-$id ]]; then
+    cp "$M3MAX_KIT_STATE/reached-$id" "$dir/reached.txt"
+    m3max_kit_outcome "$index" hung "the boot reached userspace ($(cut -c1-60 "$dir/reached.txt")) and ended before the kit collected it: a hang, a panic or a power cycle; $detail"
+  else
+    m3max_kit_outcome "$index" hung-early "no sign that the boot reached userspace: it hung or was switched off while the kernel started; $detail"
+  fi
+  return 0
+}
+
+# ---- the run, boot by boot --------------------------------------------------------------------
+m3max_kit_lock() {
+  exec {M3MAX_KIT_LOCK_FD}>>"$M3MAX_KIT_STATE/lock" || die "could not open $M3MAX_KIT_STATE/lock"
+  flock -w "${1:-900}" "$M3MAX_KIT_LOCK_FD" || die "the kit is busy (another aurora-m3max-kit holds $M3MAX_KIT_STATE/lock); try again in a few minutes"
+}
+
+# At every boot (aurora-m3max-kit.service): collect this boot, then arm the next one.
+m3max_kit_step() {
+  local phase tag armed id index
+  [[ -f $M3MAX_KIT_STATE/status ]] || return 0
+  m3max_kit_lock
+  phase=$(m3max_kit_get phase)
+  case $phase in
+    running | finishing) ;;
+    *) m3max_kit_log "this boot: the kit is ${phase:-not set up}; nothing to do"; return 0 ;;
+  esac
+  trap 'm3_report_cleanup' EXIT
+  # A GPU boot's status file and crash log first: devcoredump does not keep them for long.
+  local early
+  early=$(m3max_kit_tagged_stage)
+  if [[ -n $early ]]; then m3max_kit_gpu_early "$early"; fi
+  m3max_kit_wait_boot
+  tag=$(m3max_kit_boot_tag)
+  m3max_kit_set restart ""
+  if [[ $phase == finishing ]]; then
+    if [[ -n $tag ]]; then
+      m3max_kit_log "this boot carries arming id $tag while the kit finishes; restarting into a normal boot"
+      m3max_kit_restart "a normal boot to finish"
+      return 0
+    fi
+    m3max_kit_finish
+    return 0
+  fi
+  if [[ $(uname -r) != "$(m3max_kit_get kernel)" ]]; then
+    m3max_kit_log "this boot runs $(uname -r), not the kit's kernel $(m3max_kit_get kernel) (another boot menu entry?): the kit waits for a boot of its kernel and arms nothing"
+    m3max_kit_notify "This boot runs another kernel than the test kit's, so the kit waits. Restart and pick the default entry to go on, or: sudo aurora-m3max-kit --stop"
+    return 0
+  fi
+  armed=$(m3max_kit_get armed)
+  if [[ -n $armed && $armed == loader:* ]]; then
+    # The loader stage is not a one-shot: this boot is its boot when boot.bin is still the one
+    # with the GPU handoff on. The boot.bin from before the kit means it was put back from macOS.
+    read -r id index <<<"$armed"
+    m3max_kit_set armed ""
+    case $(m3max_kit_bootbin_name) in
+      "the kit's, GPU handoff on")
+        m3max_kit_collect_stage "$index"
+        ;;
+      "the boot.bin from before the kit")
+        m3max_kit_outcome "$index" hung "the Mac did not come back with the boot loader's GPU handoff on, and the boot.bin from before the kit was put back from macOS"
+        m3max_kit_abandon "the boot loader's GPU handoff stage did not come back"
+        return 0
+        ;;
+      *)
+        m3max_kit_outcome "$index" failed "boot.bin (sha256 $(m3_bootbin_sha)) is neither the one the kit built with the GPU handoff on nor the one from before the kit"
+        m3max_kit_abandon "boot.bin changed outside the kit during the boot loader's GPU handoff stage"
+        return 0
+        ;;
+    esac
+    m3max_kit_advance "$tag"
+    return 0
+  fi
+  if [[ -z $armed && $(m3max_kit_get next) == 0 ]]; then
+    # The first boot after the install: the variant's, unless it did not boot and the boot.bin
+    # from before the kit was put back from macOS (its m1n1 is then recorded as failed here).
+    case $(m3max_kit_bootbin_name) in
+      "the boot.bin from before the kit")
+        m3max_kit_outcome 0 hung "the boot loader variant did not boot, and the boot.bin from before the kit was put back from macOS"
+        m1n1_failed_add "$M1N1_BIN_SHA" "${M1N1_PACKAGE%% *}: the M3 Max test kit's variant did not boot, found $(date +%F)"
+        m3max_kit_abandon "the boot loader variant did not boot"
+        return 0
+        ;;
+      "not one the kit knows")
+        m3max_kit_outcome 0 failed "boot.bin (sha256 $(m3_bootbin_sha)) is not the variant the kit installed"
+        m3max_kit_abandon "boot.bin changed outside the kit"
+        return 0
+        ;;
+    esac
+  fi
+  if [[ -n $armed ]]; then
+    read -r id index <<<"$armed"
+    if [[ -n $tag && $tag == "$id" ]]; then
+      m3max_kit_collect_stage "$index"
+    elif ! m3max_kit_missed "$id" "$index"; then
+      m3max_kit_set armed ""
+      m3max_kit_disarm || true
+      m3max_kit_skip_rest "the kit's one-shot boots do not work on this Mac"
+      m3max_kit_begin_finish ""
+      return 0
+    fi
+    m3max_kit_set armed ""
+    m3max_kit_disarm || m3max_kit_log "warning: could not remove the kit's boot entry; the next arming replaces it"
+  elif [[ $(m3max_kit_get next) == 0 ]]; then
+    m3max_kit_collect_stage 0
+    m3max_kit_set next 1
+  elif [[ -n $tag ]]; then
+    m3max_kit_log "this boot carries arming id $tag, which the kit has no record of; it collects nothing from it"
+  fi
+  m3max_kit_advance "$tag"
+}
+
+# Marks every plan boot from the next one on as skipped, for WHY.
+m3max_kit_skip_rest() { # WHY
+  local i count
+  count=$(m3max_plan_count)
+  for ((i = $(m3max_kit_get next); i < count; i++)); do
+    [[ -f $(m3max_kit_stage_dir "$i")/outcome.txt ]] || m3max_kit_outcome "$i" skipped "$1"
+  done
+  m3max_kit_set next "$count"
+}
+
+# Arms the plan's next boot that applies and schedules the restart into it; or, when there is
+# none, finishes (on a normal boot) or restarts into a normal boot to finish.
+m3max_kit_advance() { # THIS-BOOT'S-TAG
+  local index count max boots name kind params ok prefix w free
+  local -a prm=()
+  count=$(m3max_plan_count) max=$(m3max_plan max-boots)
+  while :; do
+    index=$(m3max_kit_get next)
+    if ((index >= count)); then
+      m3max_kit_begin_finish "$1"
+      return 0
+    fi
+    read -r name kind params <<<"$(m3max_plan_boot "$index")"
+    ok=$(m3max_kit_get gpu_ok)
+    case $kind in
+      data)
+        m3max_kit_set next $((index + 1))
+        continue
+        ;;
+      loader)
+        boots=$(m3max_kit_get boots)
+        if ((${boots:-0} >= max)); then
+          m3max_kit_skip_rest "the plan's limit of $max experimental boots was reached"
+          continue
+        fi
+        m3max_kit_arm_loader "$index" "$name" && return 0
+        m3max_kit_set next $((index + 1))
+        continue
+        ;;
+      gpu)
+        # The GPU start needs the GPU node m1n1's GPU handoff fills: after a loader boot that
+        # passed, when the plan has one.
+        if m3max_plan_boots | awk '$2 == "loader" { f = 1 } END { exit !f }' && [[ -z $(m3max_kit_get loader_ok) ]]; then
+          m3max_kit_outcome "$index" skipped "the boot loader's GPU handoff did not pass (see the loader stage)"
+          m3max_kit_set next $((index + 1))
+          continue
+        fi
+        if [[ -n $ok ]]; then
+          m3max_kit_outcome "$index" skipped "GPU boot $(m3max_kit_stage_dir "$ok" | sed 's#.*/##') succeeded already"
+          m3max_kit_set next $((index + 1))
+          continue
+        fi
+        ;;
+      jobs)
+        prefix=$(m3max_plan mesa-prefix)
+        if [[ -z $ok && -n $(m3max_kit_get nostart) ]]; then
+          m3max_kit_outcome "$index" skipped "kernel has no start experiment, so there is no GPU to run jobs on"
+          m3max_kit_set next $((index + 1))
+          continue
+        fi
+        if [[ -z $ok ]]; then
+          m3max_kit_outcome "$index" skipped "no GPU boot succeeded"
+          m3max_kit_set next $((index + 1))
+          continue
+        fi
+        if ! compgen -G "$prefix/share/vulkan/icd.d/*.json" >/dev/null; then
+          m3max_kit_outcome "$index" skipped "no Mesa with a Vulkan driver in $prefix"
+          m3max_kit_set next $((index + 1))
+          continue
+        fi
+        read -r _ _ w <<<"$(m3max_plan_boot "$ok")"
+        params=${params//@gpu/$w}
+        ;;
+    esac
+    boots=$(m3max_kit_get boots)
+    if ((${boots:-0} >= max)); then
+      m3max_kit_skip_rest "the plan's limit of $max experimental boots was reached"
+      continue
+    fi
+    free=$(m3max_kit_free_mb "$M3MAX_KIT_STATE")
+    if [[ -n $free ]] && ((free < M3MAX_KIT_MIN_MB / 2)); then
+      m3max_kit_skip_rest "only $free MB free for the kit's results"
+      continue
+    fi
+    read -ra prm <<<"$params"
+    # A boot whose parameters the test kernel does not have is skipped without spending a boot:
+    # a kernel without the GPU start experiment (asahi.t6031_start) skips the GPU boots, and
+    # with them the jobs, and the kit goes on to the final boot.
+    w=$(m3max_kit_oneshot missing "${prm[@]}" 2>/dev/null) || w=""
+    if [[ -n $w ]]; then
+      if [[ $kind == gpu && $'\n'$w$'\n' == *$'\n'asahi.t6031_start$'\n'* ]]; then
+        m3max_kit_outcome "$index" skipped "kernel has no start experiment (the test kernel has no asahi.t6031_start)"
+        m3max_kit_set nostart 1
+      else
+        m3max_kit_outcome "$index" skipped "the test kernel has no ${w//$'\n'/, }"
+      fi
+      m3max_kit_set next $((index + 1))
+      continue
+    fi
+    if ! m3max_kit_arm "$name" "${prm[@]}"; then
+      m3max_kit_outcome "$index" not-armed "$M3MAX_KIT_WHY"
+      m3max_kit_set next $((index + 1))
+      continue
+    fi
+    m3max_kit_set armed "$M3MAX_KIT_ARMED_ID $index" next $((index + 1)) boots $((${boots:-0} + 1))
+    mkdir -p "$(m3max_kit_stage_dir "$index")"
+    printf 'armed: %s, id %s, parameters: %s\n' "$(date -Is)" "$M3MAX_KIT_ARMED_ID" "$params" >>"$(m3max_kit_stage_dir "$index")/meta.txt"
+    m3max_kit_log "armed ${name} ($kind) for the next boot: id $M3MAX_KIT_ARMED_ID, $params"
+    m3max_kit_restart "test boot $((index + 1)) of $count ($name)"
+    return 0
+  done
+}
+
+# Nothing more to arm. The end state of a run whose boots all came back: the variant with the
+# GPU handoff off (proven to boot on this Mac), so a boot.bin the loader stage left with it on is
+# rebuilt with it off first (or, if that fails, the boot.bin from before the kit goes back). Then
+# finish on this boot when it is a normal one on that boot.bin, else restart into one.
+m3max_kit_begin_finish() { # THIS-BOOT'S-TAG
+  local changed=0
+  m3max_kit_set phase finishing
+  if [[ $(m3max_kit_get loader) == on ]]; then
+    changed=1
+    if ! m3max_kit_loader off; then
+      m3max_kit_log "could not rebuild boot.bin with the GPU handoff off ($M3MAX_KIT_WHY); putting back the boot.bin from before the kit"
+      m3max_kit_unvariant || m3max_kit_log "warning: the boot.bin from before the kit could not be put back either; sudo aurora-m3max-kit --restore"
+    fi
+  fi
+  if [[ -n $1 ]] || ((changed)); then
+    m3max_kit_restart "a normal boot, to finish"
+  else
+    m3max_kit_finish
+  fi
+}
+
+# A boot-loader-level failure (the variant did not boot, or the loader stage did not come back,
+# and the boot.bin from before the kit was put back from macOS): the rest is skipped, the
+# kernel-only state around that boot.bin is restored, and the kit finishes on this boot.
+m3max_kit_abandon() { # WHY
+  m3max_kit_skip_rest "$1"
+  m3max_kit_unvariant || m3max_kit_log "warning: the kernel-only state could not be restored; sudo aurora-m3max-kit --restore"
+  m3max_kit_set armed "" phase finishing
+  m3max_kit_finish
+}
+
+# The boot loader GPU stage (plan kind loader): the interim results are packed (in the home folder
+# and on the EFI partition, where macOS reaches them), the restore steps refreshed (likewise), and
+# boot.bin rebuilt with m1n1's GPU handoff on; then a normal boot after a longer, announced delay.
+# Returns 1 when it was not armed (the stage then says why).
+m3max_kit_arm_loader() { # INDEX NAME
+  local index=$1 name=$2 boots sha
+  boots=$(m3max_kit_get boots)
+  m3max_kit_interim || m3max_kit_log "warning: the interim results could not be packed"
+  m3max_kit_restore_files
+  if ! m3max_kit_loader on; then
+    m3max_kit_outcome "$index" not-armed "boot.bin could not be rebuilt with the GPU handoff on: $M3MAX_KIT_WHY"
+    return 1
+  fi
+  sha=$(m3_bootbin_sha)
+  m3max_kit_set armed "loader:$sha $index" next $((index + 1)) boots $((${boots:-0} + 1))
+  mkdir -p "$(m3max_kit_stage_dir "$index")"
+  printf 'armed: %s, boot.bin with %s, sha256 %s\n' "$(date -Is)" "$M3_MAX_SWITCHES" "$sha" >>"$(m3max_kit_stage_dir "$index")/meta.txt"
+  m3max_kit_log "armed $name (loader): boot.bin rebuilt with the GPU handoff on, sha256 $sha"
+  m3max_kit_restart "test boot $((index + 1)) of $(m3max_plan_count) ($name): the boot loader's GPU handoff.
+    If the Mac does not come back to the desktop, put the boot loader back from macOS: the steps are
+    in ~/aurora-m3max-kit-RESTORE.txt and in AURORA-M3MAX-KIT-RESTORE.txt on the EFI partition, and
+    the results so far are in $(m3max_kit_get interim)" loader
+  return 0
+}
+
+# Rebuilds boot.bin with m1n1's GPU handoff on (M3_MAX_SWITCHES) or off (M3_MAX_SAFE_SWITCHES) and
+# checks it (update-m1n1, m3_verify_bootbin). A failed "on" goes back to "off". Sets loader and
+# bootbin, or M3MAX_KIT_WHY and returns 1.
+m3max_kit_loader() { # on|off
+  local rc=0
+  M3MAX_KIT_WHY=""
+  if [[ $1 == on ]]; then M3_MAX_GPU_HANDOFF=1; else M3_MAX_GPU_HANDOFF=0; fi
+  M3_MODE=handoff
+  m3_switches_write
+  if update_m1n1_frozen; then
+    M3MAX_KIT_WHY="update-m1n1 is frozen in $UPDATE_M1N1_CONF"
+    rc=1
+  elif ! $sudo update-m1n1 >>"$M3MAX_KIT_STATE/log" 2>&1; then
+    M3MAX_KIT_WHY="update-m1n1 failed (see the kit's log)"
+    rc=1
+  elif ! (m3_verify_bootbin) >>"$M3MAX_KIT_STATE/log" 2>&1; then
+    M3MAX_KIT_WHY="the rebuilt boot.bin did not check out (see the kit's log)"
+    rc=1
+  fi
+  if ((rc)) && [[ $1 == on ]]; then
+    M3_MAX_GPU_HANDOFF=0
+    m3_switches_write
+    $sudo update-m1n1 >>"$M3MAX_KIT_STATE/log" 2>&1 || true
+    m3max_kit_set loader off bootbin "$(m3_bootbin_sha)"
+  fi
+  M3_MAX_GPU_HANDOFF=0
+  ((rc == 0)) || return 1
+  m3max_kit_set loader "$1" bootbin "$(m3_bootbin_sha)"
+  m3max_kit_log "boot.bin rebuilt with m1n1's GPU handoff $1 (sha256 $(m3max_kit_get bootbin))"
+}
+
+# Back to the kernel-only state this Mac had before the kit: the boot.bin from before the variant
+# (when this one is not it), update-m1n1 frozen with no DTBS block, no switch block, m3-mode kernel.
+m3max_kit_unvariant() {
+  if [[ -f $STATE/m3max-bootbin-backup ]]; then
+    m3max_bootbin_restore || return 1
+    m3max_conf_kernel_only
+    m3_switches_remove
+    echo kernel | $sudo tee "$STATE/m3-mode" >/dev/null
+  fi
+  m3max_kit_set loader off
+  m3max_kit_esp_files remove
+}
+
+# The interim results: everything collected so far, packed like the final file, before any GPU
+# stage; a copy on the EFI partition, which macOS can read if Linux does not come back.
+m3max_kit_interim() {
+  local esp
+  m3max_kit_pack interim || return 1
+  if esp=$(m3max_kit_esp); then
+    if ! { cp "$(m3max_kit_get interim_state)" "$esp/m1n1/aurora-m3max-kit-interim.tgz.new" &&
+      sync && mv -f "$esp/m1n1/aurora-m3max-kit-interim.tgz.new" "$esp/m1n1/aurora-m3max-kit-interim.tgz" && sync; }; then
+      rm -f "$esp/m1n1/aurora-m3max-kit-interim.tgz.new"
+      m3max_kit_log "warning: could not copy the interim results to the EFI partition"
+    fi
+  fi
+  m3max_kit_log "interim results: $(m3max_kit_get interim)"
+  m3max_kit_notify "Interim results, enough to upload on their own: $(m3max_kit_get interim)"
+}
+
+# The EFI partition (where m1n1's boot.bin is), or 1.
+m3max_kit_esp() {
+  local target
+  target=$(esp_bootbin) || return 1
+  echo "${target%/m1n1/boot.bin}"
+}
+
+# The restore steps in the desktop user's home and on the EFI partition (refreshed before the
+# loader stage, removed with the interim copy when the kit ends or is undone).
+m3max_kit_restore_files() {
+  local user home esp tmp
+  tmp=$(mktemp)
+  m3max_kit_restore_text >"$tmp"
+  chmod 0644 "$tmp"
+  user=$(m3max_kit_user)
+  home=$(m3max_kit_home "$user")
+  if [[ $user != root && -d $home ]]; then
+    runuser -u "$user" -- cp -- "$tmp" "$home/aurora-m3max-kit-RESTORE.txt" ||
+      m3max_kit_log "warning: could not save the restore steps in $home"
+  fi
+  if esp=$(m3max_kit_esp); then
+    { cp "$tmp" "$esp/AURORA-M3MAX-KIT-RESTORE.txt.new" && sync &&
+      mv -f "$esp/AURORA-M3MAX-KIT-RESTORE.txt.new" "$esp/AURORA-M3MAX-KIT-RESTORE.txt" && sync; } ||
+      m3max_kit_log "warning: could not save the restore steps on the EFI partition"
+  fi
+  rm -f "$tmp"
+}
+
+# Removes the kit's files from the EFI partition (the restore steps and the interim copy).
+m3max_kit_esp_files() { # remove
+  local esp
+  esp=$(m3max_kit_esp) || return 0
+  rm -f "$esp/AURORA-M3MAX-KIT-RESTORE.txt" "$esp/m1n1/aurora-m3max-kit-interim.tgz"
+}
+
+# The last, normal boot: collect it, pack everything, and say which file to upload.
+m3max_kit_finish() {
+  local dir
+  dir=$(m3max_kit_stage_dir final)
+  mkdir -p "$dir"
+  m3max_kit_collect "$dir"
+  { m3max_kit_display_state; echo "verdict: normal boot, kernel $(uname -r)"; } >"$dir/checks.txt" 2>&1 || true
+  m3max_kit_outcome final collected "the normal boot after the test boots, on boot.bin sha256 $(m3_bootbin_sha) ($(m3max_kit_bootbin_name))"
+  m3max_kit_units off
+  m3max_kit_esp_files remove
+  m3max_kit_set phase "done"
+  if m3max_kit_pack; then
+    m3max_kit_log "done: upload $(m3max_kit_get tarball)"
+    m3max_kit_notify "Done. Please upload this file: $(m3max_kit_get tarball)"
+  else
+    m3max_kit_log "done, but the results could not be packed (see above); sudo aurora-m3max-kit --status"
+    m3max_kit_notify "The test kit finished, but could not pack its results. Run: sudo aurora-m3max-kit --status"
+  fi
+}
+
+# Schedules the restart (shutdown -r, which warns the logged-in users) after the plan's delay (the
+# loader delay for the loader stage).
+m3max_kit_restart() { # WHAT [loader]
+  local delay mins
+  delay=$(m3max_plan reboot-delay)
+  if [[ ${2:-} == loader ]]; then delay=$(m3max_plan loader-delay); fi
+  mins=$(((${delay:-60} + 59) / 60))
+  m3max_kit_set restart "in $mins min, for $1"
+  m3max_kit_log "restarting in $mins min for $1"
+  if ! shutdown -r "+$mins" "M3 Max test kit: this Mac restarts in $mins min for $1. To stop the kit: sudo aurora-m3max-kit --stop" >/dev/null 2>&1; then
+    m3max_kit_log "warning: shutdown -r failed; restart the Mac by hand to go on"
+  fi
+  m3max_kit_notify "Restarting in $mins min for $1. To stop the kit: sudo aurora-m3max-kit --stop"
+}
+
+# What this boot.bin is: the kit's (GPU handoff on or off), the one from before the kit, or other.
+m3max_kit_bootbin_name() {
+  local now orig
+  now=$(m3_bootbin_sha)
+  orig=$(m3max_kit_get orig_bootbin)
+  if [[ -z $orig && -f $STATE/m3max-bootbin-backup ]]; then read -r _ orig <"$STATE/m3max-bootbin-backup"; fi
+  if [[ -n $orig && $now == "$orig" ]]; then echo "the boot.bin from before the kit"
+  elif [[ $now == "$(m3max_kit_get bootbin)" ]]; then echo "the kit's, GPU handoff $(m3max_kit_get loader)"
+  else echo "not one the kit knows"
+  fi
+}
+
+# A desktop notification for every logged-in user with a session bus (best effort).
+m3max_kit_notify() {
+  local bus uid user
+  for bus in "$M3MAX_KIT_RUNDIR"/*/bus; do
+    [[ -S $bus ]] || continue
+    uid=${bus#"$M3MAX_KIT_RUNDIR"/}
+    uid=${uid%/bus}
+    # shellcheck disable=SC2015 # any of them failing skips this bus
+    [[ $uid =~ ^[0-9]+$ ]] && ((uid >= 1000)) && user=$(id -nu "$uid" 2>/dev/null) || continue
+    timeout 5 runuser -u "$user" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=$bus" \
+      notify-send -u critical -a "M3 Max test kit" "M3 Max test kit" "$1" >/dev/null 2>&1 || true
+  done
+  return 0
+}
+
+# The kit's systemd units on (enabled for the next boots) or off.
+m3max_kit_units() { # on|off
+  if [[ $1 == on ]]; then
+    $sudo systemctl daemon-reload
+    $sudo systemctl enable "$M3MAX_KIT_UNIT" "$M3MAX_KIT_MARK_UNIT" >/dev/null 2>&1 ||
+      die "could not enable the kit's systemd units"
+  else
+    $sudo systemctl disable "$M3MAX_KIT_UNIT" "$M3MAX_KIT_MARK_UNIT" >/dev/null 2>&1 || true
+  fi
+}
+
+# --mark (aurora-m3max-kit-mark.service, early in a boot whose command line carries the tag):
+# this armed boot reached userspace.
+m3max_kit_mark() {
+  local id
+  id=$(m3max_kit_boot_tag)
+  [[ $id =~ ^[0-9A-Za-z-]{1,32}$ && -d $M3MAX_KIT_STATE ]] || return 0
+  printf 'reached userspace %s, uptime %s s\n' "$(date -Is)" "$(cut -d' ' -f1 "$M3_PROCFS/uptime" 2>/dev/null)" \
+    >"$M3MAX_KIT_STATE/reached-$id"
+  sync
+  # A GPU boot's status file and crash log, before anything else can happen to them.
+  local stage
+  stage=$(m3max_kit_tagged_stage)
+  if [[ -n $stage ]]; then m3max_kit_gpu_early "$stage"; fi
+}
+
+# ---- the result ---------------------------------------------------------------------------------
+# What the kit has done, for --status and for kit-status.txt in the tgz.
+m3max_kit_status_text() {
+  local i count name kind phase o armed
+  phase=$(m3max_kit_get phase)
+  count=$(m3max_plan_count)
+  echo "M3 Max test kit ($(m3max_kit_get board)): ${phase:-not set up}"
+  echo "started: $(m3max_kit_get started); kernel: $(m3max_kit_get kernel); boot loader variant: $M3_MAX_VARIANT"
+  echo "experimental boots armed: $(m3max_kit_get boots) of at most $(m3max_plan max-boots)"
+  armed=$(m3max_kit_get armed)
+  echo "stages:"
+  o=$(cat "$(m3max_kit_stage_dir baseline)/outcome.txt" 2>/dev/null || echo -)
+  printf '  00 %-12s %-8s %s\n' baseline report "$o"
+  for ((i = 0; i < count; i++)); do
+    read -r name kind _ <<<"$(m3max_plan_boot "$i")"
+    o=$(cat "$(m3max_kit_stage_dir "$i")/outcome.txt" 2>/dev/null || echo -)
+    if [[ $o == - && -n $armed && ${armed#* } == "$i" ]]; then o="armed for the next boot (id ${armed%% *})"; fi
+    printf '  %02d %-12s %-8s %s\n' "$((i + 1))" "$name" "$kind" "$o"
+  done
+  o=$(cat "$(m3max_kit_stage_dir final)/outcome.txt" 2>/dev/null || echo -)
+  printf '  99 %-12s %-8s %s\n' final normal "$o"
+  [[ -z $(m3max_kit_get restart) ]] || echo "restart: $(m3max_kit_get restart)"
+  [[ -z $(m3max_kit_get tarball) ]] || echo "result: $(m3max_kit_get tarball)"
+  return 0
+}
+
+# Packs the plan, the status, the kit's log and every stage into one tgz, masked and checked as
+# --m3-report's is (m3_privacy_pack), and puts a copy in the desktop user's home, written as that
+# user. Sets tarball (with "interim": interim, and interim_state for the state directory's copy).
+# Returns 1 when nothing could be kept.
+m3max_kit_pack() { # [interim]
+  local work dir name user home f pub key=tarball
+  local -a journals=()
+  user=$(m3max_kit_user)
+  home=$(m3max_kit_home "$user")
+  name=aurora-m3max-kit-$(m3max_kit_get board)-$(date +%Y%m%d-%H%M%S).tgz
+  if [[ ${1:-} == interim ]]; then
+    name=aurora-m3max-kit-$(m3max_kit_get board)-$(date +%Y%m%d-%H%M%S)-interim.tgz
+    key=interim
+  fi
+  work=$(mktemp -d)
+  dir=$work/kit
+  mkdir -p "$dir"
+  if [[ -d $M3MAX_KIT_STATE/stages ]]; then cp -a "$M3MAX_KIT_STATE/stages" "$dir/"; fi
+  m3max_kit_status_text >"$dir/kit-status.txt" 2>&1 || true
+  cp "$M3MAX_KIT_PLAN_FILE" "$dir/plan.txt" 2>/dev/null || true
+  cp "$M3MAX_KIT_STATE/log" "$dir/kit-log.txt" 2>/dev/null || true
+  cat >"$dir/README.txt" <<EOF
+aurora-sep M3 Max test kit ($TAG), packed $(date -u +%Y-%m-%dT%H:%M:%SZ)
+The host name is replaced by "host", user names by "user", serial numbers by SERIAL and MAC
+addresses by xx:xx:xx:xx:xx:xx, as in --m3-report.
+  kit-status.txt    every stage and how it ended (collected, hung, hung-early, not-booted,
+                    not-armed, skipped, cancelled), with its verdict
+  plan.txt          the plan the kit ran: each boot's kernel parameters
+  kit-log.txt       the kit's own log
+  stages/NN-NAME/   one directory per stage: 00-baseline (before the install), then each boot
+                    of the plan, then 99-final (the normal boot after them)
+    report/         the --m3-report collection of that boot (see its README.txt)
+    checks.txt      what the stage looked at, and its verdict
+    outcome.txt     how it ended
+    meta.txt        when it was armed and collected, and the boot's command line
+    previous-boot-*.txt  for a boot that was not collected: its kernel log and journal, when
+                    the journal kept them
+    job-*.txt       the jobs boot's GPU jobs and their records
+EOF
+  for f in "$dir"/stages/*/kernel-log-source.txt; do
+    [[ -f $f && $(cat "$f") == journal && -f ${f%/kernel-log-source.txt}/report/kernel-log.txt ]] &&
+      journals+=("${f%/kernel-log-source.txt}/report/kernel-log.txt")
+  done
+  for f in "$dir"/stages/*/previous-boot-*.txt; do [[ -f $f ]] && journals+=("$f"); done
+  m3_privacy_secrets >"$work/secrets"
+  if ! m3_privacy_pack "$dir" "$M3MAX_KIT_STATE/$name" "$work/secrets" ${journals[@]+"${journals[@]}"}; then
+    rm -rf "$work"
+    return 1
+  fi
+  m3max_kit_set "$key" "$M3MAX_KIT_STATE/$name" "${key}_state" "$M3MAX_KIT_STATE/$name"
+  if [[ $user != root && -d $home ]]; then
+    pub=$(mktemp --tmpdir aurora-m3max-kit.XXXXXX)
+    cp "$M3MAX_KIT_STATE/$name" "$pub" && chmod 0644 "$pub"
+    # As the user, so a link in the home can only point where the user may write.
+    if runuser -u "$user" -- cp -- "$pub" "$home/$name" 2>/dev/null; then
+      m3max_kit_set "$key" "$home/$name"
+    else
+      m3max_kit_log "warning: could not copy the result to $home; it is in $M3MAX_KIT_STATE/$name"
+    fi
+    rm -f "$pub"
+  fi
+  rm -rf "$work"
+}
+
+# ---- --status, --stop, --restore --------------------------------------------------------------
+m3max_kit_status() {
+  if [[ ! -f $M3MAX_KIT_STATE/status ]]; then
+    say "the M3 Max test kit has not run on this Mac (no $M3MAX_KIT_STATE/status)"
+    return 0
+  fi
+  m3max_kit_status_text
+  echo
+  case $(m3max_kit_get phase) in
+    done | stopped | restored)
+      if [[ -n $(m3max_kit_get tarball) ]]; then
+        echo "Please upload this file (drag it into a comment on the issue): $(m3max_kit_get tarball)"
+      fi
+      ;;
+    *)
+      echo "The kit is running and restarts this Mac by itself. To stop it: sudo aurora-m3max-kit --stop"
+      echo "To stop it and put back the boot loader this Mac had: sudo aurora-m3max-kit --restore"
+      ;;
+  esac
+}
+
+# Cancels the kit's scheduled restart and its armed boot (that stage: cancelled), and switches
+# its units off. Needs the lock.
+m3max_kit_halt() {
+  local armed id index
+  shutdown -c >/dev/null 2>&1 || true
+  m3max_kit_set restart ""
+  armed=$(m3max_kit_get armed)
+  if [[ -n $armed ]]; then
+    read -r id index <<<"$armed"
+    if [[ $(m3max_kit_boot_tag) != "$id" ]]; then
+      m3max_kit_outcome "$index" cancelled "the kit was stopped before this boot ran"
+    fi
+    m3max_kit_set armed ""
+  fi
+  m3max_kit_disarm || die "could not clear the kit's one-shot boot (see $M3MAX_KIT_STATE/log). Run this again."
+  m3max_kit_units off
+  # A boot.bin the loader stage left with m1n1's GPU handoff on goes back to the variant without it.
+  if [[ $(m3max_kit_get loader) == on ]] && ! m3max_kit_loader off; then
+    warn "could not rebuild boot.bin with the GPU handoff off ($M3MAX_KIT_WHY); sudo aurora-m3max-kit --restore puts back the one from before the kit"
+  fi
+}
+
+# --stop: arm nothing more, and pack the results so far.
+m3max_kit_stop() {
+  local phase
+  if [[ ! -f $M3MAX_KIT_STATE/status ]]; then
+    say "the M3 Max test kit has not run on this Mac; nothing to stop"
+    return 0
+  fi
+  m3max_kit_lock
+  phase=$(m3max_kit_get phase)
+  case $phase in
+    done | stopped | restored)
+      say "the kit is $phase already; nothing to stop"
+      m3max_kit_status_text
+      return 0
+      ;;
+  esac
+  m3max_kit_halt
+  m3max_kit_set phase stopped
+  m3max_kit_log "stopped by --stop"
+  if m3max_kit_pack; then
+    say "Stopped: nothing more is armed, and no restart is scheduled. The results so far:
+    $(m3max_kit_get tarball)
+    The boot loader variant stays; sudo aurora-m3max-kit --restore puts back the one this Mac had."
+  else
+    warn "stopped, but the results could not be packed (see above); they stay in $M3MAX_KIT_STATE"
+  fi
+}
+
+# --restore: --stop, then put back the boot.bin this Mac booted before the kit (and the
+# kernel-only state around it: the freeze on update-m1n1, no switch block, m3-mode kernel), take
+# the kit's Mesa off, and check that the previous kernel's boot menu entry is there. The test
+# kernel stays: its new paths are off unless a test boot switches them on.
+m3max_kit_restore() {
+  local had=0 phase="" name result=""
+  if [[ -f $M3MAX_KIT_STATE/status ]]; then
+    m3max_kit_lock
+    phase=$(m3max_kit_get phase)
+    had=1
+    [[ $phase == restored ]] || m3max_kit_halt
+  elif [[ -f $M3MAX_KIT_ONESHOT ]]; then
+    m3max_kit_disarm || die "could not clear the kit's one-shot boot. Run this again."
+  fi
+  if [[ -f $STATE/m3max-bootbin-backup ]]; then
+    m3max_kit_unvariant || die "the boot.bin this Mac booted before the kit could not be put back (see above).
+    Nothing more was changed. The kit's boot entry and restarts are off."
+  else
+    say "boot.bin: nothing to put back (the kit did not change it, or it was put back already)"
+    m3max_kit_esp_files remove
+  fi
+  name=$(m3max_kit_get mesa)
+  if [[ -n $name ]] && pacman -Q "$name" >/dev/null 2>&1; then
+    $sudo pacman -Rns --noconfirm "$name" || warn "could not remove $name; remove it with: sudo pacman -Rns $name"
+  fi
+  if [[ -f $STATE/m3-known-entry.json && $(boot_chain) == limine ]]; then
+    (m3_keep_limine_entry retain) || warn "could not check the boot menu entry \"Aurora previous (GPU off)\""
+  fi
+  if ((had)); then
+    if [[ $phase != restored && $phase != "done" ]]; then m3max_kit_pack || warn "the results could not be packed"; fi
+    m3max_kit_set phase restored
+    m3max_kit_log "restored by --restore"
+    if [[ -n $(m3max_kit_get tarball) ]]; then result="
+    The kit's results: $(m3max_kit_get tarball)"; fi
+  fi
+  say "Restored: the kit is off, and boot.bin is the one this Mac booted before the kit (update-m1n1 is
+    frozen again, as on a kernel-only M3). The test kernel stays the default, with its new M3 Max
+    paths off; the kernel this Mac ran before the kit is in the boot menu as \"Aurora previous
+    (GPU off)\". To go back to the release kernel as well:
+      curl -fsSL $LATEST_URL | bash$result"
+}
+
+# The steps that put the boot loader back, for the file the kit leaves in the user's home.
+m3max_kit_restore_text() {
+  local target keep uuid
+  target=$(esp_bootbin) || target=/boot/efi/m1n1/boot.bin
+  keep=$target.before-$VERSION
+  uuid=$(findmnt -no PARTUUID --target "${target%/m1n1/boot.bin}" 2>/dev/null) || uuid="?"
+  cat <<EOF
+M3 Max test kit: how to undo it ($(date -u +%Y-%m-%d), $TAG)
+
+From Linux, at any time (stops the kit, puts back the boot loader this Mac had):
+  sudo aurora-m3max-kit --restore
+
+If the Mac stops in the boot loader (m1n1 text on screen, often "No valid payload found", and no
+boot menu), put the boot loader back from macOS:
+  1. Hold the power button until the Mac turns off, then press and hold it again for the
+     startup options, and start macOS (or Options, then Utilities > Terminal).
+  2. In Terminal, run: diskutil list
+     Find the partition whose UUID is $uuid (any case) with:
+       diskutil info diskNsM | grep -i 'partition uuid'
+  3. sudo diskutil mount diskNsM   (it prints the /Volumes path)
+  4. cp -X '<that path>/m1n1/boot.bin.before-$VERSION' '<that path>/m1n1/boot.bin'
+  Then start Linux and run: sudo aurora-m3max-kit --restore
+
+After the boot loader is put back, start Linux: the kit sees it, records that boot as hung,
+puts this Mac back as it was before the kit, and finishes by itself; then run
+sudo aurora-m3max-kit --status for the file to upload. If Linux does not come back at all, the
+results up to the boot loader test are on the same partition as
+m1n1/aurora-m3max-kit-interim.tgz (copy it off from macOS and upload it).
+
+If a test boot freezes or the screen stays black for more than 5 minutes: hold the power
+button until the Mac turns off, then press it again. The next boot is always the normal one,
+and the kit records that test boot as hung and goes on by itself. This is true of every test
+boot but one: the boot loader GPU test changes boot.bin, so if the Mac does not come back from
+it, put the boot loader back from macOS as above.
+
+If the normal boot itself fails, pick "Aurora previous (GPU off)" in the boot menu: the kernel
+this Mac ran before the kit. The kept boot loader is $keep.
+EOF
+}
+
+# ---- setting the kit up (--m3max-kit) ------------------------------------------------------------
+# The work directory of the setup: the kit's downloaded files and this script's copy.
+M3MAX_KIT_WORK=""
+
+# Downloads a kit file ("file sha256") into the work directory and checks it. Dies otherwise.
+m3max_kit_fetch() { # "FILE SHA256"
+  local file sha rc=0
+  read -r file sha <<<"$1"
+  [[ -n $file && $sha =~ ^[0-9a-f]{64}$ ]] || die "this release names no checked copy of a kit file (${1:-empty}). Nothing was changed."
+  if [[ -f $M3MAX_KIT_WORK/$file && $(sha256sum "$M3MAX_KIT_WORK/$file" | cut -d' ' -f1) == "$sha" ]]; then return 0; fi
+  say "Downloading $file"
+  fetch_release_file "$RELEASE_URL/$file" "$M3MAX_KIT_WORK/$file" || rc=$?
+  ((rc == 0)) || die "could not download $file from $TAG (curl exit $rc). Nothing was changed."
+  [[ $(sha256sum "$M3MAX_KIT_WORK/$file" | cut -d' ' -f1) == "$sha" ]] ||
+    die "$file does not match its published checksum. Nothing was changed."
+}
+
+# The identity of an installer: what it installs and with which kit files.
+m3max_kit_identity() {
+  printf '%s|' "$VERSION" "$TAG" "$M1N1_PACKAGE" "$M1N1_BIN_SHA" "$M3MAX_KIT_PLAN" "$M3MAX_KIT_MESA_PACKAGE" \
+    "$M3_MAX_SWITCHES" "$M3_MAX_VARIANT" "$M3_ADT_READER" "${PACKAGES[*]}" "${M3_GPU_SCRIPTS[*]}"
+}
+
+# This script, on disk, into the work directory: the runner the kit installs. From a pipe
+# (curl ... | bash) it can't be read again, so this release's copy is downloaded, and it must
+# install exactly what this one does (m3max_kit_identity).
+m3max_kit_self() {
+  local out=$M3MAX_KIT_WORK/install-aurora-sep.sh theirs rc=0
+  if [[ $SELF_SOURCE == file && -f $SELF_PATH ]]; then
+    cp "$SELF_PATH" "$out"
+    [[ $(sha256sum "$out" | cut -d' ' -f1) == "$SELF_SHA256" ]] || die "this script changed while it ran. Nothing was changed."
+    return 0
+  fi
+  say "Downloading this release's install-aurora-sep.sh, for the kit's runner"
+  fetch_release_file "$RELEASE_URL/install-aurora-sep.sh" "$out" || rc=$?
+  ((rc == 0)) || die "could not download install-aurora-sep.sh from $TAG (curl exit $rc). Nothing was changed."
+  # shellcheck disable=SC2016 # expanded by that bash
+  theirs=$(bash -c 'AURORA_SEP_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1 && m3max_kit_identity' _ "$out" 2>/dev/null) || theirs=""
+  [[ -n $theirs && $theirs == "$(m3max_kit_identity)" ]] ||
+    die "the install-aurora-sep.sh of $TAG is not the script that runs now (another release?). Run the
+    kit's command again. Nothing was changed."
+  chmod 0755 "$out"
+}
+
+# How many restarts the plan takes at most, and roughly how long, for the consent screen.
+m3max_kit_estimate() {
+  local e max
+  e=$(m3max_plan_boots | awk '$2 != "data"' | wc -l)
+  max=$(m3max_plan max-boots)
+  ((e <= max)) || e=$max
+  # One restart into the install, one per test boot, one back into a normal boot; about five
+  # minutes each (restart, settle, collect, the delay before the next).
+  echo "$((e + 2)) $(((e + 2) * 5 + 10))"
+}
+
+m3max_kit_consent() {
+  local restarts minutes answer=""
+  read -r restarts minutes <<<"$(m3max_kit_estimate)"
+  cat <<EOF
+
+======================== M3 MAX TEST KIT ($(this_board)) ========================
+This runs the M3 Max test plan on this Mac in one go. It:
+  1. writes a report of this Mac as it is now (it only reads);
+  2. installs the test kernel ($(m3_kernel_release)) and a new boot loader: m1n1-aurora
+     $(m1n1_version) with the M3 Max boot loader variant ($M3_MAX_VARIANT). The boot loader this
+     Mac has now is kept on the EFI partition, and the kernel it runs now stays in the boot
+     menu as "Aurora previous (GPU off)";
+  3. restarts the Mac by itself up to $restarts times, over about $minutes minutes. The test boots
+     are used once: whatever happens in one, the next restart is your normal boot. Save your
+     work, keep the Mac on power, and let it run; nothing needs to be typed. Each restart is
+     announced a minute or so ahead.
+     If a test boot freezes or the screen stays black for more than 5 minutes, hold the power
+     button until the Mac turns off, then press it again: the kit notes that boot and goes on.
+     One step is different: the boot loader GPU test changes boot.bin itself. Before it, the
+     kit writes the results so far (a file you can upload on its own) and announces it 3
+     minutes ahead. If the Mac does not come back from it, put the boot loader back from macOS
+     (the steps below); the kit then finishes by itself at the next Linux start.
+  4. at the end, writes one file in your home folder, aurora-m3max-kit-$(this_board)-<date>.tgz,
+     with the host name, user names, serial numbers and MAC addresses masked. You upload it.
+At any time:
+  sudo aurora-m3max-kit --status    what it has done, and what comes next
+  sudo aurora-m3max-kit --stop      arm nothing more (keeps the results so far)
+  sudo aurora-m3max-kit --restore   stop, and put back the boot loader this Mac has now
+The steps to put the boot loader back from macOS are printed below and saved in your home
+folder as aurora-m3max-kit-RESTORE.txt.
+==========================================================================================
+EOF
+  if ((M3MAX_KIT_YES)); then
+    say "--yes: starting"
+    return 0
+  fi
+  if ! { exec {M3MAX_KIT_TTY_FD}<"$M3MAX_KIT_TTY"; } 2>/dev/null; then
+    die "the kit asks for your yes on this screen, and this run has no terminal to ask in. Run the
+    command in a terminal, or add --yes after --m3max-kit to agree on the command line. Nothing was changed."
+  fi
+  printf 'Type yes and press Enter to start (anything else stops, with nothing changed): '
+  read -r -u "$M3MAX_KIT_TTY_FD" answer || answer=""
+  exec {M3MAX_KIT_TTY_FD}<&-
+  [[ ${answer,,} == yes ]] || die "stopped: nothing was changed."
+}
+
+# Every check before anything changes: the Mac, the boot chain, a run in progress, the kit's
+# files, the plan, the one-shot arming, the space, and the boot loader variant's own checks.
+m3max_kit_preflight() {
+  local out phase free home
+  if ! is_m3_max; then
+    if [[ $(this_soc) == t6034 ]]; then
+      die "the M3 Max test kit is for the 16-core M3 Max (t6031: $M3_MAX_BOARDS). This 14-core M3 Max
+    ($(this_board), t6034) needs its own ADT first: please run --m3-report and attach the file to an
+    issue. Nothing was changed."
+    fi
+    die "the M3 Max test kit is for the 16-core M3 Max (t6031: $M3_MAX_BOARDS), and this Mac is
+    $(this_board) ($(this_soc)). Nothing was changed."
+  fi
+  [[ $(boot_chain) == limine ]] ||
+    die "the kit arms its test boots through the Limine boot menu, and this Mac boots with $(boot_chain).
+    Nothing was changed."
+  phase=$($sudo sed -n 's/^phase=//p' "$M3MAX_KIT_STATE/status" 2>/dev/null | tail -1) || phase=""
+  case $phase in
+    running | finishing)
+      die "a test kit run is in progress on this Mac ($phase): sudo aurora-m3max-kit --status shows it,
+    --stop stops it, and --restore stops it and puts back the boot loader. Nothing was changed."
+      ;;
+  esac
+  m3max_kit_fetch "$M3MAX_KIT_PLAN"
+  m3max_kit_fetch "$(printf '%s\n' "${M3_GPU_SCRIPTS[@]}" | grep '^air-gpu-oneshot\.sh ')"
+  m3max_kit_fetch "$(printf '%s\n' "${M3_GPU_SCRIPTS[@]}" | grep '^air-gpu-job\.sh ')"
+  m3max_kit_fetch "$M3_ADT_READER"
+  if [[ -n $M3MAX_KIT_MESA_PACKAGE ]]; then m3max_kit_fetch "$M3MAX_KIT_MESA_PACKAGE"; fi
+  out=$(m3max_kit_plan_check "$M3MAX_KIT_WORK/${M3MAX_KIT_PLAN%% *}" 2>&1 >"$M3MAX_KIT_WORK/plan") ||
+    die "$out. Nothing was changed."
+  M3MAX_KIT_PLAN_FILE=$M3MAX_KIT_WORK/plan
+  [[ " $(m3max_plan boards) " == *" $(this_board) "* ]] ||
+    die "the kit's plan is for $(m3max_plan boards), not this $(this_board). Nothing was changed."
+  M3MAX_KIT_ONESHOT=$M3MAX_KIT_WORK/air-gpu-oneshot.sh
+  M3MAX_KIT_JOB=$M3MAX_KIT_WORK/air-gpu-job.sh
+  out=$(m3max_kit_oneshot check 2>&1) ||
+    die "this Mac can't arm the kit's one-shot test boots: $(sed -n 's/.*refused: //p' <<<"$out" | head -1)
+    Nothing was changed."
+  m3_esp_space_check
+  free=$(m3max_kit_free_mb "$M3MAX_KIT_STATE")
+  [[ -z $free ]] || ((free >= M3MAX_KIT_MIN_MB)) ||
+    die "the kit needs about $M3MAX_KIT_MIN_MB MB free for its results in ${M3MAX_KIT_STATE%/*}, and there are $free MB. Nothing was changed."
+  home=$(m3max_kit_home "$M3MAX_KIT_USER_NAME")
+  free=$(m3max_kit_free_mb "$home")
+  [[ -z $free ]] || ((free >= M3MAX_KIT_MIN_MB / 2)) ||
+    die "the kit needs about $((M3MAX_KIT_MIN_MB / 2)) MB free in $home for its result, and there are $free MB. Nothing was changed."
+  # The boot loader variant's own checks (stub, stage 1, update-m1n1), which install_all repeats.
+  m3_plan
+  [[ $M3_MODE == handoff ]] || die "the kit needs the M3 Max boot loader variant, which this Mac can't take (see above). Nothing was changed."
+}
+
+# The desktop user the kit writes its result for (who ran the command).
+M3MAX_KIT_USER_NAME=""
+
+m3max_kit_setup() { # [--yes] [--kit-work DIR]
+  local a home dir restarts minutes
+  while (($#)); do
+    case $1 in
+      --yes) M3MAX_KIT_YES=1 ;;
+      --kit-work) M3MAX_KIT_WORK=${2:-}; shift ;;
+      *) die "unknown option $1 after --m3max-kit (only --yes)" ;;
+    esac
+    shift
+  done
+  M3MAX_KIT=1 M3_TRY=1
+  release_source
+  require_supported_soc
+  is_m3_max || m3max_kit_preflight
+  if [[ -z $M3MAX_KIT_WORK ]]; then M3MAX_KIT_WORK=$(mktemp -d); fi
+  M3MAX_KIT_USER_NAME=${SUDO_USER:-$(id -un)}
+  # The kit runs as root from here (its state, its checks of the EFI variables, its runner), from
+  # this script's copy on disk.
+  if [[ -n $sudo ]]; then
+    m3max_kit_self
+    say "The kit runs as root from here on (sudo may ask for your password)."
+    a=()
+    ((M3MAX_KIT_YES == 0)) || a=(--yes)
+    exec $sudo --preserve-env=AURORA_RELEASE_URL,AURORA_RELEASES_API bash "$M3MAX_KIT_WORK/install-aurora-sep.sh" \
+      --m3max-kit --kit-work "$M3MAX_KIT_WORK" "${a[@]}"
+  fi
+  [[ -f $M3MAX_KIT_WORK/install-aurora-sep.sh ]] || m3max_kit_self
+  m3max_kit_preflight
+  m3max_kit_consent
+  # From here on, the Mac changes.
+  if [[ -d $M3MAX_KIT_STATE ]]; then mv "$M3MAX_KIT_STATE" "$M3MAX_KIT_STATE.before-$(date +%Y%m%d-%H%M%S)"; fi
+  install -d -m 0700 "$M3MAX_KIT_STATE" "$M3MAX_KIT_STATE/stages" "$M3MAX_KIT_STATE/oneshot"
+  install -m 0600 "$M3MAX_KIT_WORK/plan" "$M3MAX_KIT_STATE/plan"
+  M3MAX_KIT_PLAN_FILE=$M3MAX_KIT_STATE/plan
+  m3max_kit_set phase setup user "$M3MAX_KIT_USER_NAME" board "$(this_board)" started "$(date -Is)" \
+    next 0 boots 0 armed "" gpu_ok "" kernel "$(m3_kernel_release)" tag "$TAG"
+  say "Writing the baseline report (stage 00-baseline)"
+  dir=$(m3max_kit_stage_dir baseline)
+  trap 'm3_report_cleanup' EXIT
+  m3max_kit_collect "$dir"
+  m3max_kit_checks_data >"$dir/checks.txt" 2>&1 || true
+  m3max_kit_outcome baseline collected "$(sed -n 's/^verdict: //p' "$dir/checks.txt" | tail -1)"
+  install_all
+  [[ $M3_MODE == handoff ]] || die "the install did not put the M3 Max boot loader variant on (see above); the kit stops here.
+    sudo bash $M3MAX_KIT_WORK/install-aurora-sep.sh --m3max-kit-restore undoes what was done."
+  m3max_kit_mesa_install
+  m3max_kit_set bootbin "$(m3_bootbin_sha)" loader off \
+    orig_bootbin "$(cut -d' ' -f2 "$STATE/m3max-bootbin-backup" 2>/dev/null || true)"
+  m3max_kit_install_runner
+  m3max_kit_units on
+  m3max_kit_restore_files
+  m3max_kit_set phase running
+  m3max_kit_log "set up: $(m3max_plan_count) boots in the plan, at most $(m3max_plan max-boots) of them experimental"
+  read -r restarts minutes <<<"$(m3max_kit_estimate)"
+  echo
+  echo "======================== M3 MAX TEST KIT: STARTED ($(this_board)) ========================"
+  echo "  The Mac restarts by itself in 2 minutes, then up to $((restarts - 1)) more times, over about"
+  echo "  $minutes minutes in all. Leave it on power and let it run. Before the boot loader GPU test"
+  echo "  it writes the results so far (enough to upload) and says where. When it stops restarting:"
+  echo "    sudo aurora-m3max-kit --status"
+  echo "  prints the one file to upload (aurora-m3max-kit-$(this_board)-<date>.tgz in your home folder)."
+  echo "  Stop it at any time: sudo aurora-m3max-kit --stop   (and --restore to put back the boot loader)"
+  echo "  The restore steps are in ~/aurora-m3max-kit-RESTORE.txt, and on the EFI partition (which"
+  echo "  macOS can read) as AURORA-M3MAX-KIT-RESTORE.txt. They are also printed above."
+  m3max_kit_restore_text | sed 's/^/  | /' 
+  echo "=========================================================================================="
+  m3max_kit_set restart "in 2 min, into the first boot of the test kernel and boot loader"
+  shutdown -r +2 "M3 Max test kit: this Mac restarts in 2 minutes to start the tests. To stop the kit: sudo aurora-m3max-kit --stop" \
+    >/dev/null 2>&1 || warn "could not schedule the restart; restart the Mac to start the tests"
+  rm -rf "$M3MAX_KIT_WORK"
+}
+
+# The kit's Mesa (M3MAX_KIT_MESA_PACKAGE), when the release has one: only a package whose every
+# file is under /opt, in a pacman transaction of its own. A failure leaves the jobs stage out.
+m3max_kit_mesa_install() {
+  local file name unmet=""
+  [[ -n $M3MAX_KIT_MESA_PACKAGE ]] || return 0
+  # An image that holds its packages (frozen_package_detection) gets no transaction beyond the
+  # installer's own: the kit leaves its Mesa out there, and the jobs stage is skipped.
+  if ((FROZEN_PACKAGES)); then
+    warn "this image holds its packages, so the kit's Mesa was left out (the jobs stage will be skipped)"
+    return 0
+  fi
+  file=$M3MAX_KIT_WORK/${M3MAX_KIT_MESA_PACKAGE%% *}
+  # No GPU start, no jobs: a kernel without the start experiment gets no Mesa.
+  if [[ -n $(m3max_kit_oneshot missing asahi.t6031_start=1 2>/dev/null) ]]; then
+    say "The test kernel has no GPU start experiment, so the kit's Mesa (for GPU jobs) is not installed"
+    return 0
+  fi
+  if bsdtar -tf "$file" 2>/dev/null | grep -v '^\.' | grep -qv '^opt/'; then
+    warn "the kit's Mesa package has files outside /opt, so it was left out (no GPU jobs)"
+    return 0
+  fi
+  local -a deps=()
+  mapfile -t deps < <(bsdtar -xOf "$file" .PKGINFO 2>/dev/null | sed -n 's/^depend = //p')
+  if ((${#deps[@]})) && ! unmet=$(pacman -T "${deps[@]}" 2>/dev/null); then
+    warn "the kit's Mesa needs $(tr '\n' ' ' <<<"$unmet")which this Mac does not have at those versions, so it was
+    left out (no GPU jobs; nothing was upgraded)"
+    return 0
+  fi
+  name=$(bsdtar -xOf "$file" .PKGINFO 2>/dev/null | sed -n 's/^pkgname = //p' | head -1)
+  if [[ -n $name ]] && pacman -U --noconfirm "$file"; then
+    m3max_kit_set mesa "$name"
+    say "Installed the kit's Mesa ($name) in its own prefix"
+  else
+    warn "the kit's Mesa did not install, so the jobs stage will be skipped"
+  fi
+}
+
+# The runner: this script's copy with the kit's files next to it (the ADT reader where
+# m3_adt_reader looks for it), aurora-m3max-kit, and the two units.
+m3max_kit_install_runner() {
+  local unit=$M3MAX_KIT_UNIT_DIR
+  install -d -m 0755 "$M3MAX_KIT_LIBEXEC" "${M3MAX_KIT_BIN%/*}" "$unit"
+  install -m 0755 "$M3MAX_KIT_WORK/install-aurora-sep.sh" "$M3MAX_KIT_LIBEXEC/install-aurora-sep.sh"
+  install -m 0755 "$M3MAX_KIT_WORK/air-gpu-oneshot.sh" "$M3MAX_KIT_WORK/air-gpu-job.sh" "$M3MAX_KIT_LIBEXEC/"
+  install -m 0644 "$M3MAX_KIT_WORK/${M3_ADT_READER%% *}" "$M3MAX_KIT_LIBEXEC/aurora-adt-extract.py"
+  cat >"$M3MAX_KIT_BIN.tmp" <<EOF
+#!/bin/bash
+# aurora-m3max-kit: the M3 Max test kit, set up by install-aurora-sep.sh --m3max-kit ($TAG).
+#   sudo aurora-m3max-kit --status    what the kit has done, what comes next, the file to upload
+#   sudo aurora-m3max-kit --stop      arm nothing more, cancel its restart, pack the results so far
+#   sudo aurora-m3max-kit --restore   --stop, and put back the boot loader this Mac had before
+if ((EUID != 0)); then exec sudo "\$0" "\$@"; fi
+exec $M3MAX_KIT_LIBEXEC/install-aurora-sep.sh --m3max-kit-runner "\$@"
+EOF
+  chmod 0755 "$M3MAX_KIT_BIN.tmp"
+  mv -f "$M3MAX_KIT_BIN.tmp" "$M3MAX_KIT_BIN"
+  cat >"$unit/$M3MAX_KIT_UNIT" <<EOF
+[Unit]
+Description=M3 Max test kit: collect this boot and arm the next test boot
+After=multi-user.target
+ConditionPathExists=$M3MAX_KIT_STATE/status
+
+[Service]
+# exec, not oneshot: the step waits until the boot has finished starting
+# (systemctl is-system-running --wait), which a oneshot start job would hold up.
+Type=exec
+ExecStart=$M3MAX_KIT_BIN --step
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  cat >"$unit/$M3MAX_KIT_MARK_UNIT" <<EOF
+[Unit]
+Description=M3 Max test kit: note that a test boot reached userspace
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+ConditionKernelCommandLine=$M3MAX_KIT_TAG
+ConditionPathExists=$M3MAX_KIT_STATE/status
+
+[Service]
+Type=oneshot
+ExecStart=$M3MAX_KIT_BIN --mark
+
+[Install]
+WantedBy=sysinit.target
+EOF
+}
+
+# --uninstall: the kit stops for good. Its results stay in $M3MAX_KIT_STATE.
+m3max_kit_uninstall() {
+  local mesa
+  [[ -e $M3MAX_KIT_BIN || -e $M3MAX_KIT_UNIT_DIR/$M3MAX_KIT_UNIT || -e $M3MAX_KIT_LIBEXEC ]] || return 0
+  if $sudo test -f "$M3MAX_KIT_STATE/status"; then
+    $sudo "$M3MAX_KIT_BIN" --stop || die "could not stop the M3 Max test kit (sudo aurora-m3max-kit --stop). Nothing was uninstalled."
+  fi
+  m3max_kit_units off
+  mesa=$($sudo sed -n 's/^mesa=//p' "$M3MAX_KIT_STATE/status" 2>/dev/null | tail -1) || mesa=""
+  if [[ -n $mesa ]] && pacman -Q "$mesa" >/dev/null 2>&1; then
+    $sudo pacman -Rns --noconfirm "$mesa" || warn "could not remove the kit's $mesa; remove it with: sudo pacman -Rns $mesa"
+  fi
+  $sudo rm -rf "$M3MAX_KIT_LIBEXEC" "$M3MAX_KIT_BIN" "$M3MAX_KIT_UNIT_DIR/$M3MAX_KIT_UNIT" "$M3MAX_KIT_UNIT_DIR/$M3MAX_KIT_MARK_UNIT"
+  $sudo systemctl daemon-reload || true
+  say "Removed the M3 Max test kit's runner and units; its results stay in $M3MAX_KIT_STATE"
+}
+
+# --m3max-kit-status, --m3max-kit-stop and --m3max-kit-restore from a release's script: the
+# installed runner's, when there is one; this script's own as root, when there is none.
+m3max_kit_from_release() { # ACTION
+  if [[ -n $sudo ]]; then
+    if [[ -x $M3MAX_KIT_BIN ]]; then exec $sudo "$M3MAX_KIT_BIN" "$1"; fi
+    die "there is no aurora-m3max-kit on this Mac; run this as root:
+      curl -fsSL $LATEST_URL | sudo bash -s -- --m3max-kit-${1#--}"
+  fi
+  m3max_kit_runner "$1"
+}
+
+# The installed runner (aurora-m3max-kit): its actions.
+m3max_kit_runner() { # ACTION
+  case ${1:-} in
+    --status | --stop | --restore | --step | --mark) ;;
+    *) die "aurora-m3max-kit takes --status, --stop or --restore" ;;
+  esac
+  ((EUID == 0)) || [[ -z $sudo ]] || die "run it as root: sudo aurora-m3max-kit $1"
+  case $1 in
+    --status) m3max_kit_status ;;
+    --stop) m3max_kit_stop ;;
+    --restore) m3max_kit_restore ;;
+    --step) m3max_kit_step ;;
+    --mark) m3max_kit_mark ;;
+  esac
+}
+
 # Tests source this file for its functions only.
 if [[ ${AURORA_SEP_SOURCE_ONLY:-} == 1 ]]; then return 0; fi
 
@@ -8426,8 +10794,8 @@ fi
 if ((!M3_PRO_MESA)) && [[ -n ${1:-} && $1 != --read-only ]]; then
   die "--no-m3-mesa goes with an install (alone, with another install option or with --read-only), not with $1"
 fi
-# One option at a time; these two commands take arguments of their own.
-if (($# > 1)) && [[ $1 != --reset-touchid && $1 != --m3-gpu-check ]]; then
+# One option at a time; these commands take arguments of their own.
+if (($# > 1)) && [[ $1 != --reset-touchid && $1 != --m3-gpu-check && $1 != --m3max-kit && $1 != --m3max-kit-runner ]]; then
   die "unexpected arguments after $1: ${*:2}"
 fi
 
@@ -8441,6 +10809,11 @@ case ${1:-} in
   --m3-report) m3_report ;;
   --m3-power-survey) m3_power_survey ;;
   --m3-gpu-check) shift; m3_gpu_check_run "$@" ;;
+  --m3max-kit) shift; m3max_kit_setup "$@" ;;
+  --m3max-kit-runner) shift; m3max_kit_runner "$@" ;;
+  --m3max-kit-status) m3max_kit_from_release --status ;;
+  --m3max-kit-stop) m3max_kit_from_release --stop ;;
+  --m3max-kit-restore) m3max_kit_from_release --restore ;;
   --agent-prompt) release_source >&2; prompt_notice; agent_prompt ;;
-  *) die "unknown option $1 (--read-only, --uninstall, --reset-touchid, --agent-prompt, --m3-report, --m3-power-survey, --neo-gpu, --m3-handoff, --m3-gpu, --m3-gpu-check, --m3-gpu-experiment, --m3-gpu-persistent, --m3-profile=j613-25g83, --m3-profile=j615-25g83, --no-m3-mesa, --archive-esp-history, --esp-history or --desktop-fixes)" ;;
+  *) die "unknown option $1 (--read-only, --uninstall, --reset-touchid, --agent-prompt, --m3-report, --m3-power-survey, --neo-gpu, --m3-handoff, --m3-gpu, --m3-gpu-check, --m3-gpu-experiment, --m3-gpu-persistent, --m3-profile=j613-25g83, --m3-profile=j615-25g83, --no-m3-mesa, --archive-esp-history, --esp-history, --desktop-fixes, --m3max-kit or --m3max-kit-status, -stop, -restore)" ;;
 esac
