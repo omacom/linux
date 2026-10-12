@@ -373,6 +373,10 @@ class SameAs123Test(flow.M3FlowBase):
             for try_ in (0, 1):
                 if board == "j613" and try_ == 0:
                     continue
+                # The 16-core M3 Max's --m3-handoff now installs its opt-in boot loader variant
+                # (test_m3max_kit.VariantTest); a plain run there is still 12.3's.
+                if board in ("j514c", "j516c") and try_ == 1:
+                    continue
                 with self.subTest(board=board, try_=try_):
                     self.run_pair(board, try_)
                     seen.append((board, try_))

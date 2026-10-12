@@ -175,6 +175,11 @@ fake = os.environ["FAKE"]
 with open(fake + "/log", "a") as f:
     f.write("reader " + " ".join(sys.argv[1:]) + "\n")
 mode = os.environ.get("FAKE_READER", "ok")
+if sys.argv[1:2] == ["--stage2-log"]:
+    # m1n1's log of this boot, read from the other phram device.
+    print("# aurora-adt-extract: m1n1's stage 2 log of this boot (m1n1_stage2.log); read-only")
+    print("m1n1: published the boot loader facts on myhost-4711")
+    sys.exit(0)
 if sys.argv[1:2] == ["--check"]:
     if mode == "refuse":
         sys.stderr.write("aurora-adt-extract: mtd1 is of type 'nor', not 'ram' (phram)\n")
@@ -529,11 +534,15 @@ class ReportTest(MaxBase):
         self.assertIn("adt-allowlist.txt", files)
 
     def test_m3_max_t6034_without_smc_keys(self):
-        # This kernel's SMC driver makes no key list on a t6034 yet: one clear line, no failure.
+        # No key list (debugfs not mounted, or the SMC driver did not start): one clear line, no
+        # failure. The kernel's SMC driver knows the t6034 (macsmc_hwmon_is_m3), so the line no
+        # longer blames the chip.
         self.max_mac("j514m", smc=False)
         proc, files = self.report_files()
         self.check_common("j514m", "t6034", proc, files)
-        line = "no SMC key list on this kernel (t6034 not yet supported)"
+        line = (f"no SMC key list on this kernel (no {self.tmp}/debug/*smc*/keys: debugfs is not mounted, "
+                "or the SMC driver did not start)")
+        self.assertNotIn("not yet supported", proc.stderr)
         self.assertEqual(self.text(files, "smc-keys.txt"), line + "\n")
         self.assertIn(line, proc.stderr)
 
@@ -749,9 +758,14 @@ class AdtTest(MaxBase):
         self.assertIn("== with phram\nphram: loaded\nmtd0 name=nvram", check)
         self.assertIn("mtd1 name=adt type=ram size=507904", check)
         self.assertIn("mtd2 name=m1n1_stage2.log type=ram size=16384", check)
-        # Only the read-only node of the device named adt.
+        # Only the read-only node of the device named adt; then, once the ADT was read, the
+        # read-only node of m1n1's log (G1), while phram is still loaded.
         reader = [l for l in self.log().splitlines() if l.startswith("reader ")]
-        self.assertEqual(reader, [f"reader --check {self.tmp}/dev/mtd1ro", f"reader {self.tmp}/dev/mtd1ro"])
+        self.assertEqual(reader, [f"reader --check {self.tmp}/dev/mtd1ro", f"reader {self.tmp}/dev/mtd1ro",
+                                  f"reader --stage2-log {self.tmp}/dev/mtd2ro",
+                                  f"reader --stage2-log --raw {self.tmp}/dev/mtd2ro"])
+        self.assertIn(f"log: {self.tmp}/dev/mtd2ro with reader.py --stage2-log\nlog: done\nlog raw: done\n", check)
+        self.assertLess(check.index("log: done"), check.index("unloaded: phram"))
         self.assertIn("mtd1ro: MTD device mtd1 named 'adt', checked", check)
         self.assertIn("phram: not loaded\nmtd0 name=nvram type=nor size=1048576 erasesize=- dev=90:0 by-name=nvram", check)
         self.assertIn("region: /reserved-memory/flash@10003528000 reg 0x10003528000+0x7c000 (507904 bytes)", check)
@@ -991,7 +1005,9 @@ class NextStepsTest(MaxBase):
                 self.assertNotIn(self.BLOCK, self.install(try_=try_).stdout)
 
     def test_m3_max_still_refuses_the_handoff(self):
-        for board in ("j514c", "j514m"):
+        # The 14-core M3 Max (t6034) has no boot loader variant; the 16-core one (t6031) has an
+        # opt-in one (test_m3max_kit.VariantTest).
+        for board in ("j514m", "j516m"):
             with self.subTest(board=board):
                 self.fresh_state()
                 self.mac(board)
@@ -1199,7 +1215,8 @@ class SurveyTest(MaxBase):
         self.max_mac("j514m", smc=False, backlight=True)
         proc, tgz, files = self.survey()
         self.assertEqual(len(tgz), 1, proc.stderr)
-        line = "no SMC key list on this kernel (t6034 not yet supported)"
+        line = (f"no SMC key list on this kernel (no {self.tmp}/debug/*smc*/keys: debugfs is not mounted, "
+                "or the SMC driver did not start)")
         self.assertIn(line, proc.stderr)
         self.assertEqual(files["smc-keys.txt"], line + "\n")
         self.assertIn(f"smc: {line}", files["summary.txt"])

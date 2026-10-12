@@ -109,6 +109,23 @@ class M3ReportTest(Base):
         self.assertRegex(text, rf"boot.bin's first \d+ bytes: sha256 {sha}")
         self.assertIn(f"m1n1-installed: {sha} ", text)
 
+    def test_m1n1_log_is_named_even_when_not_read(self):
+        # G1: the report always has m1n1-stage2-log.txt: m1n1's log of this boot, read with the ADT
+        # through phram (test_m3_max.AdtTest), or one line saying why it was not.
+        self.mac("j613")
+        _, files = self.report()
+        self.assertIn("m1n1-stage2-log.txt", files)
+        self.assertTrue(files["m1n1-stage2-log.txt"].decode().startswith("m1n1's log was not read: "),
+                        files["m1n1-stage2-log.txt"])
+        self.assertIn("m1n1-stage2-log.txt  m1n1's log of this boot", files["README.txt"].decode())
+
+    def test_the_t6034_smc_line_is_the_generic_one(self):
+        # macsmc_hwmon_is_m3() lists t6034: a missing key list no longer blames the chip.
+        src = flow.INSTALLER.read_text()
+        body = src.split("m3_smc_missing() {", 1)[1].split("\n}\n", 1)[0]
+        self.assertNotIn("t6034", body)
+        self.assertIn("debugfs is not mounted, or the SMC driver did not start", body)
+
     def test_report_needs_no_preflight(self):
         src = flow.INSTALLER.read_text()
         self.assertIn("--agent-prompt | --reset-touchid | --m3-report | --m3-power-survey) return 1", src)
