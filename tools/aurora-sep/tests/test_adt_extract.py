@@ -3,8 +3,10 @@
 Every ADT here is synthetic. build_m3max_adt() makes an ADT shaped like an M3 Max's (the node
 names the reader looks for, a 14-inch t6031 or t6034 board), with placeholder values: none of
 its numbers describe M3 Max hardware. It plants sensitive properties (serial numbers, MAC
-addresses, chip ids, nonces, keys, calibration, UUIDs) inside and outside the allowlist, and
-marker strings in nodes outside it, and the tests check that none of them is ever printed.
+addresses, chip ids, nonces, keys, calibration, per-Mac UUIDs) inside and outside the allowlist,
+and marker strings in nodes outside it, and the tests check that none of them is ever printed.
+The firmware image UUIDs of the firmware processors' nubs (iop-*-nub*) are the exception: they
+are printed (FirmwareUuidTest). StageLogTest covers --stage2-log, m1n1's log of this boot.
 
 The device tests use a fake /sys, device tree and /dev in a temporary directory, and a fake
 stat() for the character device. Nothing here needs root or an Apple Mac.
@@ -60,13 +62,17 @@ BT_MAC = bytes.fromhex("0a1b2c3d4e5f")
 NONCE = bytes.fromhex("5e6f7a8b9c0d1e2f3a4b5c6d")
 KEY = bytes(range(0x40, 0x60))
 CALIBRATION = bytes(range(0x90, 0xd0))
+# The firmware image UUIDs the boot loader loaded: printed for a nub's "uuid".
 FW_UUID = "11111111-2222-3333-4444-555555555555"
+DCP_UUID = "DDF38191-93B3-324A-BC8F-643006F5AC82"
+# A UUID that names this Mac (not a firmware image): never printed.
+MAC_UUID = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"
 PANEL_SERIAL = "FAKEPANEL24680"
 SECRETS = [SERIAL.encode(), MLB_SERIAL.encode(), CHIP_ID, WIFI_MAC, BT_MAC, NONCE, KEY, CALIBRATION,
-           FW_UUID.encode(), PANEL_SERIAL.encode()]
+           MAC_UUID.encode(), PANEL_SERIAL.encode()]
 # Strings that appear only in nodes outside the allowlist.
 OUTSIDE = ["OUTSIDE-wlan", "OUTSIDE-bluetooth", "OUTSIDE-sep", "OUTSIDE-smc", "OUTSIDE-chosen",
-           "OUTSIDE-nvme", "OUTSIDE-root-model", "OUTSIDE-product-color"]
+           "OUTSIDE-nvme", "OUTSIDE-root-model", "OUTSIDE-product-color", "OUTSIDE-mcc", "OUTSIDE-ane"]
 SENSITIVE_NAMES = ["serial-number", "mlb-serial-number", "unique-chip-id", "mac-address-wifi0",
                    "local-mac-address", "boot-nonce", "random-seed", "sep-key", "gpu-calibration",
                    "panel-serial-number", "region-info", "ecid", "udid", "imei", "uuid",
@@ -96,12 +102,17 @@ def build_m3max_adt(chip="t6031"):
         # an ordinary-looking name whose value holds the serial number: dropped by value
         prop("diag-info", "board " + SERIAL + " rev 2"),
         prop("unused-slot", b"\0" * 8, placeholder=True),
+        # a uuid that is not a firmware nub's: dropped, and a secret for the value check
+        prop("uuid", MAC_UUID),
+        prop("boot-volume", "volume " + MAC_UUID),
+        # holds a firmware image's uuid: not dropped by value
+        prop("fw-note", "image " + FW_UUID),
     ])
     gfx_asc = node("gfx-asc", [prop("compatible", "iop,ascwrap-v6"),
                                prop("reg", [0x44440000, 0x1, 0x4000, 0x0])],
-                   [node("iop-gfx-nub", [prop("segment-names", b"__TEXT\0__DATA\0"),
-                                         prop("segment-ranges", [0x1000, 0, 0x2000, 0]),
-                                         prop("uuid", FW_UUID)])])
+                   [node("iop-gfx-nub0", [prop("segment-names", b"__TEXT\0__DATA\0"),
+                                          prop("segment-ranges", [0x1000, 0, 0x2000, 0]),
+                                          prop("uuid", FW_UUID)])])
     pmgr = node("pmgr", [prop("compatible", "pmgr1,t6031"),
                          prop("ps-regs", [0, 0x1000, 0x4000, 1, 0x2000, 0x4000]),
                          prop("voltage-states1", [0x100, 0x200, 0x300, 0x400]),
@@ -114,10 +125,18 @@ def build_m3max_adt(chip="t6031"):
                [node("iop-dcp-nub", [prop("segment-names", b"__TEXT\0__OS_LOG\0"),
                                      prop("asc-dram-mask", [0, 0]),
                                      prop("panel-serial-number", PANEL_SERIAL),
-                                     prop("uuid", FW_UUID)])])
+                                     prop("uuid", DCP_UUID),
+                                     # not one UUID string: dropped
+                                     prop("tunable-uuid", MAC_UUID)])])
     dcpext = [node(f"dcpext{i}", [prop("compatible", "dcpext,t6031"),
-                                  prop("reg", [0x67670000 + i * 0x10000, 0x1, 0x4000, 0])])
+                                  prop("reg", [0x67670000 + i * 0x10000, 0x1, 0x4000, 0])],
+                   [node(f"iop-dcpext{i}-nub", [prop("uuid", DCP_UUID if i < 3 else b"\x01" * 16)])])
               for i in range(4)]
+    # The memory cache controller and the Neural Engine: only their reg is printed.
+    mcc = node("mcc", [prop("compatible", "mcc,t6031"), prop("reg", [0x20000000, 0x2, 0x95000, 0]),
+                       prop("dcs-count", 8), prop("debug-tag", "OUTSIDE-mcc")])
+    ane = node("ane", [prop("compatible", "ane,t6031"), prop("reg", [0x0945c000, 0x3, 0x4000, 0]),
+                       prop("debug-tag", "OUTSIDE-ane")], [node("iop-ane-nub", [prop("uuid", FW_UUID)])])
     disp = [node("disp0", [prop("compatible", "disp0,t6031"), prop("clock-gates", [1, 2])])]
     disp += [node(f"dispext{i}", [prop("compatible", "dispext,t6031"), prop("power-gates", [i])])
              for i in range(4)]
@@ -143,7 +162,7 @@ def build_m3max_adt(chip="t6031"):
         prop("ranges", [0, 0x2, 0, 0x2, 0, 0x2]),
         prop("chip-revision", 0x11),
         prop("ecid", CHIP_ID), prop("debug-name", "OUTSIDE-root-model"),
-    ], [sgx, gfx_asc, pmgr, pmp, dcp] + dcpext + disp + darts + outside)
+    ], [sgx, gfx_asc, pmgr, pmp, dcp, mcc, ane] + dcpext + disp + darts + outside)
     chosen = node("chosen", [prop("unique-chip-id", CHIP_ID), prop("boot-nonce", NONCE),
                              prop("mac-address-wifi0", WIFI_MAC), prop("board-id", 0x99),
                              prop("debug-tag", "OUTSIDE-chosen"), prop("udid", "OUTSIDE-chosen")])
@@ -198,10 +217,15 @@ class AllowlistTest(unittest.TestCase):
         for marker in OUTSIDE:
             self.assertNotIn(marker, text)
         printed = re.findall(r"^  (\S+) \[", text, re.M)
+        # The one denied name printed: a firmware nub's uuid, and only with a UUID as its value.
         for name in printed:
-            self.assertIsNone(adt.denied_part(name), name)
+            if name != "uuid":
+                self.assertIsNone(adt.denied_part(name), name)
+        for line in re.findall(r"^  uuid \[.*$", text, re.M):
+            self.assertRegex(line, r'^  uuid \[37\] = "[0-9A-F-]{36}"$')
         for name in SENSITIVE_NAMES:
-            self.assertNotIn(name, printed)
+            if name != "uuid":
+                self.assertNotIn(name, printed)
 
     def test_m3max_shapes(self):
         for chip in BOARDS:
@@ -210,7 +234,7 @@ class AllowlistTest(unittest.TestCase):
                 self.check_private(text)
                 nodes = re.findall(r"^(/\S*)$", text, re.M)
                 self.assertEqual(nodes[:3], ["/", "/arm-io", "/arm-io/sgx"])
-                for want in ["/arm-io/gfx-asc/iop-gfx-nub", "/arm-io/pmgr", "/arm-io/pmp/iop-pmp-nub",
+                for want in ["/arm-io/gfx-asc/iop-gfx-nub0", "/arm-io/pmgr", "/arm-io/pmp/iop-pmp-nub",
                              "/arm-io/dcp/iop-dcp-nub", "/arm-io/dcpext3", "/arm-io/disp0",
                              "/arm-io/dispext3", "/arm-io/dart-disp0/mapper-disp0",
                              "/arm-io/dart-dcp/mapper-dcp", "/arm-io/dart-dcpext0", "/arm-io/dart-pmp",
@@ -235,18 +259,29 @@ class AllowlistTest(unittest.TestCase):
         self.assertEqual(re.findall(r"^  (\S+)", block("/arm-io"), re.M),
                          ["name", "compatible", "device_type", "#address-cells", "#size-cells",
                           "ranges", "chip-revision"])
+        self.assertEqual(block("/arm-io/mcc"),
+                         "  reg [16] = <0x20000000 0x00000002 0x00095000 0x00000000>\n")
+        self.assertEqual(block("/arm-io/ane"),
+                         "  reg [16] = <0x0945c000 0x00000003 0x00004000 0x00000000>\n")
+        # Its nub is not in an allowed subtree: not printed, uuid or not.
+        self.assertNotIn("/arm-io/ane/iop-ane-nub", text)
 
     def test_dropped_and_summary(self):
         text = render(build_m3max_adt())
         self.assertIn("# dropped: /arm-io/sgx gpu-calibration (name contains 'calibration')", text)
         self.assertIn("# dropped: /arm-io/sgx unique-id (name contains 'unique')", text)
         self.assertIn("# dropped: /arm-io/sgx diag-info (value holds a dropped property's value)", text)
-        self.assertIn("# dropped: /arm-io/dcp/iop-dcp-nub uuid (name contains 'uuid')", text)
+        self.assertIn("# dropped: /arm-io/dcp/iop-dcp-nub tunable-uuid (name contains 'uuid')", text)
+        self.assertIn("# dropped: /arm-io/sgx uuid (name contains 'uuid')", text)
+        self.assertIn("# dropped: /arm-io/sgx boot-volume (value holds a dropped property's value)", text)
+        self.assertIn("# dropped: /arm-io/dcpext3/iop-dcpext3-nub uuid (name contains 'uuid')", text)
         self.assertIn("# dropped: /arm-io/pmgr fuse-revision-row (name contains 'fuse')", text)
+        self.assertNotIn("iop-dcp-nub uuid (", text)
         summary = text.rstrip("\n").splitlines()[-1]
         self.assertTrue(summary.startswith("# summary: printed "), summary)
-        self.assertRegex(summary, r"dropped 8 properties \(7 by name: calibration 1, fuse 1, "
-                                  r"serial 1, unique 1, uuid 3; 1 by value\)")
+        self.assertRegex(summary, r"\(6 firmware image uuids\)")
+        self.assertRegex(summary, r"dropped 9 properties \(7 by name: calibration 1, fuse 1, "
+                                  r"serial 1, unique 1, uuid 3; 2 by value\)")
         self.assertRegex(summary, r"not printed: \d+ nodes outside the allowlist and \d+ properties")
 
     def test_value_check_needs_long_varied_values(self):
@@ -283,6 +318,180 @@ class AllowlistTest(unittest.TestCase):
         text = render(root)
         self.assertNotIn("/arm-io/sgx", text)
         self.assertNotIn('"y"', text)
+
+
+class FirmwareUuidTest(unittest.TestCase):
+    """The uuid of a firmware processor's nub names the firmware image, the same on every Mac with
+    that firmware: printed, when it is one UUID string, in a nub of an allowed node."""
+
+    def test_nub_uuids_are_printed(self):
+        text = render(build_m3max_adt())
+        block = lambda path: re.search(rf"^{re.escape(path)}\n((?:  .*\n)*)", text, re.M).group(1)
+        self.assertIn(f'  uuid [37] = "{FW_UUID}"', block("/arm-io/gfx-asc/iop-gfx-nub0"))
+        self.assertIn(f'  uuid [37] = "{FW_UUID}"', block("/arm-io/pmp/iop-pmp-nub"))
+        self.assertIn(f'  uuid [37] = "{DCP_UUID}"', block("/arm-io/dcp/iop-dcp-nub"))
+        for i in range(3):
+            self.assertIn(f'  uuid [37] = "{DCP_UUID}"', block(f"/arm-io/dcpext{i}/iop-dcpext{i}-nub"))
+        # Not a UUID string: dropped.
+        self.assertNotIn("uuid", block("/arm-io/dcpext3/iop-dcpext3-nub"))
+        # A firmware uuid is no secret, even from a nub outside the allowlist (the ANE's holds
+        # the same one): another value that holds it stays.
+        self.assertIn(f'  fw-note [43] = "image {FW_UUID}"', block("/arm-io/sgx"))
+
+    def test_only_a_nubs_own_uuid(self):
+        nub = lambda name, props: node("dcp", [prop("compatible", "dcp,t6031")], [node(name, props)])
+        cases = {
+            # outside the allowlist: never printed (and no secret either: see test_nub_uuids_are_printed)
+            "/arm-io/smc/iop-smc-nub": node("arm-io", [], [node("smc", [], [node("iop-smc-nub", [prop("uuid", FW_UUID)])])]),
+            # a node whose name only looks like a nub
+            "/arm-io/dcp/nub-iop": node("arm-io", [], [nub("nub-iop", [prop("uuid", FW_UUID)])]),
+            # a nub's other uuid properties
+            "/arm-io/dcp/iop-dcp-nub": node("arm-io", [], [nub("iop-dcp-nub", [prop("volume-uuid", FW_UUID),
+                                                                              prop("UUID", FW_UUID)])]),
+            # the value is not exactly one UUID string
+            "/arm-io/dcp/iop-dcp-nub ": node("arm-io", [], [nub("iop-dcp-nub", [prop("uuid", FW_UUID + "x")])]),
+        }
+        for what, arm_io in cases.items():
+            with self.subTest(what=what):
+                text = render(node("device-tree", [], [arm_io]))
+                self.assertNotIn(FW_UUID, text)
+                self.assertRegex(text, r"\(0 firmware image uuids\)")
+
+    def test_mac_uuid_still_drops_by_value(self):
+        text = render(build_m3max_adt())
+        self.assertNotIn(MAC_UUID, text)
+        self.assertNotIn(MAC_UUID.lower(), text.lower())
+
+
+class StageLogTest(unittest.TestCase):
+    """--stage2-log: m1n1's log of this boot, from the m1n1_stage2.log region, read-only, with the
+    same checks as the ADT, as text, with the lines that may name this Mac left out."""
+
+    LOG = (b"m1n1 v1.6.1-omarchy.aurora13\n"
+           b"Chip: 0x6031 rev 0x12\n"
+           b"ECID: 0x0123456789abcdef\n"
+           b"Serial number: C02FAKE1234\n"
+           b"preboot uuid " + MAC_UUID.encode() + b"\n"
+           b"t6031: reserved dcp-oslog@1000507c000 (0x1f000)\n"
+           b"FDT: GPU: T6031 image " + FW_UUID.encode() + b", RTKit-2419.140.12.release\n"
+           b"FDT: T6031: 7 of 7 firmware image UUIDs published\n"
+           b"a\x01b\x7fc\ttab\n"
+           + b"x" * 600 + b"\n"
+           + b"last line")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.mac = FakeMac(self.tmp.name)
+        log = self.mac.dt / "reserved-memory/flash@108d994c000"
+        self.mac.add_mtd(2, "m1n1_stage2.log", "ram", 0x4000, log)
+        (self.mac.dev / "mtd2ro").write_bytes(self.LOG + b"\0" * (0x4000 - len(self.LOG)))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def check_text(self, out):
+        self.assertTrue(out.startswith("# aurora-adt-extract: m1n1's stage 2 log of this boot"), out)
+        self.assertIn("m1n1 v1.6.1-omarchy.aurora13\n", out)
+        self.assertIn("Chip: 0x6031 rev 0x12\n", out)
+        self.assertIn("t6031: reserved dcp-oslog@1000507c000 (0x1f000)\n", out)
+        # Lines about a firmware image keep their UUIDs; a per-Mac one goes.
+        self.assertIn(f"FDT: GPU: T6031 image {FW_UUID}, RTKit-2419.140.12.release\n", out)
+        self.assertIn("FDT: T6031: 7 of 7 firmware image UUIDs published\n", out)
+        self.assertIn("a.b.c\ttab\n", out)
+        self.assertIn("x" * 512 + " (cut)\n", out)
+        self.assertIn("last line\n", out)
+        for gone in ("ECID", "0123456789abcdef", "C02FAKE1234", MAC_UUID, "\0"):
+            self.assertNotIn(gone, out)
+        self.assertRegex(out.rstrip("\n").splitlines()[-1],
+                         r"^# summary: printed \d+ lines of \d+ bytes; left out 3 lines \(ecid 1, serial 1, uuid 1\); cut 1 ")
+
+    def test_read_by_name(self):
+        code, out, err = run(["--stage2-log"], self.mac.host())
+        self.assertEqual(code, 0, err)
+        self.assertIn("MTD device mtd2 named 'm1n1_stage2.log', 16384 bytes, read-only node; reserved-memory "
+                      "node flash@108d994c000", out)
+        self.check_text(out)
+
+    def test_read_by_node_and_check(self):
+        code, out, err = run(["--stage2-log", str(self.mac.dev / "mtd2ro")], self.mac.host())
+        self.assertEqual(code, 0, err)
+        self.check_text(out)
+        code, out, err = run(["--stage2-log", "--check", str(self.mac.dev / "mtd2ro")], self.mac.host())
+        self.assertEqual(code, 0, err)
+        self.assertIn("named 'm1n1_stage2.log'", out)
+        self.assertNotIn("m1n1 v1.6.1", out)
+
+    def test_the_adt_device_is_refused(self):
+        code, out, err = run(["--stage2-log", str(self.mac.dev / "mtd1ro")], self.mac.host())
+        self.assertEqual(code, 3, err)
+        self.assertEqual(out, "")
+        self.assertIn("belongs to mtd1, named 'adt', not 'm1n1_stage2.log'", err)
+        # And the other way round.
+        code, out, err = run([str(self.mac.dev / "mtd2ro")], self.mac.host())
+        self.assertEqual(code, 3, err)
+        self.assertIn("named 'm1n1_stage2.log', not 'adt'", err)
+
+    def test_size_and_binding(self):
+        (self.mac.sys / "class/mtd/mtd2/size").write_text("8192\n")
+        code, out, err = run(["--stage2-log"], self.mac.host())
+        self.assertEqual(code, 3, err)
+        self.assertIn("has 8192 bytes, but its region flash@108d994c000 has 16384", err)
+        (self.mac.sys / "class/mtd/mtd2/size").write_text("16384\n")
+        link = self.mac.sys / "class/mtd/mtd2/of_node"
+        link.unlink()
+        link.symlink_to(self.mac.region)
+        code, out, err = run(["--stage2-log"], self.mac.host())
+        self.assertEqual(code, 3, err)
+        self.assertIn("is not bound to the region flash@108d994c000", err)
+
+    def test_no_log_device(self):
+        (self.mac.sys / "class/mtd/mtd2/name").write_text("other\n")
+        code, out, err = run(["--stage2-log"], self.mac.host())
+        self.assertEqual(code, 3, err)
+        self.assertIn("no MTD device is named m1n1_stage2.log", err)
+
+    def test_oversized_log_region_refused(self):
+        big = adt.MAX_LOG_BYTES + 0x4000
+        reg = self.mac.dt / "reserved-memory/flash@108d994c000/reg"
+        reg.write_bytes(struct.pack(">4I", 0x108, 0xd994c000, 0, big))
+        code, out, err = run(["--stage2-log"], self.mac.host())
+        self.assertEqual(code, 3, err)
+        self.assertIn(f"has {big} bytes, more than a log ({adt.MAX_LOG_BYTES})", err)
+
+    def test_raw(self):
+        # All of the region, byte for byte, but the lines that may name this Mac, overwritten.
+        region = (self.mac.dev / "mtd2ro").read_bytes()
+        proc = subprocess.run([sys.executable, "-c",
+                               "import sys, importlib.util as u; s = u.spec_from_file_location('a', sys.argv[1]); "
+                               "m = u.module_from_spec(s); s.loader.exec_module(m); "
+                               "sys.stdout.buffer.write(m.raw_log(open(sys.argv[2], 'rb').read()))",
+                               str(TOOL), str(self.mac.dev / "mtd2ro")], capture_output=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        raw = proc.stdout
+        self.assertEqual(len(raw), len(region))
+        for gone in (b"ECID", b"0123456789abcdef", b"C02FAKE1234", MAC_UUID.encode()):
+            self.assertNotIn(gone, raw)
+        self.assertIn(b"x" * len(b"ECID: 0x0123456789abcdef"), raw)
+        self.assertIn(b"a\x01b\x7fc\ttab\n", raw)
+        self.assertIn(FW_UUID.encode(), raw)
+        self.assertTrue(raw.endswith(b"last line" + b"\0" * (0x4000 - len(self.LOG))))
+        # Through the command line: the device's checks, then the same bytes.
+        code, out, err = run(["--stage2-log", "--raw"], self.mac.host())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.encode("latin-1"), raw)
+
+    def test_raw_needs_stage2_log(self):
+        proc = subprocess.run([sys.executable, str(TOOL), "--raw"], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--raw goes with --stage2-log", proc.stderr)
+
+    def test_file(self):
+        path = Path(self.tmp.name, "log.bin")
+        path.write_bytes(self.LOG)
+        proc = subprocess.run([sys.executable, str(TOOL), "--stage2-log", str(path)], capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("# source: file log.bin", proc.stdout)
+        self.check_text(proc.stdout)
 
 
 # --- Malformed input -------------------------------------------------------------------------
